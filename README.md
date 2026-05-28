@@ -31,9 +31,21 @@ dcp-lighthouse/
 ```sh
 cd server
 npm install
-npm run dev
+npm run dev    # tsc && node dist/index.js
+npm test       # tsc && node --test dist/*.test.js
 ```
 
 ## ステータス
 
-未実装。実装順序は [CLAUDE.md](CLAUDE.md) を参照。
+Phase 0 着手。実装順序は [CLAUDE.md](CLAUDE.md) を参照。
+
+- [x] scaffold (server / dashboard / docs)
+- [x] $Q レジストリ骨子 — `server/src/q-registry.ts` (scope パース・レイヤー別 read・swap history、テスト 14 件)
+- [ ] Step 1: StCollector が $Q[observe] から window を動的 read
+- [ ] Step 2: retention + 遡及的再観測 (IngestionBus.tap 上の ring buffer)
+- [ ] Step 3 / 3b: 並行 $ST オーバーレイ・チューニング割り込み・観測 UI
+
+灯台モデルのコアはドメイン非依存。Phase 0 は真値が既知のストリーム
+(Minecraft イベント + 自作異常) で機構を検証し、Phase 1 でコードテスト
+ドメイン (`test_result:v1`) に皮を貼る。詳細は
+[docs/LIGHTHOUSE_PILOT_DATA.md](docs/LIGHTHOUSE_PILOT_DATA.md) §1.5。

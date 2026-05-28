@@ -5,7 +5,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsc && node dist/index.js"
+    "dev": "tsc && node dist/index.js",
+    "test": "tsc && node --test dist/q-registry.test.js"
   },
   "dependencies": {
     "dcp-wrap": "file:../../dcp-wrap"
