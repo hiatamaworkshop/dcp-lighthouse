@@ -40,8 +40,8 @@ npm test       # tsc && node --test dist/*.test.js
 Phase 0 着手。実装順序は [CLAUDE.md](CLAUDE.md) を参照。
 
 - [x] scaffold (server / dashboard / docs)
-- [x] $Q レジストリ骨子 — `server/src/q-registry.ts` (scope パース・レイヤー別 read・swap history、テスト 14 件)
-- [ ] Step 1: StCollector が $Q[observe] から window を動的 read
+- [x] $Q レジストリ — `server/src/q-registry.ts` (scope パース・レイヤー別 read・swap history・onChange)
+- [x] Step 1: $Q[observe] → StCollector window 動的 bind — `server/src/q-collector-binding.ts` (実 collector を実行中に reshape、テスト計 24 件)
 - [ ] Step 2: retention + 遡及的再観測 (IngestionBus.tap 上の ring buffer)
 - [ ] Step 3 / 3b: 並行 $ST オーバーレイ・チューニング割り込み・観測 UI
 
