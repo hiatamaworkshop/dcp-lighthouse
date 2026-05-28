@@ -59,22 +59,37 @@ export type QRow = ["$Q", string, QParams];
 
 // ── Registry ───────────────────────────────────────────────────
 
+/** Notified after each set(). The seam an observation layer re-observes on. */
+export type QChangeListener = (scope: QScope, params: QParams) => void;
+
 export class QRegistry {
   /** keyed by canonical "<layer>:<target>[#view]" scope string. */
   private readonly store = new Map<string, QParams>();
   /** append-only swap history, in set() order, for the dashboard. */
   private readonly history: QRow[] = [];
+  private readonly listeners: QChangeListener[] = [];
 
   /**
    * Set (or replace) the parameters at a scope.
    * Accepts either a parsed QScope or a raw "<layer>:<target>" string.
-   * Each set is recorded in the swap history, even when it replaces a prior value.
+   * Each set is recorded in the swap history, even when it replaces a prior value,
+   * then change listeners are notified.
    */
   set(scope: QScope | string, params: QParams): void {
     const parsed = typeof scope === "string" ? parseScope(scope) : scope;
     const key = formatScope(parsed);
     this.store.set(key, params);
     this.history.push(["$Q", key, params]);
+    for (const l of this.listeners) l(parsed, params);
+  }
+
+  /** Register a listener fired after every set(). Returns an unregister function. */
+  onChange(listener: QChangeListener): () => void {
+    this.listeners.push(listener);
+    return () => {
+      const i = this.listeners.indexOf(listener);
+      if (i !== -1) this.listeners.splice(i, 1);
+    };
   }
 
   /**
