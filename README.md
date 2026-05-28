@@ -42,8 +42,9 @@ Phase 0 着手。実装順序は [CLAUDE.md](CLAUDE.md) を参照。
 - [x] scaffold (server / dashboard / docs)
 - [x] $Q レジストリ — `server/src/q-registry.ts` (scope パース・レイヤー別 read・swap history・onChange)
 - [x] Step 1: $Q[observe] → StCollector window 動的 bind — `server/src/q-collector-binding.ts` (実 collector を実行中に reshape)
-- [x] Step 2: retention + 遡及的再観測 — `server/src/retention-buffer.ts` (鮮度ゾーン ring on IngestionBus.tap) + `server/src/lens.ts` (`applyLens` チェーン型)。粗窓で消えるバーストを細窓 replay で注入真値通り復元 (テスト計 38 件)
-- [ ] Step 3 / 3b: 並行 $ST オーバーレイ・チューニング割り込み・観測 UI
+- [x] Step 2: retention + 遡及的再観測 — `server/src/retention-buffer.ts` (鮮度ゾーン ring on IngestionBus.tap) + `server/src/lens.ts` (`applyLens` チェーン型)。粗窓で消えるバーストを細窓 replay で注入真値通り復元
+- [x] Step 3: 並行 $ST オーバーレイ・チューニング割り込み・動的データ追加 — `server/src/lens-view.ts` (LensView / ObservationOverlay)。1ストリームを複数レンズで同時観測、$Q 変更で live 再構成、後付け view を backfill (テスト計 47 件)
+- [ ] Step 3b: Brain 向け観測 UI (スナップショット・パッケージ)
 
 灯台モデルのコアはドメイン非依存。Phase 0 は真値が既知のストリーム
 (Minecraft イベント + 自作異常) で機構を検証し、Phase 1 でコードテスト
