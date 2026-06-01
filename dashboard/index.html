@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>dcp-lighthouse — Observation Dashboard</title>
+  <style>
+    :root {
+      --bg: #0d1117;
+      --surface: #161b22;
+      --border: #30363d;
+      --text: #c9d1d9;
+      --muted: #6e7681;
+      --accent: #58a6ff;
+      --pass: #3fb950;
+      --fail: #f85149;
+      --flaky: #d29922;
+      --gap: #21262d;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: 'Courier New', monospace; font-size: 13px; }
+    header { padding: 12px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 16px; }
+    header h1 { font-size: 15px; color: var(--accent); }
+    #status-badge { font-size: 11px; padding: 2px 8px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); }
+    #status-badge.running { border-color: var(--pass); color: var(--pass); }
+    .scenario-btns { margin-left: auto; display: flex; gap: 8px; }
+    button { background: var(--surface); border: 1px solid var(--border); color: var(--text); padding: 4px 12px; border-radius: 4px; cursor: pointer; font-size: 12px; font-family: inherit; }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.active { border-color: var(--flaky); color: var(--flaky); }
+    main { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: auto auto; gap: 1px; background: var(--border); height: calc(100vh - 49px); }
+    section { background: var(--bg); padding: 14px; overflow: auto; }
+    section h2 { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 10px; }
+
+    /* Agent panel */
+    .agent-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .agent-id { width: 80px; color: var(--accent); }
+    .bar-track { flex: 1; height: 14px; background: var(--surface); border-radius: 2px; overflow: hidden; }
+    .bar-fill { height: 100%; transition: width 0.4s; }
+    .bar-fill.ok { background: var(--pass); }
+    .bar-fill.warn { background: var(--flaky); }
+    .bar-fill.fail { background: var(--fail); }
+    .rate-label { width: 44px; text-align: right; font-size: 11px; color: var(--muted); }
+
+    /* Domain heatmap */
+    .domain-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .domain-label { width: 64px; }
+    .domain-label.critical { color: var(--fail); }
+    .domain-label.normal { color: var(--flaky); }
+    .domain-label.low { color: var(--muted); }
+    .coverage-track { flex: 1; height: 14px; background: var(--surface); border-radius: 2px; overflow: hidden; }
+    .coverage-fill { height: 100%; transition: width 0.4s; background: var(--accent); }
+    .coverage-fill.gap { background: var(--fail); }
+    .coverage-num { width: 60px; text-align: right; font-size: 11px; color: var(--muted); }
+
+    /* Snapshot tiles */
+    .tile-grid { display: flex; flex-direction: column; gap: 6px; }
+    .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; }
+    .tile.spike { border-left: 3px solid var(--fail); }
+    .tile.gap { border-left: 3px solid var(--muted); }
+    .tile.step_down { border-left: 3px solid var(--flaky); }
+    .tile.step_up { border-left: 3px solid var(--pass); }
+    .tile.divergence { border-left: 3px solid var(--accent); }
+    .tile.baseline { border-left: 3px solid var(--border); }
+    .tile-label { font-size: 11px; font-weight: bold; color: var(--text); }
+    .tile-desc { font-size: 11px; color: var(--muted); margin-top: 3px; }
+    .tile-mag { float: right; font-size: 10px; color: var(--muted); }
+
+    /* Decision log */
+    #decision-log { font-size: 11px; color: var(--muted); }
+    .decision-entry { border-bottom: 1px solid var(--border); padding: 4px 0; }
+    .decision-entry .dtype { color: var(--accent); }
+    .decision-entry .dtype.rerouteSchema { color: var(--fail); }
+    .decision-entry .dtype.schemaUpdate { color: var(--flaky); }
+    .decision-entry .dtype.replayRequest { color: var(--accent); }
+
+    /* $Q change feed */
+    #q-feed { font-size: 11px; color: var(--muted); }
+    .q-row { padding: 2px 0; }
+    .q-row .scope { color: var(--pass); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>dcp-lighthouse</h1>
+    <span id="status-badge">connecting…</span>
+    <div class="scenario-btns">
+      <button onclick="runScenario('AR')">Scenario AR</button>
+      <button onclick="runScenario('CG')">Scenario CG</button>
+      <button onclick="runScenario('RC')">Scenario RC</button>
+      <button onclick="stopGen()" style="color:var(--fail)">Stop</button>
+    </div>
+  </header>
+  <main>
+    <section id="panel-agents">
+      <h2>Per-Agent Pass Rate</h2>
+      <div id="agent-bars"></div>
+    </section>
+    <section id="panel-domains">
+      <h2>Domain Coverage (bit coverage / required)</h2>
+      <div id="domain-bars"></div>
+    </section>
+    <section id="panel-snapshot">
+      <h2>Observation Snapshot (Brain-facing tiles)</h2>
+      <div class="tile-grid" id="tiles"></div>
+    </section>
+    <section id="panel-decisions">
+      <h2>Brain Decisions / $Q Changes</h2>
+      <div id="decision-log"></div>
+      <div style="margin-top:10px; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.08em;">$Q History</div>
+      <div id="q-feed" style="margin-top:6px;"></div>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
