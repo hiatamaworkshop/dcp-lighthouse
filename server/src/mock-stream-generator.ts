@@ -12,6 +12,22 @@
 
 import { randomBits, type DomainName } from "./bitpos.js";
 
+// ── Seeded RNG ──────────────────────────────────────────────────────────────
+
+/**
+ * Simple mulberry32-variant PRNG. Returns a factory seeded by `seed`.
+ * Produces numbers in [0, 1). Use this in tests to make event sequences
+ * reproducible: two generators built with the same seed emit the same stream.
+ */
+export function seededRng(seed: number): () => number {
+  let s = (seed >>> 0) || 1;
+  return (): number => {
+    s = Math.imul(s ^ (s >>> 15), s | 1);
+    s ^= s + Math.imul(s ^ (s >>> 7), s | 61);
+    return ((s ^ (s >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 // ── Event schema ────────────────────────────────────────────────────────────
 
 export type TestResult = "pass" | "fail" | "flaky";
@@ -48,6 +64,14 @@ const AGENT_IDS = ["agent-A", "agent-B", "agent-C", "agent-D"] as const;
 
 // ── Generator options ───────────────────────────────────────────────────────
 
+/** Construction-time options — inject rng/sleepFn for deterministic tests. */
+export interface MockStreamGeneratorOptions {
+  /** RNG function (default: Math.random). Inject seededRng(n) for reproducible output. */
+  rng?: () => number;
+  /** Async sleep function (default: real setTimeout). Inject an instant resolver in tests. */
+  sleepFn?: (ms: number) => Promise<void>;
+}
+
 export interface GeneratorOptions {
   rate?: number;              // events/sec (default 50)
   lateArrivalRate?: number;   // fraction 0..1 delayed (default 0)
@@ -83,6 +107,13 @@ export class MockStreamGenerator {
   private eventCount = 0;
   private commitCounter = 0;
   private scenarioLog: ScenarioLogEntry[] = [];
+  private readonly rng: () => number;
+  private readonly sleepFn: (ms: number) => Promise<void>;
+
+  constructor(opts: MockStreamGeneratorOptions = {}) {
+    this.rng = opts.rng ?? Math.random;
+    this.sleepFn = opts.sleepFn ?? sleep;
+  }
 
   /** Subscribe to emitted events. Returns unsubscribe function. */
   onEvent(listener: EventListener): () => void {
@@ -154,9 +185,9 @@ export class MockStreamGenerator {
   // agent-C pass rate drops from 95% → 70% for 30s, then recovers
 
   private async runAR(): Promise<void> {
-    await sleep(10_000 * this.timingScale);  // 10s baseline before regression
+    await this.sleepFn(10_000 * this.timingScale);  // 10s baseline before regression
     this.profiles["agent-C"] = { ...this.profiles["agent-C"], passRate: 0.70 };
-    await sleep(30_000 * this.timingScale);  // 30s regression window
+    await this.sleepFn(30_000 * this.timingScale);  // 30s regression window
     this.profiles["agent-C"] = { ...DEFAULT_PROFILES["agent-C"] };
   }
 
@@ -165,7 +196,7 @@ export class MockStreamGenerator {
 
   private async runCG(): Promise<void> {
     for (let b = 16; b <= 23; b++) this.cgExcludeBits.add(b);
-    await sleep(30_000 * this.timingScale);
+    await this.sleepFn(30_000 * this.timingScale);
     this.cgExcludeBits.clear();
   }
 
@@ -175,21 +206,29 @@ export class MockStreamGenerator {
 
   private async runRC(): Promise<void> {
     this.scenarioLog.push({ phase: "baseline", ts: Date.now(), agentId: "agent-C", passRate: DEFAULT_PROFILES["agent-C"].passRate });
-    await sleep(5_000 * this.timingScale);   // 5s quiet lead-in
+    await this.sleepFn(5_000 * this.timingScale);   // 5s quiet lead-in
     // 2s burst: agent-C fail rate spikes to 80%
     this.profiles["agent-C"] = { ...this.profiles["agent-C"], passRate: 0.20 };
     this.scenarioLog.push({ phase: "burst_start", ts: Date.now(), agentId: "agent-C", passRate: 0.20 });
-    await sleep(2_000 * this.timingScale);
+    await this.sleepFn(2_000 * this.timingScale);
     this.profiles["agent-C"] = { ...DEFAULT_PROFILES["agent-C"] };
     this.scenarioLog.push({ phase: "burst_end", ts: Date.now(), agentId: "agent-C", passRate: DEFAULT_PROFILES["agent-C"].passRate });
-    await sleep(53_000 * this.timingScale);  // remainder of 60s coarse window
+    await this.sleepFn(53_000 * this.timingScale);  // remainder of 60s coarse window
     this.scenarioLog.push({ phase: "scenario_end", ts: Date.now() });
   }
 
   // ── Event generation ───────────────────────────────────────────────────────
 
+  /**
+   * Generate and emit a single event. Exposed for tests so determinism can be
+   * verified without relying on real timers.
+   */
+  singleTick(): void {
+    this.tick();
+  }
+
   private tick(): void {
-    const agentId = AGENT_IDS[Math.floor(Math.random() * AGENT_IDS.length)];
+    const agentId = AGENT_IDS[Math.floor(this.rng() * AGENT_IDS.length)];
     const event = this.makeEvent(agentId);
     this.emit(event);
   }
@@ -198,15 +237,15 @@ export class MockStreamGenerator {
     const profile = this.profiles[agentId] ?? DEFAULT_PROFILES["agent-A"];
     const n = Math.floor(
       profile.areasPerTest.min +
-      Math.random() * (profile.areasPerTest.max - profile.areasPerTest.min + 1),
+      this.rng() * (profile.areasPerTest.max - profile.areasPerTest.min + 1),
     );
-    let areas = randomBits(n, profile.domainBias);
+    let areas = randomBits(n, profile.domainBias, this.rng);
     // Apply CG exclusion
     if (this.cgExcludeBits.size > 0) {
       areas = areas.filter((b) => !this.cgExcludeBits.has(b));
     }
 
-    const r = Math.random();
+    const r = this.rng();
     let result: TestResult;
     if (r < profile.passRate) {
       result = "pass";
@@ -226,15 +265,15 @@ export class MockStreamGenerator {
       agentId,
       areas,
       result,
-      duration: Math.round(15 + Math.random() * 30),
+      duration: Math.round(15 + this.rng() * 30),
       weight: 1.0,
       commitHash: this.commitCounter.toString(16).padStart(7, "0"),
     };
   }
 
   private emit(event: TestEvent): void {
-    if (this.lateArrivalRate > 0 && Math.random() < this.lateArrivalRate) {
-      const delay = 500 + Math.random() * 2500;
+    if (this.lateArrivalRate > 0 && this.rng() < this.lateArrivalRate) {
+      const delay = 500 + this.rng() * 2500;
       setTimeout(() => this.broadcast(event), delay);
     } else {
       this.broadcast(event);
