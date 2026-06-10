@@ -191,11 +191,20 @@ Minecraft で検証済みのパターン。
 
 ---
 
-## 次のステップ
+## 現在の状態 (2026-06-01)
 
-scaffold (package.json, tsconfig.json, .gitignore, README.md) は配置済み。設計ドキュメントは stabilized。次は実装フェーズ:
+**Phase 0 + Phase 1 実装完了。テスト計 72 件。**
 
-1. **Phase 0 着手**: `dcp-wrap` 側で $Q[observe] パラメータ抽出 (Step 1) を実装し、Minecraft デモで動作確認 (既存44テストを壊さない)
-2. Step 2 (遡及的再観測) で真値照合の検証ハーネスを作り、別レンズ再観測で隠れた構造が復元できることを数値確認
-3. Step 3 / 3b でチューニング割り込み・動的追加・観測UIを積む
-4. Phase 0 が真値で検証できたら Phase 1 (Step 4-) で test_result:v1 に皮を貼る
+- Phase 0 (Step 1–3b): $Q レジストリ・retention buffer・ObservationOverlay・SnapshotCurator すべて実装済み
+- Phase 1 (Step 4–7): MockStreamGenerator / TestorAdapter / bitpos / RuleBrain / DashboardServer + UI すべて実装済み
+- 起動: `cd server && npm run dev` → `http://localhost:3001` (SSE dashboard on port 3001)
+- シナリオ: `/demo/start?scenario=AR|CG|RC`
+
+## 次のステップ候補
+
+パイロット実装は一通り揃っている。残りは検証・拡張フェーズ:
+
+1. **エンドツーエンド検証**: サーバーを実際に起動し、AR/CG/RC 各シナリオで Brain 決定が PILOT_DATA.md §10 の基準 (AR: 5秒以内 rerouteSchema、CG: 10秒以内 schemaUpdate、RC: fine-window で注入真値と一致) を満たすか確認
+2. **retention 参照ゾーン**: 鮮度ゾーン (ring buffer) の上に疎化レイヤーを追加 (memory: project_retention_design.md に設計メモあり)
+3. **レンズチェーン完成**: `applyLens` の group_by / downsample / decay / agg_func 段を実装 (現状 window_ms のみ)
+4. **ClaudeBrain**: `BRAIN_MODE=claude` で `BrainAdapter` を差し替え (インターフェースは確保済み)

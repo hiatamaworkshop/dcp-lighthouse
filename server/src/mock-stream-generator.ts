@@ -52,6 +52,8 @@ export interface GeneratorOptions {
   rate?: number;              // events/sec (default 50)
   lateArrivalRate?: number;   // fraction 0..1 delayed (default 0)
   seed?: number;              // for reproducible commits/ids; not a full RNG seed
+  /** Multiplier for scenario sleep durations (default 1.0). Use <1 in tests to compress time. */
+  timingScale?: number;
 }
 
 // ── MockStreamGenerator ─────────────────────────────────────────────────────
@@ -64,6 +66,7 @@ export class MockStreamGenerator {
   private timer: ReturnType<typeof setInterval> | null = null;
   private rate = 50;
   private lateArrivalRate = 0;
+  private timingScale = 1.0;
   private activeScenario: string | null = null;
   private scenarioOverrides: Partial<Record<string, Partial<AgentProfile>>> = {};
   private cgExcludeBits: Set<number> = new Set();
@@ -83,6 +86,7 @@ export class MockStreamGenerator {
     if (this.timer) return;
     this.rate = opts.rate ?? 50;
     this.lateArrivalRate = opts.lateArrivalRate ?? 0;
+    this.timingScale = opts.timingScale ?? 1.0;
     const intervalMs = 1000 / this.rate;
     this.timer = setInterval(() => this.tick(), intervalMs);
   }
@@ -128,9 +132,9 @@ export class MockStreamGenerator {
   // agent-C pass rate drops from 95% → 70% for 30s, then recovers
 
   private async runAR(): Promise<void> {
-    await sleep(10_000);  // 10s baseline before regression
+    await sleep(10_000 * this.timingScale);  // 10s baseline before regression
     this.profiles["agent-C"] = { ...this.profiles["agent-C"], passRate: 0.70 };
-    await sleep(30_000);  // 30s regression window
+    await sleep(30_000 * this.timingScale);  // 30s regression window
     this.profiles["agent-C"] = { ...DEFAULT_PROFILES["agent-C"] };
   }
 
@@ -139,7 +143,7 @@ export class MockStreamGenerator {
 
   private async runCG(): Promise<void> {
     for (let b = 16; b <= 23; b++) this.cgExcludeBits.add(b);
-    await sleep(30_000);
+    await sleep(30_000 * this.timingScale);
     this.cgExcludeBits.clear();
   }
 
@@ -148,12 +152,12 @@ export class MockStreamGenerator {
   // is averaged away by the coarse window but recoverable via fine re-observation.
 
   private async runRC(): Promise<void> {
-    await sleep(5_000);   // 5s quiet lead-in
+    await sleep(5_000 * this.timingScale);   // 5s quiet lead-in
     // 2s burst: agent-C fail rate spikes to 80%
     this.profiles["agent-C"] = { ...this.profiles["agent-C"], passRate: 0.20 };
-    await sleep(2_000);
+    await sleep(2_000 * this.timingScale);
     this.profiles["agent-C"] = { ...DEFAULT_PROFILES["agent-C"] };
-    await sleep(53_000);  // remainder of 60s coarse window
+    await sleep(53_000 * this.timingScale);  // remainder of 60s coarse window
   }
 
   // ── Event generation ───────────────────────────────────────────────────────
