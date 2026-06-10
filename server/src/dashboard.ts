@@ -22,6 +22,7 @@ import type { QRegistry } from "./q-registry.js";
 import type { SnapshotCurator } from "./snapshot-curator.js";
 import type { ObservationOverlay } from "./lens-view.js";
 import type { BrainDecision } from "./brain-adapter.js";
+import type { SnapshotPackage } from "./snapshot-curator.js";
 
 export interface DashboardOptions {
   port?: number;
@@ -77,6 +78,18 @@ export class DashboardServer {
     });
   }
 
+  /**
+   * Called when Brain triggers a replayRequest and the buffer has been re-observed.
+   * Pushes the fine-window SnapshotPackage to all decision subscribers so the
+   * dashboard can render the "coarse hid this, fine reveals it" contrast.
+   */
+  broadcastReplay(pkg: SnapshotPackage): void {
+    if (this.decisionSubs.size === 0) return;
+    for (const res of this.decisionSubs) {
+      sseWrite(res, { type: "replay_snapshot", ts: pkg.generatedAt, replayPackage: pkg });
+    }
+  }
+
   /** Called by the tick loop — broadcasts snapshot + any decisions. */
   broadcast(snapshot: STSnapshot, decisions: BrainDecision[]): void {
     if (this.snapshotSubs.size === 0 && this.decisionSubs.size === 0) return;
@@ -126,6 +139,8 @@ export class DashboardServer {
         res.end(JSON.stringify({ error: "scenario must be AR|CG|RC" }));
         return;
       }
+      // Reset brain state so each scenario run starts fresh
+      this.brain.reset();
       this.generator.runScenario(scenario).catch(console.error);
       jsonHeaders(res);
       res.end(JSON.stringify({ started: scenario }));

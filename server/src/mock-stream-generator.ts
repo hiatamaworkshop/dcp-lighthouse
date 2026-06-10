@@ -56,6 +56,16 @@ export interface GeneratorOptions {
   timingScale?: number;
 }
 
+// ── Scenario truth log ──────────────────────────────────────────────────────
+
+/** One entry in the injection truth log — records what was injected and when. */
+export interface ScenarioLogEntry {
+  phase: string;
+  ts: number;
+  agentId?: string;
+  passRate?: number;
+}
+
 // ── MockStreamGenerator ─────────────────────────────────────────────────────
 
 export type EventListener = (event: TestEvent) => void;
@@ -72,6 +82,7 @@ export class MockStreamGenerator {
   private cgExcludeBits: Set<number> = new Set();
   private eventCount = 0;
   private commitCounter = 0;
+  private scenarioLog: ScenarioLogEntry[] = [];
 
   /** Subscribe to emitted events. Returns unsubscribe function. */
   onEvent(listener: EventListener): () => void {
@@ -80,6 +91,16 @@ export class MockStreamGenerator {
       const i = this.listeners.indexOf(listener);
       if (i !== -1) this.listeners.splice(i, 1);
     };
+  }
+
+  /**
+   * Return the injection truth log for the last scenario run.
+   * Each entry records a phase transition (burst_start, burst_end, etc.)
+   * with wall-clock ts and the injected passRate. Use this in tests to
+   * verify that fine-window replay recovers the known injection values.
+   */
+  getScenarioLog(): readonly ScenarioLogEntry[] {
+    return this.scenarioLog;
   }
 
   start(opts: GeneratorOptions = {}): void {
@@ -113,6 +134,7 @@ export class MockStreamGenerator {
   async runScenario(id: "AR" | "CG" | "RC"): Promise<void> {
     if (this.activeScenario) return;
     this.activeScenario = id;
+    this.scenarioLog = [];
     try {
       switch (id) {
         case "AR": await this.runAR(); break;
@@ -152,12 +174,16 @@ export class MockStreamGenerator {
   // is averaged away by the coarse window but recoverable via fine re-observation.
 
   private async runRC(): Promise<void> {
+    this.scenarioLog.push({ phase: "baseline", ts: Date.now(), agentId: "agent-C", passRate: DEFAULT_PROFILES["agent-C"].passRate });
     await sleep(5_000 * this.timingScale);   // 5s quiet lead-in
     // 2s burst: agent-C fail rate spikes to 80%
     this.profiles["agent-C"] = { ...this.profiles["agent-C"], passRate: 0.20 };
+    this.scenarioLog.push({ phase: "burst_start", ts: Date.now(), agentId: "agent-C", passRate: 0.20 });
     await sleep(2_000 * this.timingScale);
     this.profiles["agent-C"] = { ...DEFAULT_PROFILES["agent-C"] };
+    this.scenarioLog.push({ phase: "burst_end", ts: Date.now(), agentId: "agent-C", passRate: DEFAULT_PROFILES["agent-C"].passRate });
     await sleep(53_000 * this.timingScale);  // remainder of 60s coarse window
+    this.scenarioLog.push({ phase: "scenario_end", ts: Date.now() });
   }
 
   // ── Event generation ───────────────────────────────────────────────────────

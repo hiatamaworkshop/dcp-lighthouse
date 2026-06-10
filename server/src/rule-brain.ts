@@ -13,8 +13,13 @@
  *          → emit rerouteSchema proposal for that agent
  *   CG  — a domain's coverage gap persists for GAP_TICKS consecutive ticks
  *          → emit schemaUpdate proposal
- *   RC  — a pass rate window is near-flat but just below REPLAY_TRIGGER_FLOOR
+ *   RC  — an agent pass rate briefly dips into [BRIEF_DIP_FLOOR, REGRESSION_THRESHOLD)
+ *          then recovers above REGRESSION_THRESHOLD
  *          → emit replayRequest so RetentionBuffer is re-observed at fine window
+ *          Rationale: the coarse live window averages away short dips; fine replay
+ *          recovers the burst shape. Trigger on recovery (not on dip) so it fires
+ *          exactly when the live view declares "all clear" — the moment that
+ *          retroactive re-observation adds the most information.
  */
 
 import type { BrainAdapter, BrainDecision } from "./brain-adapter.js";
@@ -26,8 +31,13 @@ const REGRESSION_THRESHOLD = 0.80;   // pass rate below this = regression suspec
 const REGRESSION_TICKS = 3;          // must persist for N ticks to fire
 const GAP_THRESHOLD = 4;             // bits: gap larger than this triggers CG
 const GAP_TICKS = 5;                 // gap must persist for N ticks
-const REPLAY_TRIGGER_FLOOR = 0.85;   // near-flat but below this → suspect hidden burst
-const REPLAY_TRIGGER_CEIL  = 0.95;   // above this = normal, no replay needed
+
+// RC: brief dip zone is [BRIEF_DIP_FLOOR, REGRESSION_THRESHOLD).
+// Below BRIEF_DIP_FLOOR the dip is too severe (AR handles the sustained case);
+// above REGRESSION_THRESHOLD the agent is healthy. The trigger fires on
+// *recovery* from the dip zone, not on entry — so the live view says "all clear"
+// and we retroactively inspect the buffer to see what caused the dip.
+const BRIEF_DIP_FLOOR = 0.40;        // below this = too severe for brief-dip RC path
 const REPLAY_FINE_WINDOW_MS = 1000;
 
 // ── RuleBrain ───────────────────────────────────────────────────────────────
@@ -43,10 +53,10 @@ export class RuleBrain implements BrainAdapter {
   /** Domains for which schemaUpdate has already been emitted. */
   private readonly gapAlerted = new Set<string>();
 
-  /** Consecutive ticks in the replay-suspect band. */
-  private replayBandTicks = 0;
-  /** Whether a replayRequest was already emitted this session. */
-  private replayEmitted = false;
+  /** Agents currently in the brief-dip zone [BRIEF_DIP_FLOOR, REGRESSION_THRESHOLD). */
+  private readonly agentDipActive = new Set<string>();
+  /** Agents for which replayRequest has already been emitted this session. */
+  private readonly agentReplayEmitted = new Set<string>();
 
   private lastSnapshot: STSnapshot | null = null;
   private pendingDecisions: BrainDecision[] = [];
@@ -65,6 +75,20 @@ export class RuleBrain implements BrainAdapter {
 
   describe(): string {
     return "RuleBrain v1 (AR/CG/RC rules)";
+  }
+
+  /**
+   * Reset per-scenario state. Call between scenario runs so each run starts
+   * with a clean slate — e.g. so RC can fire again in a second scenario.
+   */
+  reset(): void {
+    this.agentRegressionTicks.clear();
+    this.rerouted.clear();
+    this.domainGapTicks.clear();
+    this.gapAlerted.clear();
+    this.agentDipActive.clear();
+    this.agentReplayEmitted.clear();
+    this.pendingDecisions = [];
   }
 
   // ── AR: agent regression ──────────────────────────────────────────────────
@@ -123,31 +147,42 @@ export class RuleBrain implements BrainAdapter {
   }
 
   // ── RC: retroactive re-observation trigger ────────────────────────────────
+  //
+  // Fires when an agent's pass rate briefly dips into [BRIEF_DIP_FLOOR,
+  // REGRESSION_THRESHOLD) and then recovers above REGRESSION_THRESHOLD.
+  // The coarse live window smears the dip over several ticks; the fine-window
+  // replay of the RetentionBuffer reveals the original burst shape.
 
   private checkRC(agents: AgentStats[]): void {
-    if (this.replayEmitted) return;
+    for (const a of agents) {
+      const inDipZone =
+        a.passRate >= BRIEF_DIP_FLOOR && a.passRate < REGRESSION_THRESHOLD;
 
-    // Overall pass rate across all agents in this tick
-    const total = agents.reduce((s, a) => s + a.eventCount, 0);
-    const passes = agents.reduce((s, a) => s + a.passRate * a.eventCount, 0);
-    const overallRate = total > 0 ? passes / total : 1;
-
-    if (overallRate >= REPLAY_TRIGGER_FLOOR && overallRate < REPLAY_TRIGGER_CEIL) {
-      this.replayBandTicks++;
-      if (this.replayBandTicks >= 3) {
-        this.replayEmitted = true;
-        this.pendingDecisions.push({
-          type: "replayRequest",
-          reason: `Overall pass rate ${(overallRate * 100).toFixed(1)}% in suspect band [${(REPLAY_TRIGGER_FLOOR * 100).toFixed(0)}%–${(REPLAY_TRIGGER_CEIL * 100).toFixed(0)}%) for ${this.replayBandTicks} ticks — requesting fine-window re-observation`,
-          qProposal: {
-            scope: "observe:test_result:v1#fine",
-            params: { window_ms: REPLAY_FINE_WINDOW_MS },
-          },
-          meta: { overallPassRate: overallRate, targetWindowMs: REPLAY_FINE_WINDOW_MS },
-        });
+      if (inDipZone) {
+        this.agentDipActive.add(a.agentId);
+      } else if (
+        a.passRate >= REGRESSION_THRESHOLD &&
+        this.agentDipActive.has(a.agentId)
+      ) {
+        // Recovery from brief dip: emit replayRequest once per session
+        this.agentDipActive.delete(a.agentId);
+        if (!this.agentReplayEmitted.has(a.agentId)) {
+          this.agentReplayEmitted.add(a.agentId);
+          this.pendingDecisions.push({
+            type: "replayRequest",
+            reason: `Agent ${a.agentId} recovered from a brief pass-rate dip — requesting fine-window re-observation to recover burst shape averaged by coarse window`,
+            qProposal: {
+              scope: "observe:test_result:v1#fine",
+              params: { window_ms: REPLAY_FINE_WINDOW_MS },
+            },
+            meta: { agentId: a.agentId, targetWindowMs: REPLAY_FINE_WINDOW_MS },
+          });
+        }
+      } else if (a.passRate < BRIEF_DIP_FLOOR) {
+        // Too severe: remove from brief-dip tracking (AR handles sustained case)
+        this.agentDipActive.delete(a.agentId);
       }
-    } else {
-      this.replayBandTicks = 0;
+      // passRate >= REGRESSION_THRESHOLD, no active dip: healthy, nothing to do
     }
   }
 }

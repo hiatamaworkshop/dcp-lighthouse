@@ -71,12 +71,15 @@ setInterval(() => {
   if (decisions.length > 0) {
     for (const d of decisions) {
       console.log(`[brain] ${d.type}: ${d.reason}`);
-      // RC replayRequest: re-observe the retention buffer at the fine window
+      // RC replayRequest: re-observe the retention buffer at the proposed fine window
       if (d.type === "replayRequest" && d.qProposal) {
-        registry.set(d.qProposal.scope, d.qProposal.params as Record<string, unknown> & { window_ms?: number });
-        const fineResult = buffer.replay({ window_ms: 1_000 });
+        const proposedParams = d.qProposal.params as Record<string, unknown> & { window_ms?: number };
+        registry.set(d.qProposal.scope, proposedParams);
+        const windowMs = proposedParams.window_ms ?? 1_000;
+        const fineResult = buffer.replay({ window_ms: windowMs });
         const pkg = curator.curate(fineResult);
         console.log(`[brain] replay snapshot: ${pkg.tiles.length} tiles, span ${JSON.stringify(pkg.spanMs)}`);
+        dashboard.broadcastReplay(pkg);
       }
     }
   }

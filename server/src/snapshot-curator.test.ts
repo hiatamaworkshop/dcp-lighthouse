@@ -215,6 +215,47 @@ describe("SnapshotCurator — baseline tile", () => {
   });
 });
 
+// ── Dip detection (RC signal) ────────────────────────────────────────────────
+
+describe("SnapshotCurator — dip detection (RC fine-window signal)", () => {
+  it("detects a dip via negative z-score against known injected truth", () => {
+    // Mirrors the RC E2E injection: 8 baseline windows at 0.95, 2 burst windows at 0.10
+    const ws = [
+      ...Array.from({ length: 8 }, (_, i) => ({ windowStart: i * 1000, mean: 0.95 })),
+      { windowStart: 8000, mean: 0.10 },
+      { windowStart: 9000, mean: 0.10 },
+    ];
+    const result = buildResult(ws);
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false });
+    const pkg = curator.curate(result);
+    const dipTiles = pkg.tiles.filter((t) => t.shapeTag === "dip");
+    assert.ok(dipTiles.length >= 1, "should find at least one dip tile");
+    assert.ok(dipTiles.some((t) => t.regionStart >= 8000), "dip should be in the burst region");
+  });
+
+  it("dip tile carries a positive magnitude (absolute z-score)", () => {
+    const ws = [
+      ...Array.from({ length: 8 }, (_, i) => ({ windowStart: i * 1000, mean: 0.95 })),
+      { windowStart: 8000, mean: 0.10 },
+    ];
+    const result = buildResult(ws);
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false });
+    const pkg = curator.curate(result);
+    const dipTile = pkg.tiles.find((t) => t.shapeTag === "dip");
+    assert.ok(dipTile?.magnitude !== undefined && dipTile.magnitude > 0,
+      "dip magnitude should be a positive number (|z|)");
+  });
+
+  it("emits no dip tiles when stream is flat", () => {
+    const result = buildResult(
+      Array.from({ length: 10 }, (_, i) => ({ windowStart: i * 1000, mean: 0.95 })),
+    );
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false });
+    const pkg = curator.curate(result);
+    assert.equal(pkg.tiles.filter((t) => t.shapeTag === "dip").length, 0);
+  });
+});
+
 // ── maxTiles cap ────────────────────────────────────────────────────────────
 
 describe("SnapshotCurator — maxTiles cap", () => {

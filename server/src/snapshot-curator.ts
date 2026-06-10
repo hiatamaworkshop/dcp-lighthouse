@@ -29,6 +29,7 @@ import type { LensResult, WindowStat } from "./lens.js";
 
 export type ShapeTag =
   | "spike"
+  | "dip"
   | "gap"
   | "step_up"
   | "step_down"
@@ -173,7 +174,7 @@ export class SnapshotCurator {
 
     const tiles: SnapshotTile[] = [];
 
-    // ── 1. Spikes ──────────────────────────────────────────────
+    // ── 1. Spikes and dips ────────────────────────────────────
     for (const w of windows) {
       if (globalStats.stdDev === 0) break;
       const z = (w.mean - globalStats.mean) / globalStats.stdDev;
@@ -186,6 +187,16 @@ export class SnapshotCurator {
           windows: [w],
           description: `Window mean ${w.mean.toFixed(3)} is ${z.toFixed(1)}σ above the observed baseline (${globalStats.mean.toFixed(3)}). Count: ${w.count}.`,
           magnitude: z,
+        });
+      } else if (z <= -this.opts.spikeZThreshold) {
+        tiles.push({
+          label: `dip at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${globalStats.mean.toFixed(3)})`,
+          shapeTag: "dip",
+          regionStart: w.windowStart,
+          regionEnd: w.windowEnd,
+          windows: [w],
+          description: `Window mean ${w.mean.toFixed(3)} is ${Math.abs(z).toFixed(1)}σ below the observed baseline (${globalStats.mean.toFixed(3)}). Count: ${w.count}.`,
+          magnitude: Math.abs(z),
         });
       }
     }
@@ -237,7 +248,7 @@ export class SnapshotCurator {
     // ── 6. Sort by magnitude desc, cap ────────────────────────
     tiles.sort((a, b) => {
       // gaps and divergence before baseline in ties
-      const order = { spike: 0, step_up: 1, step_down: 1, divergence: 2, gap: 3, baseline: 4 };
+      const order = { spike: 0, dip: 0, step_up: 1, step_down: 1, divergence: 2, gap: 3, baseline: 4 };
       const magA = a.magnitude ?? 0;
       const magB = b.magnitude ?? 0;
       if (Math.abs(magA - magB) > 0.01) return magB - magA;
