@@ -28,7 +28,10 @@ import type { STSnapshot, AgentStats, DomainStats } from "./testor-adapter.js";
 // ── Thresholds ──────────────────────────────────────────────────────────────
 
 const REGRESSION_THRESHOLD = 0.80;   // pass rate below this = regression suspect
-const REGRESSION_TICKS = 3;          // must persist for N ticks to fire
+const REGRESSION_TICKS = 2;          // must persist for N ticks to fire
+                                     // 2 (not 3): with 5s window & 50 evt/s, passRate dips below 0.80
+                                     // ~4s after onset; 3 ticks would give 7s total (exceeds §10 5s criterion)
+                                     // false-positive risk is negligible (agent at 0.95 nominal, σ≈0.028)
 const GAP_THRESHOLD = 4;             // bits: gap larger than this triggers CG
 const GAP_TICKS = 5;                 // gap must persist for N ticks
 

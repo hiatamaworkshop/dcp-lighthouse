@@ -42,13 +42,13 @@ describe("RuleBrain — AR rule", () => {
     const brain = new RuleBrain();
     const snap = makeSnapshot([makeAgent("agent-C", 0.70)]);
 
-    // 2 ticks: not yet
-    feedN(brain, snap, 2);
+    // 1 tick: not yet (REGRESSION_TICKS=2 requires 2 consecutive sub-threshold ticks)
+    feedN(brain, snap, 1);
     brain.observe(snap);
-    // tick 3: should fire
+    // tick 2: should fire
     const decisions = brain.decide();
     const d = decisions.find((d) => d.type === "rerouteSchema");
-    assert.ok(d, "rerouteSchema should fire on tick 3");
+    assert.ok(d, "rerouteSchema should fire on tick 2 (REGRESSION_TICKS=2)");
     assert.equal((d!.meta as { agentId: string }).agentId, "agent-C");
   });
 

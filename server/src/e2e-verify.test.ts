@@ -49,6 +49,66 @@ async function waitForDecision(
   return null;
 }
 
+// ── AR: production-config latency (virtual clock, 異議 1 fix) ─────────────────
+//
+// Verifies that rerouteSchema fires within 5s of regression onset using
+// production-equivalent parameters (windowMs=5000ms, tick=1000ms).
+//
+// Analysis (rate=50 evt/s, agent-C ≈ 12.5 evt/s, passRate=0.70):
+//   t+0:  regression start. window=[t-5000,t], all baseline → passRate≈0.95
+//   t+4s: window has 1s baseline + 4s regression agent-C
+//         (12.5 + 50 events, 11.875 + 35 passes → passRate=0.75) < 0.80 → tick 1
+//   t+5s: all 5s in window are regression → passRate=0.70 → tick 2 → fires!
+//   Latency = 5s = §10 criterion. Requires REGRESSION_TICKS=2 (was 3 → 7s).
+
+describe("E2E AR — production-config (virtual clock, 異議 1 fix)", () => {
+  test("rerouteSchema fires within 5s with production windowMs=5000ms", () => {
+    let vt = 0;
+    const clock = () => vt;
+
+    const gen  = new MockStreamGenerator({ rng: seededRng(42), clockFn: clock });
+    const adap = new TestorAdapter({ windowMs: 5_000, clockFn: clock });
+    const brain = new RuleBrain();
+
+    gen.onEvent((e) => adap.push(e));
+
+    // Phase 1: 500 baseline events (10s at 50 evt/s), vt=0..9980
+    for (let i = 0; i < 500; i++) {
+      vt = i * 20;
+      gen.singleTick();
+    }
+
+    // Phase 2: regression — agent-C passRate drops to 0.70
+    const REGRESSION_START = 10_000;
+    gen.setAgentProfile("agent-C", { passRate: 0.70, flakyRate: 0.01, areasPerTest: { min: 2, max: 6 } });
+    for (let i = 0; i < 500; i++) {
+      vt = REGRESSION_START + i * 20;
+      gen.singleTick();
+    }
+
+    // Brain ticks at 1s virtual intervals (production tick rate)
+    let reroute: BrainDecision | null = null;
+    for (let t = REGRESSION_START; t <= REGRESSION_START + 10_000; t += 1_000) {
+      vt = t;
+      brain.observe(adap.snapshot());
+      const d = brain.decide().find((d) =>
+        d.type === "rerouteSchema" &&
+        (d.meta as { agentId?: string })?.agentId === "agent-C"
+      );
+      if (d) { reroute = d; break; }
+    }
+
+    assert.ok(reroute !== null,
+      "AR: rerouteSchema should fire within 10s window in production config");
+
+    const latencyTicks = (vt - REGRESSION_START) / 1_000;
+    assert.ok(
+      latencyTicks <= 5,
+      `AR latency ${latencyTicks}s exceeds 5s §10 criterion (production config: windowMs=5000ms, REGRESSION_TICKS=2)`,
+    );
+  });
+});
+
 // ── AR: agent regression ─────────────────────────────────────────────────────
 
 describe("E2E AR — agent regression", { timeout: 15_000 }, () => {
