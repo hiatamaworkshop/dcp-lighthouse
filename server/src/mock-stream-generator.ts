@@ -64,12 +64,14 @@ const AGENT_IDS = ["agent-A", "agent-B", "agent-C", "agent-D"] as const;
 
 // ── Generator options ───────────────────────────────────────────────────────
 
-/** Construction-time options — inject rng/sleepFn for deterministic tests. */
+/** Construction-time options — inject rng/sleepFn/clockFn for deterministic tests. */
 export interface MockStreamGeneratorOptions {
   /** RNG function (default: Math.random). Inject seededRng(n) for reproducible output. */
   rng?: () => number;
   /** Async sleep function (default: real setTimeout). Inject an instant resolver in tests. */
   sleepFn?: (ms: number) => Promise<void>;
+  /** Clock function for event ts (default: Date.now). Inject a virtual clock in tests. */
+  clockFn?: () => number;
 }
 
 export interface GeneratorOptions {
@@ -109,10 +111,12 @@ export class MockStreamGenerator {
   private scenarioLog: ScenarioLogEntry[] = [];
   private readonly rng: () => number;
   private readonly sleepFn: (ms: number) => Promise<void>;
+  private readonly clockFn: () => number;
 
   constructor(opts: MockStreamGeneratorOptions = {}) {
     this.rng = opts.rng ?? Math.random;
     this.sleepFn = opts.sleepFn ?? sleep;
+    this.clockFn = opts.clockFn ?? Date.now;
   }
 
   /** Subscribe to emitted events. Returns unsubscribe function. */
@@ -260,7 +264,7 @@ export class MockStreamGenerator {
 
     return {
       $schema: "test_result:v1",
-      ts: Date.now(),
+      ts: this.clockFn(),
       testId: `${agentId}::test_${(this.eventCount % 50).toString().padStart(3, "0")}`,
       agentId,
       areas,

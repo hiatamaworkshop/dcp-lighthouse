@@ -85,22 +85,24 @@ export interface STSnapshot {
 /** Accumulates test events in a sliding window and produces STSnapshots. */
 export class TestorAdapter {
   private readonly windowMs: number;
+  private readonly clockFn: () => number;
   private readonly events: (TestEvent & { _received: number })[] = [];
 
-  constructor(opts: { windowMs?: number } = {}) {
+  constructor(opts: { windowMs?: number; clockFn?: () => number } = {}) {
     this.windowMs = opts.windowMs ?? 5000;
+    this.clockFn = opts.clockFn ?? Date.now;
   }
 
   /** Ingest one event (call from MockStreamGenerator.onEvent). */
   push(event: TestEvent): void {
-    this.events.push({ ...event, _received: Date.now() });
+    this.events.push({ ...event, _received: this.clockFn() });
     this.evict();
   }
 
   /** Produce a snapshot of the current window. */
   snapshot(): STSnapshot {
     this.evict();
-    const now = Date.now();
+    const now = this.clockFn();
     const window = this.events.filter((e) => e.ts >= now - this.windowMs);
 
     // Per-agent stats
@@ -135,7 +137,7 @@ export class TestorAdapter {
   }
 
   private evict(): void {
-    const cutoff = Date.now() - this.windowMs * 2;
+    const cutoff = this.clockFn() - this.windowMs * 2;
     while (this.events.length > 0 && this.events[0].ts < cutoff) {
       this.events.shift();
     }

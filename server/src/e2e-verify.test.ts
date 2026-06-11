@@ -15,12 +15,14 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { MockStreamGenerator } from "./mock-stream-generator.js";
-import { TestorAdapter } from "./testor-adapter.js";
+import { MockStreamGenerator, seededRng } from "./mock-stream-generator.js";
+import { TestorAdapter, agentExtractor } from "./testor-adapter.js";
 import { RetentionBuffer } from "./retention-buffer.js";
 import { RuleBrain } from "./rule-brain.js";
+import { SnapshotCurator } from "./snapshot-curator.js";
 import type { BrainDecision } from "./brain-adapter.js";
 import type { LensEvent } from "./lens.js";
+import type { TestEvent } from "./mock-stream-generator.js";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
@@ -133,7 +135,114 @@ describe("E2E CG — coverage gap", { timeout: 15_000 }, () => {
   });
 });
 
-// ── RC: retroactive re-observation ──────────────────────────────────────────
+// ── RC: Brain-initiated full chain ───────────────────────────────────────────
+//
+// Verifies the complete RC chain:
+//   generator (seeded) → adapter → RuleBrain dip detection → replayRequest
+//   → RetentionBuffer.replay → SnapshotCurator → dip tile at burst position
+//
+// Uses virtual clock (clockFn) to control event timestamps deterministically
+// without real wall-clock waits. Uses agentExtractor("agent-C") so the
+// replay focuses on agent-C's signal — fine window makes the 0.20 burst
+// visible against the 0.95 baseline.
+//
+// Timeline (virtual ms):
+//   t=[0, 19980)    — 1000 baseline events (20s, 50/s, all agents healthy)
+//   t=[20000,21980) — 100 burst events (2s, agent-C passRate=0.20)
+//   t=[22000,26980) — 250 recovery events (5s, all agents healthy again)
+//   Brain ticks at t=20000,21000,...,28000 (1s interval)
+//   Expected: replayRequest fires when adapter window clears the burst (~t=26000)
+
+describe("E2E RC — Brain-initiated full chain (異議 2 fix)", () => {
+  test("full chain: generator → adapter → Brain dip → replayRequest → curator dip tile", () => {
+    let vt = 0;
+    const clock = () => vt;
+
+    const rng = seededRng(42);
+    const gen  = new MockStreamGenerator({ rng, clockFn: clock });
+    // Per-agent buffer for agent-C: fine-window replay shows 0.20 burst cleanly against 0.95 baseline
+    const buf  = new RetentionBuffer<TestEvent>(agentExtractor("agent-C"), {
+      retentionWindowMs: 120_000,
+      now: clock,
+    });
+    const adap = new TestorAdapter({ windowMs: 5_000, clockFn: clock });
+    const brain = new RuleBrain();
+    const curator = new SnapshotCurator();
+
+    gen.onEvent((e) => {
+      adap.push(e);
+      buf.observe(e, "test_result:v1");
+    });
+
+    // Phase 1: 1000 baseline events at 20ms intervals → 20 fine-window anchors
+    for (let i = 0; i < 1_000; i++) {
+      vt = i * 20;
+      gen.singleTick();
+    }
+
+    // Phase 2: burst — agent-C fails at passRate=0.20 for 2s (100 events)
+    const BURST_START = 20_000;
+    const BURST_END   = 21_980;
+    gen.setAgentProfile("agent-C", { passRate: 0.20, flakyRate: 0.01, areasPerTest: { min: 2, max: 6 } });
+    for (let i = 0; i < 100; i++) {
+      vt = BURST_START + i * 20;
+      gen.singleTick();
+    }
+
+    // Phase 3: recovery — agent-C back to 0.95
+    gen.setAgentProfile("agent-C", { passRate: 0.95, flakyRate: 0.01, areasPerTest: { min: 2, max: 6 } });
+    for (let i = 0; i < 250; i++) {
+      vt = 22_000 + i * 20;
+      gen.singleTick();
+    }
+
+    // Brain tick loop: observe adapter snapshots at 1s virtual intervals.
+    // Dip zone entry expected at vt≈22000 (window=[17000,22000] shows burst mix).
+    // Recovery expected at vt≈26000 (burst events age out of 5s window).
+    let replayDecision: BrainDecision | null = null;
+    for (let t = 20_000; t <= 30_000; t += 1_000) {
+      vt = t;
+      brain.observe(adap.snapshot());
+      const d = brain.decide().find((d) => d.type === "replayRequest");
+      if (d) { replayDecision = d; break; }
+    }
+
+    assert.ok(
+      replayDecision !== null,
+      "Brain should fire replayRequest after detecting and recovering from agent-C dip",
+    );
+
+    // Execute replay as index.ts would: use qProposal.params.window_ms
+    const fineMs = (replayDecision!.qProposal!.params as { window_ms: number }).window_ms;
+    assert.equal(fineMs, 1_000, "replayRequest should propose fine window of 1s");
+
+    // Replay full retained buffer at fine granularity (20 baseline + 2 burst + 5 recovery windows)
+    const fineResult = buf.replay({ window_ms: fineMs });
+    const pkg = curator.curate(fineResult);
+
+    const dipTiles = pkg.tiles.filter((t) => t.shapeTag === "dip");
+    assert.ok(
+      dipTiles.length >= 1,
+      `fine-window curator should produce ≥1 dip tile. Got tiles: [${pkg.tiles.map((t) => t.shapeTag).join(", ")}]`,
+    );
+
+    // Dip tile position must align with injection truth (burst region)
+    const dip = dipTiles[0];
+    assert.ok(
+      dip.regionStart >= BURST_START && dip.regionStart < BURST_END + 1_000,
+      `dip tile regionStart=${dip.regionStart} should align with burst region [${BURST_START}, ${BURST_END})`,
+    );
+
+    // Dip tile mean must reflect the injected passRate=0.20 (from the windows inside the tile)
+    const dipMean = dip.windows[0].mean;
+    assert.ok(
+      dipMean < 0.60,
+      `dip tile window mean=${dipMean.toFixed(3)} should be well below baseline (injection: agent-C passRate=0.20)`,
+    );
+  });
+});
+
+// ── RC: retroactive re-observation (arithmetic) ─────────────────────────────
 
 describe("E2E RC — retroactive re-observation", () => {
   test("fine-window replay reveals injected burst; coarse averages it out", () => {
