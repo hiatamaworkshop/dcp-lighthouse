@@ -275,3 +275,100 @@ dcp-wrap は `../dcp-wrap/` にある。灯台側が使う拡張点は3つのみ
 | 発見 4 (replay 処理不徹底) | △ broadcastReplay 済み / 区間指定 replay は未 |
 | 発見 5 (Phase 1 テスト 0 件) | ✅ 103 件 (rule-brain / mock-stream-generator / snapshot-curator 追加) |
 | 発見 6 (決定論性の欠如) | ✅ seededRng + sleepFn injection 実装 |
+
+---
+
+## 2026-06-11 — 実装チェック (検証レビュー、上記引き継ぎの裏取り)
+
+### 確認できたこと
+
+- 103/103 テスト pass を実行して確認
+- 発見 1 (RC band) / 2 (dip タグ) / 4 一部 (window_ms 尊重 + broadcastReplay) / 5 / 6 の解消はソースで裏取り済み。
+  per-agent dip+recovery 設計・`reset()` の `/demo/start` 配線・rng/sleepFn/timingScale/scenarioLog すべて実在
+- 記載誤り 1 点: E2E ハーネスは `server/src/e2e-harness.ts` ではなく **`server/src/e2e-verify.test.ts`**
+
+### 異議 1: 発見 3「✅ 実測済み」は過大主張 → △ に格下げ
+
+- AR テストは adapter window **3s** / brain tick **200ms** / timingScale 0.2 の**緩和構成**で計測している
+- 本番配線 (index.ts: window 5s / tick 1000ms) は未計測。本番構成の机上見積は依然 ~5–6s で境界線上
+- 計測クロックも scaled onset の 300ms 後に開始 → レイテンシ 0.3s 過小評価
+- → 本番パラメータ (or 厳密な相似縮小) で再計測。超過するなら REGRESSION_TICKS / adapter window の調整を実測込みで
+
+### 異議 2: RC の Brain-initiated 経路が E2E 未検証
+
+- e2e-verify の RC テストは RetentionBuffer への直接注入。
+  generator → adapter → RuleBrain dip 検出 → replayRequest → replay → curator dip タイル、の**連鎖をどこも通っていない**
+- §10「Re-observation must be Brain-initiated, not pre-scripted」の E2E 証明が無い (unit では発火のみ検証)
+- scenarioLog の真値 (burst_start/end ts) と curator タイル位置・大きさの**照合も未実施** — 真値ログは取れているのに使われていない
+- → sleepFn/rng 注入でフルチェーン 1 本を決定論的に書く。RC は概念の主役なのでここが本丸
+
+### 異議 3: RC dip 検出に較正リスク 2 つ (発見 1 と同類の「ベースラインとの突き合わせ漏れ」)
+
+- **「brief」に時間上限が無い**: AR の 30s 持続 regression (0.70) も dip zone [0.40, 0.80) に滞在
+  → 回復時に replayRequest 発火 → AR シナリオで reroute + replay の 2 決定が出る。
+  意図的ならその旨を文書化、違うなら dip 持続 tick 上限を追加
+- **ベースライン静穏性が統計的に破れる**: agent-B (0.88) は 5s window ~62 events → σ≈0.04
+  → P(window rate < 0.80) ≈ 2–3%/tick → 数十秒〜数分のベースライン走行で偽 replayRequest。
+  §10「シナリオ間は静か」に抵触。unit テストは固定 0.92 入力なのでこのノイズを観測できない
+- → 対策候補: dip 深さ要件 (例 < 0.75) / dip 2-tick 連続要件 / **長時間ベースライン静穏テストの追加 (§10 quiet 基準のテスト化)**
+
+### 次の作業 (推奨順)
+
+1. 異議 3 の較正修正 + ベースライン静穏テスト (seeded rng で決定論的に長時間走らせる)
+2. 異議 2 のフルチェーン RC E2E (scenarioLog 真値 ↔ curator タイル照合まで含めて)
+3. 異議 1 の本番構成 AR 再計測
+4. 既載の残課題: 区間指定 replay (scenarioLog の ts を fromTs/toTs に流用するのが最短) → dashboard UI の粗/細対比描画
+5. その後 §B (レンズ残段。着手前に LensResult 構造変化の curator 影響設計) → §C → §D (ClaudeBrain は §12 A/B 実験を先に)
+
+---
+
+## 2026-06-11 — 異議 1–3 解消 (監査フィードバック対応)
+
+### 完了した修正
+
+**異議 3 対応** (commit `447e350`)
+
+- `DIP_REQUIRE_TICKS = 2` / `DIP_MAX_TICKS = 4` を `rule-brain.ts` の `checkRC` に追加
+  - シングル tick のノイズ (agent-B σ≈0.04) で replayRequest が発火しなくなった
+  - AR 持続 regression (4+ tick で DIP_MAX_TICKS 超過) 後の回復で replayRequest が出なくなった
+  - `agentDipTicks: Map<string, number>` フィールド追加、`reset()` でクリア
+- 新規テスト 5 件: single-tick guard / 2-tick trigger / DIP_MAX_TICKS boundary / AR overlap / 500-tick binomial baseline quiet
+  - baseline quiet: seededRng(2025) + 200 events/tick + 500 tick → 偽 replayRequest 0 件
+
+**異議 2 対応** (commit `6e4a311`)
+
+- `clockFn?: () => number` を `MockStreamGeneratorOptions` と `TestorAdapter` の constructor に追加
+  - makeEvent の `ts: Date.now()` → `ts: this.clockFn()`
+  - TestorAdapter の snapshot/evict/push も clockFn を使用
+- RC フルチェーン E2E テスト追加 (seededRng(42) + virtual clock):
+  - 1000 baseline ticks (vt=0–19980) → 100 burst ticks (agent-C passRate=0.20) → 250 recovery ticks
+  - Brain tick loop at 1s virtual intervals → replayRequest 発火確認
+  - buf.replay + SnapshotCurator → dip tile が burst region に存在
+  - dip tile windowMean < 0.60 (injection truth: passRate=0.20)
+  - §10「Brain-initiated, not pre-scripted」の連鎖証明完了
+
+**異議 1 対応** (commit `6598c2c`)
+
+- `REGRESSION_TICKS = 3` → `2` に変更 (`rule-brain.ts`)
+  - 本番構成 (windowMs=5000ms, tick=1000ms, 50 evt/s) の机上計算:
+    regression 4s 後に passRate < 0.80、REGRESSION_TICKS=3 → 7s (§10 超過)、2 → 5s (ちょうど境界)
+  - 偽発火リスク: agent baseline 0.88–0.95、σ≈0.028 → P(< 0.80) ≈ P(Z < −5) ≈ 0 (無視できる)
+- 本番構成仮想クロック AR テスト追加: seededRng(42) + clockFn + windowMs=5000 + 1s tick → latencyTicks ≤ 5 を確認
+
+### テスト数
+
+| 時点 | テスト数 |
+|---|---|
+| 2026-06-11 引き継ぎ時点 | 103 件 |
+| 異議 3 修正後 | 108 件 |
+| 異議 2 修正後 | 109 件 |
+| 異議 1 修正後 | **110 件 (現在、全 pass)** |
+
+### 残課題 (更新)
+
+異議 1–3 はすべて解消済み (✅)。残りは以前の未実装リスト:
+
+- ロードマップ 4 残り: RetentionBuffer.replay への fromTs/toTs 区間指定 + dashboard UI 粗/細対比
+- §B: applyLens の group_by/downsample/decay/agg_func 実装 (LensResult 構造変化の curator 影響を先に設計)
+- §C: retention 参照ゾーン (疎化レイヤー)
+- §D: ClaudeBrain (§12 A/B 実験を先に)
