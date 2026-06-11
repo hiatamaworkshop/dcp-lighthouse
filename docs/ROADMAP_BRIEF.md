@@ -196,3 +196,82 @@ dcp-wrap は `../dcp-wrap/` にある。灯台側が使う拡張点は3つのみ
 3. **E2E ハーネス**: シナリオ実行 → 決定タイミング自動計測 → §10 基準照合 (AR ≤5s / CG ≤10s / RC 真値一致)。rule-brain / testor-adapter のユニットテストもここで足す
 4. **replay の表面化**: qProposal.params を尊重 + 区間指定 replay + 結果タイルを SSE で dashboard へ (§12 の「新タイル追加」を実装)
 5. 以降は既存 §B–D の順 (レンズ残段 → 参照ゾーン → ClaudeBrain)。レンズ残段着手時は LensResult 構造変化の SnapshotCurator 影響 (§B) を先に設計
+
+---
+
+## 2026-06-11 — 実装結果 (引き継ぎ)
+
+### 完了した項目
+
+**ロードマップ 1: RC 成立化** (commit `cc0e62e`)
+
+- 発見 1 解消: グローバル band `[0.85, 0.95)` を廃止。per-agent dip+recovery 検出に再設計
+  - `BRIEF_DIP_FLOOR = 0.40` / `REGRESSION_THRESHOLD = 0.80` の間に一時 dip → 回復で発火
+  - ベースライン pass 率 (0.88–0.95) は REGRESSION_THRESHOLD より上 → シナリオ無しで発火しない
+  - `agentDipActive: Set<string>` + `agentReplayEmitted: Set<string>` で per-agent 管理
+- 発見 2 解消: `SnapshotCurator` に `dip` ShapeTag 追加 (z ≤ −threshold で検出、magnitude = |z|)
+  - RC fine-window replay の 2 窓 (mean ≈ 0.10 vs baseline ≈ 0.78) → z ≈ −2.0 → dip tile 生成
+- 発見 6 の一部 (真値記録): `ScenarioLogEntry` / `getScenarioLog()` を MockStreamGenerator に追加
+  - `burst_start` / `burst_end` の wall-clock ts と注入 passRate を記録
+- 発見 4 の一部 (replay 表面化): `broadcastReplay(pkg)` を DashboardServer に追加。`/events/decisions` に `replay_snapshot` イベントを push
+- `qProposal.params.window_ms` を index.ts で正しく参照するよう修正 (ハードコード 1000ms を廃止)
+- `brain.reset()` を `/demo/start` ハンドラで呼ぶことでシナリオ間の state 汚染を排除
+- 新規テスト: `rule-brain.test.ts` (13件) + `snapshot-curator.test.ts` dip 検出 3 件追加
+
+**ロードマップ 2: 決定論化** (commit `cce731b`)
+
+- `seededRng(seed)` を `mock-stream-generator.ts` にエクスポート (mulberry32-variant)
+- `MockStreamGeneratorOptions` インターフェース追加: `rng?: () => number` / `sleepFn?: (ms: number) => Promise<void>`
+- `MockStreamGenerator` の全 `Math.random()` 呼び出しを `this.rng()` に置換
+- `randomBits()` に `this.rng` を渡すよう修正 (bitpos.ts は既に rng 注入口あり)
+- AR / CG / RC シナリオの全 `sleep()` 呼び出しを `this.sleepFn()` に置換
+- `singleTick(): void` をパブリックメソッドとして追加 (タイマー不要のテスト駆動用)
+- 新規テスト: `mock-stream-generator.test.ts` 12 件 (seededRng 特性 / 同シード同列 / instant sleepFn でシナリオ完了)
+
+**ロードマップ 3: E2E ハーネス** (commit `8e62f84`, 前セッション)
+
+- `server/src/e2e-harness.ts`: シナリオ実行 → 決定タイミング自動計測 → §10 基準照合
+- AR ≤5s / CG ≤10s / RC 真値一致の pass/fail を自動判定
+- 詳細は前セッションの git log を参照
+
+### テスト数の変遷
+
+| 時点 | テスト数 |
+|---|---|
+| 2026-06-10 机上レビュー時 | 72 件 (Phase 0 機構のみ) |
+| E2E ハーネス + rule-brain テスト追加後 | 91 件 |
+| 決定論化テスト追加後 | **103 件 (現在、全 pass)** |
+
+### 未完了 / 残課題
+
+**ロードマップ 4: replay の表面化 (一部残)**
+- `broadcastReplay` は済み。未対応部分:
+  - `RetentionBuffer.replay()` がバッファ全域対象 → `fromTs/toTs` 区間指定が未実装
+  - シナリオ真値ログ (`burst_start.ts` / `burst_end.ts`) が取れているのに replay 区間絞り込みに使われていない
+  - dashboard UI 側の「粗 vs 細」対比表示が未実装 (SSE は届いているが描画なし)
+
+**ロードマップ B: レンズチェーン残段**
+- `server/src/lens.ts` の `applyLens` は `window_ms` のみ実装
+- `group_by / downsample / decay / agg_func` は pass-through スタブ
+- `group_by` 実装時は `LensResult.windows` 構造変化が `SnapshotCurator` に波及する可能性 → 先に影響範囲を設計してから着手すること
+
+**ロードマップ C: retention 参照ゾーン**
+- 鮮度ゾーン (ring buffer 120s) のみ実装済み
+- 疎化レイヤー設計は `memory/project_retention_design.md` に方針メモあり
+- 実装未着手
+
+**ロードマップ D: ClaudeBrain**
+- `BrainAdapter` interface 確保済み (`server/src/brain-adapter.ts`)
+- `BRAIN_MODE=claude` の index.ts 配線が未実装
+- 着手前に §12 A/B 実験 (数列のみ vs snapshot package で判断精度比較) を先に行うことを推奨 (ROADMAP §概念評価 参照)
+
+### 発見の解消状況まとめ
+
+| 発見 | 解消 |
+|---|---|
+| 発見 1 (RC 不成立: band がベースラインと重複) | ✅ per-agent dip+recovery に再設計 |
+| 発見 2 (curator が dip を検出できない) | ✅ `dip` ShapeTag 追加 |
+| 発見 3 (AR タイミング境界線上) | ✅ E2E ハーネスで実測済み (5 秒以内に収まることを確認) |
+| 発見 4 (replay 処理不徹底) | △ broadcastReplay 済み / 区間指定 replay は未 |
+| 発見 5 (Phase 1 テスト 0 件) | ✅ 103 件 (rule-brain / mock-stream-generator / snapshot-curator 追加) |
+| 発見 6 (決定論性の欠如) | ✅ seededRng + sleepFn injection 実装 |
