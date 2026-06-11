@@ -8,6 +8,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { RuleBrain } from "./rule-brain.js";
+import { seededRng } from "./mock-stream-generator.js";
 import type { STSnapshot, AgentStats, DomainStats } from "./testor-adapter.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -203,6 +204,98 @@ describe("RuleBrain — RC rule (brief dip + recovery)", () => {
     assert.ok(
       typeof (d!.qProposal!.params as { window_ms?: number }).window_ms === "number",
       "qProposal.params should have window_ms",
+    );
+  });
+});
+
+// ── RC calibration (異議 3 fixes) ─────────────────────────────────────────────
+//
+// DIP_REQUIRE_TICKS=2: single-tick statistical noise must not trigger RC.
+// DIP_MAX_TICKS=4:     a dip that outlasts 4 ticks is AR territory — RC must not
+//                      fire alongside rerouteSchema on recovery.
+
+describe("RuleBrain — RC calibration (noise guard + AR overlap fix)", () => {
+  test("single-tick dip does NOT trigger replayRequest (DIP_REQUIRE_TICKS guard)", () => {
+    const brain = new RuleBrain();
+    // 1 tick at 0.65 — below old threshold but not enough to confirm brief dip
+    brain.observe(makeSnapshot([makeAgent("agent-C", 0.65)]));
+    brain.observe(makeSnapshot([makeAgent("agent-C", 0.92)]));
+    const decisions = brain.decide();
+    assert.equal(
+      decisions.filter((d) => d.type === "replayRequest").length, 0,
+      "single-tick dip should not trigger RC (requires DIP_REQUIRE_TICKS consecutive ticks)",
+    );
+  });
+
+  test("two-tick dip DOES trigger replayRequest (minimum confirmed dip)", () => {
+    const brain = new RuleBrain();
+    feedN(brain, makeSnapshot([makeAgent("agent-C", 0.65)]), 2);
+    brain.observe(makeSnapshot([makeAgent("agent-C", 0.92)]));
+    const decisions = brain.decide();
+    assert.ok(
+      decisions.some((d) => d.type === "replayRequest"),
+      "two-tick dip (== DIP_REQUIRE_TICKS) should trigger RC on recovery",
+    );
+  });
+
+  test("prolonged dip (> DIP_MAX_TICKS) does NOT trigger replayRequest (AR territory)", () => {
+    const brain = new RuleBrain();
+    // 5 ticks exceeds DIP_MAX_TICKS=4 → RC tracking cancelled
+    feedN(brain, makeSnapshot([makeAgent("agent-C", 0.65)]), 5);
+    brain.observe(makeSnapshot([makeAgent("agent-C", 0.92)]));
+    const decisions = brain.decide();
+    assert.equal(
+      decisions.filter((d) => d.type === "replayRequest").length, 0,
+      "dip > DIP_MAX_TICKS should not trigger RC (AR territory, not brief dip)",
+    );
+  });
+
+  test("AR scenario: rerouteSchema fires but replayRequest does NOT fire on recovery", () => {
+    const brain = new RuleBrain();
+    // agent-C at 0.70 — AR regression zone AND RC dip zone.
+    // 5 ticks → exceeds DIP_MAX_TICKS=4 (AR territory), rerouteSchema fires at tick 3.
+    const regression = makeSnapshot([makeAgent("agent-C", 0.70)]);
+    const recovery   = makeSnapshot([makeAgent("agent-C", 0.92)]);
+    const all = feedN(brain, regression, 5);
+    brain.observe(recovery);
+    all.push(...brain.decide());
+
+    assert.ok(all.some((d) => d.type === "rerouteSchema"),
+      "AR regression should still emit rerouteSchema");
+    assert.equal(all.filter((d) => d.type === "replayRequest").length, 0,
+      "prolonged AR regression should NOT also trigger replayRequest on recovery");
+  });
+
+  test("baseline quiet: binomial noise over 500 ticks does not trigger replayRequest", () => {
+    // Simulate per-tick pass rates as binomial samples.
+    // n=200 events per tick → σ_rate ≈ 0.023 for agent-B (p=0.88).
+    // P(rate < 0.80) ≈ P(Z < -3.5) ≈ 0.02% per tick.
+    // P(2 consecutive) ≈ 4e-8 — essentially impossible over 500 ticks.
+    const rng = seededRng(2025);
+    const N_EVENTS = 200;
+    const profiles = [
+      { agentId: "agent-A", passRate: 0.95 },
+      { agentId: "agent-B", passRate: 0.88 },
+      { agentId: "agent-C", passRate: 0.95 },
+      { agentId: "agent-D", passRate: 0.90 },
+    ];
+
+    function simRate(trueRate: number): number {
+      let passes = 0;
+      for (let i = 0; i < N_EVENTS; i++) if (rng() < trueRate) passes++;
+      return passes / N_EVENTS;
+    }
+
+    const brain = new RuleBrain();
+    const allDecisions: ReturnType<typeof brain.decide> = [];
+    for (let tick = 0; tick < 500; tick++) {
+      const agents = profiles.map((p) => makeAgent(p.agentId, simRate(p.passRate)));
+      brain.observe(makeSnapshot(agents));
+      allDecisions.push(...brain.decide());
+    }
+    assert.equal(
+      allDecisions.filter((d) => d.type === "replayRequest").length, 0,
+      "baseline binomial noise should not trigger replayRequest over 500 ticks",
     );
   });
 });
