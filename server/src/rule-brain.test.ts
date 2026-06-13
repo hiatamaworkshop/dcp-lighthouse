@@ -35,34 +35,58 @@ function feedN(brain: RuleBrain, snap: STSnapshot, n: number) {
   return all;
 }
 
+/**
+ * Establish a healthy per-agent baseline before a regression/dip scenario.
+ * Per-agent thresholds (baseline − δ) require WARMUP_TICKS=10 healthy
+ * observations before AR/RC fire; feed a margin over that.
+ */
+const WARMUP = 12;
+function warmup(brain: RuleBrain, agents: AgentStats[], ticks = WARMUP) {
+  feedN(brain, makeSnapshot(agents), ticks);
+}
+
 // ── AR rule ──────────────────────────────────────────────────────────────────
 
-describe("RuleBrain — AR rule", () => {
-  test("rerouteSchema fires after REGRESSION_TICKS below threshold", () => {
+describe("RuleBrain — AR rule (per-agent baseline)", () => {
+  test("rerouteSchema fires after REGRESSION_TICKS below the learned baseline", () => {
     const brain = new RuleBrain();
-    const snap = makeSnapshot([makeAgent("agent-C", 0.70)]);
+    // Establish baseline ~0.95 → threshold ~0.85
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
+    const snap = makeSnapshot([makeAgent("agent-C", 0.70)]); // 0.70 < 0.85
 
-    // 1 tick: not yet (REGRESSION_TICKS=2 requires 2 consecutive sub-threshold ticks)
+    // 1 tick below threshold: not yet (REGRESSION_TICKS=2)
     feedN(brain, snap, 1);
     brain.observe(snap);
     // tick 2: should fire
     const decisions = brain.decide();
     const d = decisions.find((d) => d.type === "rerouteSchema");
-    assert.ok(d, "rerouteSchema should fire on tick 2 (REGRESSION_TICKS=2)");
+    assert.ok(d, "rerouteSchema should fire on the 2nd sub-threshold tick (REGRESSION_TICKS=2)");
     assert.equal((d!.meta as { agentId: string }).agentId, "agent-C");
   });
 
-  test("rerouteSchema does not fire above threshold", () => {
+  test("low-baseline agent does NOT fire just for being below the global 0.80", () => {
+    // The core of the 静穏 fix: agent-B's 0.88 is its baseline, not a regression.
+    // threshold ≈ 0.78, so steady 0.88 never fires.
+    const brain = new RuleBrain();
+    const snap = makeSnapshot([makeAgent("agent-B", 0.88)]);
+    const decisions = feedN(brain, snap, 30);
+    assert.equal(
+      decisions.filter((d) => d.type === "rerouteSchema").length, 0,
+      "a steady low-baseline agent must not be flagged as regressing",
+    );
+  });
+
+  test("rerouteSchema does not fire while the agent stays at its baseline", () => {
     const brain = new RuleBrain();
     const snap = makeSnapshot([makeAgent("agent-A", 0.95)]);
-    const decisions = feedN(brain, snap, 10);
+    const decisions = feedN(brain, snap, 30);
     assert.equal(decisions.filter((d) => d.type === "rerouteSchema").length, 0);
   });
 
   test("rerouteSchema fires only once per regression (no spam)", () => {
     const brain = new RuleBrain();
-    const snap = makeSnapshot([makeAgent("agent-C", 0.70)]);
-    const decisions = feedN(brain, snap, 10);
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
+    const decisions = feedN(brain, makeSnapshot([makeAgent("agent-C", 0.70)]), 10);
     const reroutes = decisions.filter((d) => d.type === "rerouteSchema");
     assert.equal(reroutes.length, 1, "should fire exactly once per regression session");
   });
@@ -71,13 +95,24 @@ describe("RuleBrain — AR rule", () => {
     const brain = new RuleBrain();
     const low = makeSnapshot([makeAgent("agent-C", 0.70)]);
     const high = makeSnapshot([makeAgent("agent-C", 0.95)]);
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
     // Trigger regression
     feedN(brain, low, 3);
-    // Recovery
-    feedN(brain, high, 2);
+    // Recovery (baseline updates resume, stays ~0.95)
+    feedN(brain, high, 3);
     // Second regression: should fire again
     const decisions = feedN(brain, low, 3);
     assert.ok(decisions.some((d) => d.type === "rerouteSchema"), "should re-arm after recovery");
+  });
+
+  test("no AR firing during warmup (baseline not yet trusted)", () => {
+    const brain = new RuleBrain();
+    // Drop immediately, before WARMUP_TICKS=10 — threshold is null, nothing fires.
+    const decisions = feedN(brain, makeSnapshot([makeAgent("agent-C", 0.30)]), 8);
+    assert.equal(
+      decisions.filter((d) => d.type === "rerouteSchema").length, 0,
+      "regression must not fire before the agent's baseline is established",
+    );
   });
 });
 
@@ -111,7 +146,7 @@ describe("RuleBrain — CG rule", () => {
 // ── RC rule ──────────────────────────────────────────────────────────────────
 
 describe("RuleBrain — RC rule (brief dip + recovery)", () => {
-  test("replayRequest does NOT fire at healthy baseline (0.92)", () => {
+  test("replayRequest does NOT fire at healthy baseline", () => {
     const brain = new RuleBrain();
     const snap = makeSnapshot([
       makeAgent("agent-A", 0.95),
@@ -119,14 +154,15 @@ describe("RuleBrain — RC rule (brief dip + recovery)", () => {
       makeAgent("agent-C", 0.95),
       makeAgent("agent-D", 0.90),
     ]);
-    const decisions = feedN(brain, snap, 20);
+    const decisions = feedN(brain, snap, 30);
     assert.equal(decisions.filter((d) => d.type === "replayRequest").length, 0,
-      "baseline passRate (0.88–0.95) is above REGRESSION_THRESHOLD — should not trigger RC");
+      "each agent sits at its own baseline — no dip below its threshold, no RC");
   });
 
-  test("replayRequest fires after agent dips into [0.40, 0.80) then recovers", () => {
+  test("replayRequest fires after agent dips below its threshold then recovers", () => {
     const brain = new RuleBrain();
-    const dip  = makeSnapshot([makeAgent("agent-C", 0.65)]);
+    warmup(brain, [makeAgent("agent-C", 0.95)]); // threshold ~0.85
+    const dip  = makeSnapshot([makeAgent("agent-C", 0.65)]); // in [0.40, 0.85)
     const high = makeSnapshot([makeAgent("agent-C", 0.92)]);
 
     // 3 ticks in dip zone
@@ -141,6 +177,7 @@ describe("RuleBrain — RC rule (brief dip + recovery)", () => {
 
   test("replayRequest does NOT fire for passRate below BRIEF_DIP_FLOOR (0.40) — too severe, AR handles", () => {
     const brain = new RuleBrain();
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
     const severe = makeSnapshot([makeAgent("agent-C", 0.20)]);
     const high   = makeSnapshot([makeAgent("agent-C", 0.92)]);
 
@@ -153,6 +190,7 @@ describe("RuleBrain — RC rule (brief dip + recovery)", () => {
 
   test("replayRequest fires only once per session", () => {
     const brain = new RuleBrain();
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
     const dip  = makeSnapshot([makeAgent("agent-C", 0.65)]);
     const high = makeSnapshot([makeAgent("agent-C", 0.92)]);
 
@@ -167,9 +205,7 @@ describe("RuleBrain — RC rule (brief dip + recovery)", () => {
     brain.observe(high);
     all.push(...brain.decide());
 
-    // Count total replayRequests from the whole session via feedN above
-    // We can't re-count from feedN — test the property via reset instead
-    // This test just ensures it doesn't fire when already emitted
+    // Already emitted — should not fire a second time without reset
     assert.equal(all.filter((d) => d.type === "replayRequest").length, 0,
       "already emitted — should not fire a second time without reset");
   });
@@ -179,11 +215,13 @@ describe("RuleBrain — RC rule (brief dip + recovery)", () => {
     const dip  = makeSnapshot([makeAgent("agent-C", 0.65)]);
     const high = makeSnapshot([makeAgent("agent-C", 0.92)]);
 
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
     feedN(brain, dip, 2);
     feedN(brain, high, 1);
-    // First emission consumed; now reset
+    // First emission consumed; now reset (clears baseline too)
     brain.reset();
-    // Second dip + recovery should fire again
+    // Re-establish baseline, then second dip + recovery should fire again
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
     feedN(brain, dip, 2);
     brain.observe(high);
     const decisions = brain.decide();
@@ -193,6 +231,7 @@ describe("RuleBrain — RC rule (brief dip + recovery)", () => {
 
   test("replayRequest qProposal has window_ms", () => {
     const brain = new RuleBrain();
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
     const dip  = makeSnapshot([makeAgent("agent-C", 0.65)]);
     const high = makeSnapshot([makeAgent("agent-C", 0.92)]);
 
@@ -217,7 +256,8 @@ describe("RuleBrain — RC rule (brief dip + recovery)", () => {
 describe("RuleBrain — RC calibration (noise guard + AR overlap fix)", () => {
   test("single-tick dip does NOT trigger replayRequest (DIP_REQUIRE_TICKS guard)", () => {
     const brain = new RuleBrain();
-    // 1 tick at 0.65 — below old threshold but not enough to confirm brief dip
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
+    // 1 tick at 0.65 — below threshold but not enough to confirm brief dip
     brain.observe(makeSnapshot([makeAgent("agent-C", 0.65)]));
     brain.observe(makeSnapshot([makeAgent("agent-C", 0.92)]));
     const decisions = brain.decide();
@@ -229,6 +269,7 @@ describe("RuleBrain — RC calibration (noise guard + AR overlap fix)", () => {
 
   test("two-tick dip DOES trigger replayRequest (minimum confirmed dip)", () => {
     const brain = new RuleBrain();
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
     feedN(brain, makeSnapshot([makeAgent("agent-C", 0.65)]), 2);
     brain.observe(makeSnapshot([makeAgent("agent-C", 0.92)]));
     const decisions = brain.decide();
@@ -240,8 +281,9 @@ describe("RuleBrain — RC calibration (noise guard + AR overlap fix)", () => {
 
   test("prolonged dip (> DIP_MAX_TICKS) does NOT trigger replayRequest (AR territory)", () => {
     const brain = new RuleBrain();
-    // 5 ticks exceeds DIP_MAX_TICKS=4 → RC tracking cancelled
-    feedN(brain, makeSnapshot([makeAgent("agent-C", 0.65)]), 5);
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
+    // 9 ticks exceeds DIP_MAX_TICKS=7 → RC tracking cancelled
+    feedN(brain, makeSnapshot([makeAgent("agent-C", 0.65)]), 9);
     brain.observe(makeSnapshot([makeAgent("agent-C", 0.92)]));
     const decisions = brain.decide();
     assert.equal(
@@ -252,11 +294,12 @@ describe("RuleBrain — RC calibration (noise guard + AR overlap fix)", () => {
 
   test("AR scenario: rerouteSchema fires but replayRequest does NOT fire on recovery", () => {
     const brain = new RuleBrain();
-    // agent-C at 0.70 — AR regression zone AND RC dip zone.
-    // 5 ticks → exceeds DIP_MAX_TICKS=4 (AR territory), rerouteSchema fires at tick 3.
+    warmup(brain, [makeAgent("agent-C", 0.95)]); // threshold ~0.85
+    // agent-C at 0.70 — below threshold (AR) AND in RC dip zone [0.40, 0.85).
+    // 10 ticks → exceeds DIP_MAX_TICKS=7 (AR territory); rerouteSchema fires at the 2nd tick.
     const regression = makeSnapshot([makeAgent("agent-C", 0.70)]);
     const recovery   = makeSnapshot([makeAgent("agent-C", 0.92)]);
-    const all = feedN(brain, regression, 5);
+    const all = feedN(brain, regression, 10);
     brain.observe(recovery);
     all.push(...brain.decide());
 
@@ -266,13 +309,15 @@ describe("RuleBrain — RC calibration (noise guard + AR overlap fix)", () => {
       "prolonged AR regression should NOT also trigger replayRequest on recovery");
   });
 
-  test("baseline quiet: binomial noise over 500 ticks does not trigger replayRequest", () => {
-    // Simulate per-tick pass rates as binomial samples.
-    // n=200 events per tick → σ_rate ≈ 0.023 for agent-B (p=0.88).
-    // P(rate < 0.80) ≈ P(Z < -3.5) ≈ 0.02% per tick.
-    // P(2 consecutive) ≈ 4e-8 — essentially impossible over 500 ticks.
+  test("baseline quiet: production-noise binomial over 500 ticks fires nothing", () => {
+    // Per-tick pass rates as binomial samples at PRODUCTION event counts.
+    // 50 evt/s ÷ 4 agents × 5s window ≈ 62 events/agent → σ_rate ≈ 0.041 for
+    // agent-B (p=0.88). A global 0.80 bar sat only ~1.9σ away (~2.6%/tick) and
+    // fired spuriously; the per-agent threshold (baseline−0.10 ≈ 0.78) sits
+    // >2σ below the agent's own mean, so quiet baseline stays quiet.
+    // (Earlier this test used n=200 — 1.8× too lenient. 异议: test at prod counts.)
     const rng = seededRng(2025);
-    const N_EVENTS = 200;
+    const N_EVENTS = 62;
     const profiles = [
       { agentId: "agent-A", passRate: 0.95 },
       { agentId: "agent-B", passRate: 0.88 },
@@ -293,9 +338,14 @@ describe("RuleBrain — RC calibration (noise guard + AR overlap fix)", () => {
       brain.observe(makeSnapshot(agents));
       allDecisions.push(...brain.decide());
     }
+    // The actual 异议 finding was a spurious rerouteSchema on agent-B; assert BOTH.
+    assert.equal(
+      allDecisions.filter((d) => d.type === "rerouteSchema").length, 0,
+      "production-noise baseline should not trigger rerouteSchema (agent-B 静穏 regression test)",
+    );
     assert.equal(
       allDecisions.filter((d) => d.type === "replayRequest").length, 0,
-      "baseline binomial noise should not trigger replayRequest over 500 ticks",
+      "production-noise baseline should not trigger replayRequest",
     );
   });
 });

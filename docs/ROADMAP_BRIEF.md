@@ -372,3 +372,98 @@ dcp-wrap は `../dcp-wrap/` にある。灯台側が使う拡張点は3つのみ
 - §B: applyLens の group_by/downsample/decay/agg_func 実装 (LensResult 構造変化の curator 影響を先に設計)
 - §C: retention 参照ゾーン (疎化レイヤー)
 - §D: ClaudeBrain (§12 A/B 実験を先に)
+
+---
+
+## 2026-06-11 — 実装チェック 2 回目 (異議 1–3 対応の裏取り)
+
+### 確認できたこと
+
+- 110/110 テスト pass を実走確認
+- **異議 2 対応は本物で質が高い**: RC フルチェーン E2E は
+  generator → adapter → Brain dip 検出 → replayRequest → `qProposal.params.window_ms` を実際に使用 →
+  `buf.replay` → curator dip タイルの位置 (`regionStart` ∈ burst 区間) と平均 (< 0.60) を注入真値と照合。
+  仮想クロック (`clockFn` 注入) + seededRng(42) で決定論的。§10「Brain-initiated」の連鎖証明として成立
+- 異議 3 の構造対応 (`DIP_REQUIRE_TICKS=2` / `DIP_MAX_TICKS=4`) と AR overlap テスト 5 件、ソース実在
+- 異議 1 対応の本番構成仮想クロック AR テストも実在 (latency ちょうど 5s、余裕ゼロだが §10 は満たす)
+- `clockFn` 注入は今後の検証全般に効く資産。良い設計判断
+
+### 新たな異議 (1 件、実証済み): 静穏テストの較正がまた甘く、本番構成では §10 静穏基準が破れている
+
+- 500-tick 静穏テストは **N_EVENTS=200/tick (σ≈0.023)** で書かれているが、本番は
+  50 evt/s ÷ 4 agents × 5s 窓 ≈ **62 events/agent (σ≈0.041)**。テストは本番より約 1.8 倍甘い
+- さらに本番は 1s tick × 5s 窓 = **80% 窓重複** → ノイズ逸脱が複数 tick 滞留しやすく、
+  `DIP_REQUIRE_TICKS=2` も `REGRESSION_TICKS=2` も通過しやすい (テストは tick ごと独立サンプルでこれを見ない)
+- commit `6598c2c` の「σ≈0.028 → P(Z<−5)≈0」は agent-B に対して誤り: p=0.88, n≈62 → σ≈0.041、
+  Z=(0.80−0.88)/0.041≈**−1.94 → ~2.6%/tick**
+- **実証** (`server/baseline-quiet-sim.mjs`、本番構成・仮想クロック・600 仮想秒 × 30 シード):
+  **9/30 シード (30%) で純ベースライン中に agent-B の偽 rerouteSchema 発火** (うち 8 件は直後に偽 replayRequest も)。
+  全件 agent-B (0.88) — σ 分析の予測どおり。発火時刻はすべて t ≤ 47s
+- 根本原因: グローバル閾値 0.80 が agent-B の nominal 0.88 と **1.9σ しか離れていない**。
+  REGRESSION_TICKS 3→2 (異議 1 対応) はこの FP リスクを悪化させる方向のトレードオフだった。
+  tick 数の調整では解けない (latency vs FP の ROC 問題)
+
+### 対策候補 (推奨順)
+
+1. **per-agent ベースライン相対閾値**: Brain が長期 EWMA で agent ごとの baseline を学習し、
+   閾値 = baseline − δ (δ≈0.10)。generator 真値を読まずに済み、閾値を $Q[schema] に置けば
+   「Brain write surface」(PILOT_DATA §11) の良いデモにもなる。一番筋が良い
+2. 判定専用の長い窓 (10s) を別レンズで持つ — ObservationOverlay の使い所だが AR 5s 基準と要調整
+3. 安直案: agent-B の nominal を 0.92 に引き上げ (モック仕様変更、PILOT_DATA に波及。逃げ)
+
+### 次の作業 (更新)
+
+1. agent-B 偽発火の解消 (上記 1 推奨) + 静穏テストを**本番イベント数・フルスタック**に差し替え
+   (`baseline-quiet-sim.mjs` をそのまま test 化するのが最短。複数シードで)
+2. 以降は既存リスト: 区間指定 replay (fromTs/toTs) → dashboard 粗/細対比 UI → §B → §C → §D
+
+ >>メモ
+最優先: agent-B 偽発火の解消。 根本原因はグローバル閾値 0.80 が agent-B の定常 0.88 と 1.9σ しか離れていないことで、tick 数調整では解けません。推奨は per-agent ベースライン相対閾値 (Brain が EWMA で baseline を学習し、baseline − 0.10 を閾値に)。閾値を $Q[schema] に置けば「Brain write surface」の良いデモを兼ねられます。修正後、静穏テストは baseline-quiet-sim.mjs をそのまま test 化して本番イベント数・フルスタックで回すのが最短です。
+その後は既存の残課題リストどおり: 区間指定 replay (fromTs/toTs) → dashboard の粗/細対比 UI → §B レンズ残段 → §C → §D。
+
+---
+
+## 2026-06-13 — agent-B 偽発火の解消 (per-agent ベースライン相対閾値)
+
+### 完了した修正
+
+**per-agent EWMA ベースライン閾値** (`rule-brain.ts`)
+
+- グローバル閾値 `REGRESSION_THRESHOLD = 0.80` を廃止。agent ごとに healthy pass 率を EWMA 学習し、閾値 = `baseline − BASELINE_DELTA (0.10)`
+  - agent-C 0.95→閾値0.85 / agent-B 0.88→閾値0.78。agent-B の窓ノイズ (σ≈0.041) は 0.78 から >2σ → 静穏
+  - 「regression」= グローバルな低い棒割れではなく「その agent 自身の平常から 0.10 落ちる」。agent-B の低さは baseline であって regression ではない、という監査の指摘そのものを構造化
+- `BASELINE_ALPHA = 0.05` (half-life ≈13 tick の長期記憶)。**閾値を下回る間は baseline を凍結** — regression が自分の baseline を引き下げて検出を無効化するのを防ぐ
+- `WARMUP_TICKS = 10`: baseline 確立まで AR/RC は発火しない (cold-start ガード)
+- `updateBaselines()` / `thresholdFor()` を追加。AR・RC とも `thresholdFor()` 経由で per-agent 閾値を使用
+- **`reset()` は学習済み baseline を消さない**: agent の平常値は scenario をまたぐ長命な知識。消すと `/demo/start` 毎に 10-tick 再 warmup が要り (scenario の baseline 期間より長い)、anomaly 自身で baseline を seed して検出が壊れる。実システムは tick loop がブートから回るので常に warm
+
+**RC dip 上限の調整** (`DIP_MAX_TICKS` 4→7)
+
+- per-agent 閾値で dip zone 上限が 0.80→0.85 に広がり、2s バーストを 5s 窓で見た正当な RC dip が 6 tick に伸びた (旧 0.80 では 3 tick)
+- 7 に引き上げて RC バーストを許容。持続 AR regression は回復しないので RC recovery 分岐に到達せず、この上限とは無関係
+
+**静穏テストを本番構成・フルスタック・多シードに差し替え**
+
+- `baseline-quiet-sim.mjs` を `e2e-verify.test.ts` の正式テスト化 (削除済み)
+  - generator → adapter → brain フルスタック、windowMs=5000・1s tick (80% 窓重複あり)、本番 50 evt/s、20 シード × 600 仮想秒
+  - **旧グローバル 0.80 では 30% のシードで agent-B 偽 rerouteSchema → per-agent 化で 0/20**
+- `rule-brain.test.ts` の binomial 静穏テストを n=200→**n=62 (本番イベント数)** に修正。`rerouteSchema`/`replayRequest` 両方 0 を assert
+- 既存ユニットテストを per-agent 設計に合わせ書き換え (healthy baseline 確立 → 落とす構造)。`warmup()` ヘルパ追加
+- 本番構成 AR / RC フルチェーン E2E は brain を baseline 期間に warmup させるよう修正 (実システムのブート warmup を再現)
+
+### テスト数
+
+| 時点 | テスト数 |
+|---|---|
+| 異議 1–3 対応後 | 110 件 |
+| **本修正後** | **113 件 (全 pass、実タイマーテストも 2 回連続 green)** |
+
+### レビュー基準の遵守 (監査メタ指摘)
+
+- 監査の「較正をテスト都合に合わせる癖」への対策として、静穏性テストは**本番イベント数 (n≈62) + フルスタック + 窓重複**で検証する方針を実装で固定。テストを消さず warmup を正しく足して直した
+
+### 残課題 / 判断ペンディング
+
+- **`$Q[schema]` 昇格**: 現状 per-agent 閾値は Brain 内部 state。`BASELINE_DELTA` を `$Q[schema]` に置くと「Brain write surface」(PILOT_DATA §11) のデモを兼ねられる。次段に保留 (FP 修正を先に確定させるため内部 state で実装)
+- **REGRESSION_TICKS=2 のまま**: per-agent 閾値が FP/latency トレードオフを解消したため TICKS を下げ続ける必要は消えた。TICKS=3 復帰は任意のロバスト性調整。latency の精密計測は「snapshot が未来イベントを含む」既存テスト癖で曇るため未実施 (本筋ではない)
+- 以降は既存リスト: 区間指定 replay (fromTs/toTs) → dashboard 粗/細対比 UI → §B → §C → §D

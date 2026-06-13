@@ -78,6 +78,16 @@ describe("E2E AR — production-config (virtual clock, 異議 1 fix)", () => {
       gen.singleTick();
     }
 
+    // Warm up the brain on healthy baseline so the per-agent threshold is
+    // trusted (WARMUP_TICKS=10). In the real server the tick loop runs from
+    // boot, so the brain is always warm before a scenario starts — this mirrors
+    // that. agent-C learns baseline ≈0.95 → threshold ≈0.85.
+    for (let t = 500; t < 10_000; t += 500) {
+      vt = t;
+      brain.observe(adap.snapshot());
+      brain.decide();
+    }
+
     // Phase 2: regression — agent-C passRate drops to 0.70
     const REGRESSION_START = 10_000;
     gen.setAgentProfile("agent-C", { passRate: 0.70, flakyRate: 0.01, areasPerTest: { min: 2, max: 6 } });
@@ -125,14 +135,24 @@ describe("E2E AR — agent regression", { timeout: 15_000 }, () => {
     // Kick off scenario in background (don't await — baseline sleep is 2s)
     void gen.runScenario("AR");
 
-    // Wait out the scaled baseline plus a small buffer, then start the clock.
-    // The regression starts at 2s inside runAR; we wait 2.3s to be safely past it.
-    await sleep(2_300);
+    // Warm up the brain on healthy baseline before the regression hits, so the
+    // per-agent threshold is trusted (WARMUP_TICKS=10). The baseline phase lasts
+    // ~2s (scaled); tick 12× at 120ms (~1.44s) while agent-C is still at 0.95.
+    // This mirrors the real server, whose tick loop runs from boot.
+    for (let i = 0; i < 12; i++) {
+      await sleep(120);
+      brain.observe(adapter.snapshot());
+      brain.decide();
+    }
+
+    // Wait out the remaining baseline plus a small buffer, then start the clock.
+    // The regression starts at 2s inside runAR; ~1.44s elapsed, wait to ~2.3s.
+    await sleep(900);
     const regressionStartMs = Date.now();
 
-    // Brain ticks every 200ms. With 3s window: passRate drops below 0.80 after
-    // ~1.5s of regression events fill the window, then REGRESSION_TICKS=3 more
-    // ticks = 600ms. Total from regressionStartMs ≈ 2.1s, well within 5s.
+    // Brain ticks every 200ms. With 3s window: passRate drops below the per-agent
+    // threshold (~0.85) after ~1.5s of regression events fill the window, then
+    // REGRESSION_TICKS=2 more ticks. Total from regressionStartMs ≈ 2s, within 5s.
     // Filter specifically for agent-C to ignore other agents' natural variance.
     const decision = await waitForDecision(
       adapter,
@@ -238,6 +258,15 @@ describe("E2E RC — Brain-initiated full chain (異議 2 fix)", () => {
     for (let i = 0; i < 1_000; i++) {
       vt = i * 20;
       gen.singleTick();
+    }
+
+    // Warm up the brain on healthy baseline so the per-agent threshold is
+    // trusted before the burst (WARMUP_TICKS=10). Mirrors the real server,
+    // whose tick loop runs from boot. agent-C learns baseline ≈0.95.
+    for (let t = 10_000; t < 20_000; t += 500) {
+      vt = t;
+      brain.observe(adap.snapshot());
+      brain.decide();
     }
 
     // Phase 2: burst — agent-C fails at passRate=0.20 for 2s (100 events)
@@ -366,6 +395,57 @@ describe("E2E RC — retroactive re-observation", () => {
     assert.ok(
       burstMean < coarseMean * 0.6,
       `burst window mean ${burstMean.toFixed(3)} should be substantially below coarse mean ${coarseMean.toFixed(3)}`,
+    );
+  });
+});
+
+// ── Baseline quiet — full stack, production event counts, multi-seed ──────────
+//
+// §10 "scenarios must be quiet between runs." The earlier unit test approximated
+// noise at n=200 events/tick (σ≈0.023) — 1.8× too lenient vs production's ≈62
+// events/agent (σ≈0.041). It also fed independent per-tick samples, missing the
+// 80% window overlap (1s tick × 5s window) that makes a deep noise excursion
+// linger across consecutive ticks. This test runs the FULL stack (generator →
+// adapter → brain) at production config across many seeds and asserts that pure
+// baseline produces ZERO decisions. This is the regression test for the
+// per-agent-baseline fix: with a global 0.80 bar, ~30% of seeds fired a spurious
+// agent-B rerouteSchema here. (Mirrors server/baseline-quiet-sim.mjs.)
+
+describe("E2E baseline quiet — full stack, production config", { timeout: 60_000 }, () => {
+  test("no spurious decisions over 600s × multiple seeds (per-agent baseline)", () => {
+    const SEEDS = 20;
+    const TOTAL_EVENTS = 30_000; // 600 virtual seconds at 50 evt/s
+    const offenders: string[] = [];
+
+    for (let s = 1; s <= SEEDS; s++) {
+      let vt = 0;
+      const clock = () => vt;
+      const gen   = new MockStreamGenerator({ rng: seededRng(s), clockFn: clock });
+      const adap  = new TestorAdapter({ windowMs: 5_000, clockFn: clock });
+      const brain = new RuleBrain();
+      gen.onEvent((e) => adap.push(e));
+
+      const decisions: { t: number; type: string; agent?: unknown }[] = [];
+      let nextTick = 5_000; // let the window fill before the first observe
+      for (let i = 0; i < TOTAL_EVENTS; i++) {
+        vt = i * 20;
+        gen.singleTick();
+        if (vt >= nextTick) {
+          brain.observe(adap.snapshot());
+          for (const d of brain.decide()) {
+            decisions.push({ t: vt, type: d.type, agent: (d.meta as { agentId?: unknown })?.agentId });
+          }
+          nextTick += 1_000;
+        }
+      }
+      if (decisions.length > 0) {
+        offenders.push(`seed=${s}: ${JSON.stringify(decisions)}`);
+      }
+    }
+
+    assert.equal(
+      offenders.length, 0,
+      `baseline must be quiet at production config across all ${SEEDS} seeds. Spurious decisions:\n${offenders.join("\n")}`,
     );
   });
 });
