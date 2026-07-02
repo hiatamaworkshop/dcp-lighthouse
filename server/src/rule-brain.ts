@@ -47,6 +47,20 @@ const BASELINE_DELTA = 0.10;         // regression threshold = learned baseline 
                                      // window noise (σ≈0.04) is >2σ from 0.78 → quiet.
 const WARMUP_TICKS = 10;             // ticks observed before an agent's threshold is trusted.
                                      // No AR/RC firing during warmup (no baseline yet).
+const MIN_OBS_COUNT = 3;             // events required in a tick's window for that tick to
+                                     // count toward baseline learning (ROADMAP L1-3, traders
+                                     // finding B4). Orthogonal to WARMUP_TICKS: warmup only
+                                     // counts ticks, not whether each tick's window had enough
+                                     // events to be a trustworthy sample of pass rate. Without
+                                     // this, sparse/empty windows (eventCount low or 0) feed the
+                                     // EWMA and can collapse the baseline toward whatever a thin
+                                     // window happened to show.
+const THRESHOLD_FLOOR = 0;           // absolute floor for the regression threshold (traders
+                                     // finding B5: relative thresholds need a floor). Pass rate
+                                     // is a bounded measure [0,1], so additive baseline−delta is
+                                     // the right threshold shape (unlike an unbounded/multiplicative
+                                     // quantity), but it must not go negative when baseline itself
+                                     // is already low — a negative threshold can never fire.
 
 // ── Thresholds ──────────────────────────────────────────────────────────────
 
@@ -149,6 +163,11 @@ export class RuleBrain implements BrainAdapter {
 
   private updateBaselines(agents: AgentStats[]): void {
     for (const a of agents) {
+      // Validity gate (orthogonal to warmup): a tick whose window saw too few
+      // events is not a trustworthy sample of this agent's pass rate — skip it
+      // entirely rather than let a thin/empty window pull the EWMA around.
+      if (a.eventCount < MIN_OBS_COUNT) continue;
+
       const obs = this.agentObsCount.get(a.agentId) ?? 0;
       const prev = this.agentBaseline.get(a.agentId);
 
@@ -171,13 +190,14 @@ export class RuleBrain implements BrainAdapter {
   }
 
   /**
-   * Per-agent regression threshold = learned baseline − BASELINE_DELTA.
-   * Returns null while the agent is still in warmup (threshold not yet trusted).
+   * Per-agent regression threshold = learned baseline − BASELINE_DELTA, floored
+   * at THRESHOLD_FLOOR. Returns null while the agent is still in warmup
+   * (threshold not yet trusted).
    */
   private thresholdFor(agentId: string): number | null {
     if ((this.agentObsCount.get(agentId) ?? 0) < WARMUP_TICKS) return null;
     const baseline = this.agentBaseline.get(agentId);
-    return baseline === undefined ? null : baseline - BASELINE_DELTA;
+    return baseline === undefined ? null : Math.max(baseline - BASELINE_DELTA, THRESHOLD_FLOOR);
   }
 
   // ── AR: agent regression ──────────────────────────────────────────────────

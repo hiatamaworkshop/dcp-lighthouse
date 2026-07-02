@@ -200,11 +200,14 @@ Minecraft で検証済みのパターン。
 - 起動: `cd server && npm run dev` → `http://localhost:3001` (SSE dashboard on port 3001)
 - シナリオ: `/demo/start?scenario=AR|CG|RC`
 
-## 次のステップ候補
+## 次のステップ (工程 L1–L5)
 
-パイロット実装は一通り揃っている。残りは検証・拡張フェーズ:
+E2E 検証は完了済み (テスト 113 件、§10 基準を実測)。以後の工程は
+**`docs/ROADMAP_BRIEF.md` の「2026-07-03 — 本体ロードマップ再編」を正とする**。要約:
 
-1. **エンドツーエンド検証**: サーバーを実際に起動し、AR/CG/RC 各シナリオで Brain 決定が PILOT_DATA.md §10 の基準 (AR: 5秒以内 rerouteSchema、CG: 10秒以内 schemaUpdate、RC: fine-window で注入真値と一致) を満たすか確認
-2. **retention 参照ゾーン**: 鮮度ゾーン (ring buffer) の上に疎化レイヤーを追加 (memory: project_retention_design.md に設計メモあり)
-3. **レンズチェーン完成**: `applyLens` の group_by / downsample / decay / agg_func 段を実装 (現状 window_ms のみ)
-4. **ClaudeBrain**: `BRAIN_MODE=claude` で `BrainAdapter` を差し替え (インターフェースは確保済み)
+- **L1 ✅ (2026-07-03)** 足場固め — field findings の core 還元 (ts≤now クロック方針 / count 窓・有効性 / baseline ゲート+床)。テスト 113→121 件
+- **L2** Brain write surface + replay 表面化 — $Q[schema] 昇格・区間指定 replay・粗/細対比 UI
+- **L3** **ClaudeBrain (本丸)** — §12 A/B 実験 → `BRAIN_MODE=claude` shadow 併走。LLM 起点の $Q 操作が核心
+- **L4** レンズチェーン残段 (group_by 他。curator 影響を先に設計)
+- **L5** retention 参照ゾーン (疎化)
+- 常設: traders 還元フィルタ — 「機構を行使/変更する or ドメイン非依存知見を生む」もののみ灯台の実証に数える

@@ -12,7 +12,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { applyLens, type LensEvent } from "./lens.js";
+import { applyLens, MIN_VALID_COUNT, type LensEvent } from "./lens.js";
 import { SnapshotCurator, type SnapshotPackage } from "./snapshot-curator.js";
 
 const ev = (ts: number, value: number): LensEvent => ({ ts, value });
@@ -23,12 +23,16 @@ const ev = (ts: number, value: number): LensEvent => ({ ts, value });
 function buildResult(windows: { windowStart: number; mean: number; count?: number }[], window_ms = 1000) {
   return {
     window_ms,
-    windows: windows.map((w) => ({
-      windowStart: w.windowStart,
-      windowEnd: w.windowStart + window_ms,
-      mean: w.mean,
-      count: w.count ?? 10,
-    })),
+    windows: windows.map((w) => {
+      const count = w.count ?? 10;
+      return {
+        windowStart: w.windowStart,
+        windowEnd: w.windowStart + window_ms,
+        mean: w.mean,
+        count,
+        valid: count >= MIN_VALID_COUNT,
+      };
+    }),
   };
 }
 
@@ -53,6 +57,28 @@ describe("SnapshotCurator — globalStats", () => {
     assert.equal(pkg.globalStats.mean, 2);
     assert.ok(Math.abs(pkg.globalStats.stdDev - 1) < 1e-9);
     assert.equal(pkg.globalStats.windowCount, 2);
+  });
+});
+
+// ── Window validity gating (ROADMAP L1-2) ──────────────────────────────────
+
+describe("SnapshotCurator — low-count window validity", () => {
+  it("excludes an invalid (low-count) outlier window from global stats and spike detection", () => {
+    // 10 flat, reliable windows plus one count=1 window whose mean is wildly
+    // off (noise, not signal). Without the validity gate this single-event
+    // window would drag globalStats and could itself be flagged as a spike.
+    const result = buildResult([
+      ...Array.from({ length: 10 }, (_, i) => ({ windowStart: i * 1000, mean: 1.0 })),
+      { windowStart: 10_000, mean: 50.0, count: 1 },
+    ]);
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false });
+    const pkg = curator.curate(result);
+
+    assert.equal(pkg.globalStats.mean, 1.0, "global mean should ignore the invalid window");
+    assert.equal(pkg.globalStats.stdDev, 0, "global stdDev should ignore the invalid window");
+
+    const spikeTiles = pkg.tiles.filter((t) => t.shapeTag === "spike");
+    assert.equal(spikeTiles.length, 0, "the low-count window should not be flagged as a spike");
   });
 });
 

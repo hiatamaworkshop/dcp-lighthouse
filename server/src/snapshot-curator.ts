@@ -175,7 +175,11 @@ export class SnapshotCurator {
     const tiles: SnapshotTile[] = [];
 
     // ── 1. Spikes and dips ────────────────────────────────────
+    // Low-count windows are excluded (L1-2): a count=1 window has std=0 and a
+    // mean equal to a single event's value, which can look like an extreme
+    // anomaly when it is really unresolved noise.
     for (const w of windows) {
+      if (!w.valid) continue;
       if (globalStats.stdDev === 0) break;
       const z = (w.mean - globalStats.mean) / globalStats.stdDev;
       if (z >= this.opts.spikeZThreshold) {
@@ -277,16 +281,24 @@ export class SnapshotCurator {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * Global stats over window means. Low-count windows (WindowStat.valid===false,
+ * L1-2) are excluded so a handful of noisy single-event windows can't drag the
+ * baseline or inflate std-dev; falls back to all windows if none are valid
+ * (sparse stream with no reliable window yet — better than {0,0}).
+ */
 function computeGlobalStats(windows: WindowStat[]): {
   mean: number;
   stdDev: number;
   windowCount: number;
 } {
   if (windows.length === 0) return { mean: 0, stdDev: 0, windowCount: 0 };
-  const means = windows.map((w) => w.mean);
+  const reliable = windows.filter((w) => w.valid);
+  const basis = reliable.length > 0 ? reliable : windows;
+  const means = basis.map((w) => w.mean);
   const mean = means.reduce((s, v) => s + v, 0) / means.length;
   const variance = means.reduce((s, v) => s + (v - mean) ** 2, 0) / means.length;
-  return { mean, stdDev: Math.sqrt(variance), windowCount: windows.length };
+  return { mean, stdDev: Math.sqrt(variance), windowCount: basis.length };
 }
 
 function detectSteps(
@@ -381,8 +393,12 @@ function pickBaselineWindow(
   globalMean: number,
 ): WindowStat | null {
   if (windows.length === 0) return null;
+  // Prefer a statistically reliable window as "representative" (L1-2); a
+  // low-count window can look artificially close to the mean by chance.
+  const reliable = windows.filter((w) => w.valid);
+  const pool = reliable.length > 0 ? reliable : windows;
   // Pick the window whose mean is closest to the global mean (most "normal").
-  return windows.reduce((best, w) =>
+  return pool.reduce((best, w) =>
     Math.abs(w.mean - globalMean) < Math.abs(best.mean - globalMean) ? w : best,
   );
 }

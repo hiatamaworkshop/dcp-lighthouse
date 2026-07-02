@@ -2,7 +2,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { applyLens, type LensEvent } from "./lens.js";
+import { applyLens, MIN_VALID_COUNT, type LensEvent } from "./lens.js";
 
 const ev = (ts: number, value: number): LensEvent => ({ ts, value });
 
@@ -50,5 +50,20 @@ describe("applyLens — windowing", () => {
 
   it("rejects a non-positive window", () => {
     assert.throws(() => applyLens([ev(0, 1)], { window_ms: 0 }), /positive/);
+  });
+});
+
+describe("applyLens — window validity (ROADMAP L1-2)", () => {
+  it("marks a window valid when count meets MIN_VALID_COUNT", () => {
+    const events = Array.from({ length: MIN_VALID_COUNT }, (_, i) => ev(i, 1));
+    const r = applyLens(events, { window_ms: 1000 });
+    assert.equal(r.windows[0].count, MIN_VALID_COUNT);
+    assert.equal(r.windows[0].valid, true);
+  });
+
+  it("marks a window invalid when count is below MIN_VALID_COUNT", () => {
+    const r = applyLens([ev(0, 1)], { window_ms: 1000 });
+    assert.equal(r.windows[0].count, 1);
+    assert.equal(r.windows[0].valid, false);
   });
 });

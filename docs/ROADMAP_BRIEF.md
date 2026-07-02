@@ -467,3 +467,103 @@ dcp-wrap は `../dcp-wrap/` にある。灯台側が使う拡張点は3つのみ
 - **`$Q[schema]` 昇格**: 現状 per-agent 閾値は Brain 内部 state。`BASELINE_DELTA` を `$Q[schema]` に置くと「Brain write surface」(PILOT_DATA §11) のデモを兼ねられる。次段に保留 (FP 修正を先に確定させるため内部 state で実装)
 - **REGRESSION_TICKS=2 のまま**: per-agent 閾値が FP/latency トレードオフを解消したため TICKS を下げ続ける必要は消えた。TICKS=3 復帰は任意のロバスト性調整。latency の精密計測は「snapshot が未来イベントを含む」既存テスト癖で曇るため未実施 (本筋ではない)
 - 以降は既存リスト: 区間指定 replay (fromTs/toTs) → dashboard 粗/細対比 UI → §B → §C → §D
+
+---
+
+## Field findings — 実データ適用 (traders / Coincheck) からの core 還元 (2026-06-15)
+
+姉妹実装 `../traders/observatory` が灯台機構を**初めて実ストリーム (Coincheck public WS, BTC/JPY) に適用**した。mock (定常 50 evt/s) では原理的に出なかった知見。core/skin を分けて記録。出所は `../traders/docs/lighthouse-integration.md` と同 `decisions.md` (ADR-010〜012)。
+
+### A. core 機構/モデルに還すべき (本命)
+
+1. **「静寂」と「盲目」は別物 — transport liveness を一級入力に** *(MODEL.md「Lighthouse, restated」に第3軸として追記済み)*
+   - mock では「イベント不在 = 未テスト」で済んだが、実ストリームでは不在に2種 (世界が静か=正常 / transport 断=盲目)。CG が event flow だけ見ると平常の静けさを盲目と誤認し**偽発火ストーム** (実 BTC/JPY は 10–90s 約定が来ない)。
+   - 解: gap 判定に transport liveness を別信号として配線し `connected===false` のみ盲目とみなす。traders は `GapStats.connected` で実装。
+   - core 影響: 看板比喩「世界が変わった vs 観測を変えた」に第3軸「世界が静か vs 観測者が聾」が加わる。
+
+2. **疎・バーストなストリームで wall-clock 窓が壊れる — count ベース窓を lens 段に**
+   - 固定 `window_ms` 窓はイベント数が窓ごとに乱高下し、低カウント窓の集計 (std=0・不安定 mean) が下流を汚す。
+   - core 影響: lens チェーン (§137 group_by→window→downsample→decay→agg) の **window 段に「直近K件」窓の変種**を追加検討。`WindowStat` は count を持つが「統計的に信頼できない窓」を下流へ伝える手段がない。
+
+3. **クロック方針を明示せよ — ts≤now 上限と受信クロック**
+   - 既知 artifact「snapshot が未来イベントを含む」(testor-adapter は下限のみ) が実データで顕在化。取引所 ts は秒解像度で歪むため traders は**受信クロック stamp + ts≤now 上限**で対処。
+   - core 影響: adapter/applyLens にクロック方針を明文化し `ts≤now` 上限を core 既定にする。「future events in snapshot」は core で直す案件と確定。
+
+### B. パターン強化 (RuleBrain は skin だが baseline 機構は再利用資産)
+
+4. **baseline 更新に「観測の有効性ゲート」が要る (warmup だけでは不足)**
+   - per-agent EWMA baseline が実データで**ゼロ崩壊**: 空窓の std=0 が流入し続け閾値が潰れ偽発火。warmup は tick 数を数えるだけで観測の有効性を見ない。
+   - 解: baseline updater に `count >= N` 等の有効性ゲートを warmup と直交に追加。
+
+5. **相対閾値には必ず床 (floor/clamp) を — 閾値形は観測量の測度空間で決まる**
+   - 有界量 (pass率 [0,1]) は加法 `baseline−δ`、非有界・スケール変動量 (ボラ) は乗法が自然だが**baseline→0 で乗法バンドは潰れる**。
+   - 指針: 観測量の測度空間で閾値形を選び、相対閾値には絶対フロアを付ける。
+
+### C. mock 設計の教訓
+
+6. **mock は値分布だけでなく密度分布もモデルせよ**
+   - PILOT_DATA.md は値分布・注入真値は規定したがベースラインは定常 50 evt/s。現実より密で定常な known-truth mock は密度由来バグ (上 1・2・4) を隠す。mock-first 規律自体は機能した (配線バグは出ず) が、忠実度の次元が一つ足りなかった。
+
+---
+
+## 2026-07-03 — 本体ロードマップ再編 (工程 L1–L5)
+
+**背景**: traders 派生が「一適用プロジェクト」に移行し、本体固有の前進が止まっていた。
+散在していた残課題 (2026-06-11 残課題 / 06-13 ペンディング / 06-15 field findings) を工程に統合。
+**主軸**: 灯台のテーゼは「観測層 + Brain 制御」の 2 本柱。観測層は traders で実証済み。
+**Brain が観測を操作する側 (ClaudeBrain) が唯一の未証明の核心** — これを本丸に据える。
+
+### L1. 足場固め — field findings の core 還元 (小粒・先行)
+
+ClaudeBrain が読む snapshot の歪みを先に除く。06-15 findings A2/A3/B4/B5 の実装化:
+
+1. **クロック方針 (A3)**: testor-adapter に `ts<=now` 上限 (受信クロック stamp)。既知 artifact「snapshot が未来イベントを含む」を解消 — AR latency 計測の曇りも取れる
+2. **窓の有効性 (A2)**: `WindowStat` に「統計的に信頼できない窓」の伝搬手段 (count ゲート or valid フラグ)。lens window 段に「直近K件」count 窓の変種を追加
+3. **baseline 有効性ゲート + 床 (B4/B5)**: rule-brain の EWMA updater に `count >= N` ゲート (warmup と直交)、相対閾値に絶対フロア
+- 完了基準: 既存 113 テスト + 各項目のユニットテスト green。mock (定常密度) では顕在化しない項目は疎密度 mock 変種で再現テストを書く (06-15 finding 6 の適用)
+
+### L2. Brain write surface + replay 表面化 — ClaudeBrain が握るレバーを完成させる
+
+1. **`$Q[schema]` 昇格** (06-13 ペンディング): `BASELINE_DELTA` を Brain 内部 state から $Q[schema] へ。「Brain が観測パラメータを書く」面のデモ (PILOT_DATA §11)
+2. **区間指定 replay**: `RetentionBuffer.replay(fromTs/toTs)`。シナリオ真値ログ (`burst_start/end.ts`) を区間絞り込みに接続
+3. **dashboard 粗/細対比 UI**: SSE は届いているので描画のみ (§12「新タイル追加」)
+- 完了基準: Brain 決定 → $Q 書込 → 観測再構成の一巡がテストで固定される
+
+### L3. ClaudeBrain (本丸)
+
+1. **前段: §12 A/B 実験** — 同一シナリオを「生の数列のみ」vs「snapshot package (タイル陳列)」で LLM に判断させ精度比較。snapshot curator の設計仮説 (静止陳列で十分) をここで検証
+2. **`BRAIN_MODE=claude` 配線**: `ClaudeBrain implements BrainAdapter`。決定は log-only から開始 (RuleBrain 併走・shadow 比較)
+3. 成功基準: (a) AR/CG/RC の 3 シナリオで §10 基準内の決定を RuleBrain と同等に出す (b) **LLM 出力起点の $Q 操作** (replay 起動 or window 変更) が少なくとも 1 系統動く — ここが RuleBrain では原理的に示せない核心
+- 注: L1/L2 が前提。歪んだ snapshot と不完全なレバーで LLM を評価すると機構バグと判断品質が混線する (Phase 0/1 分離と同じ理由)
+
+### L4. レンズチェーン残段
+
+- `applyLens` の group_by → downsample → decay → agg_func。**group_by 着手前に `LensResult.windows` 構造変化の SnapshotCurator 影響を設計** (06-11 残課題の警告どおり)
+- L3 の後に置く理由: ClaudeBrain MVP は window_ms + replay で成立する。残段は「レバーの追加」であり本丸の前提ではない
+
+### L5. retention 参照ゾーン (疎化)
+
+- 鮮度ゾーン (ring 120s) の上に疎化レイヤー。設計メモ: `memory/project_retention_design.md`
+- 長期稼働 (traders 型 24/7) で初めて効く層なので最後
+
+### 常設: traders 還元フィルタ (advisor プロセス)
+
+- traders の作業が灯台の実証に数えられる基準: **(a) 観測機構そのものを行使/変更する、または (b) ドメイン非依存の知見を生む**。traders レビュー毎にこのフィルタで還元有無を判定し、該当分のみ本ファイル Field findings へ追記
+- 直近の注目: **mention:v1 (traders ADR-029)** — 非構造テキストへの皮貼り。実装されたら第 3 の実証としてレビュー
+
+---
+
+## 2026-07-03 — L1 完了 (足場固め)
+
+**完了した修正** (テスト 113→121 件、全 green):
+
+1. **クロック方針 (A3)**: `testor-adapter.ts` の `snapshot()` window フィルタに `e.ts <= now` 上限を追加 (既存の下限 `e.ts >= now - windowMs` と併用)。受信クロックより未来の ts を持つイベント (skew/replay 由来) がスナップショットから除外される。テスト: `testor-adapter.test.ts` (新規ファイル、3 件)
+2. **窓の有効性 (A2)**: `lens.ts` の `WindowStat` に `valid: boolean` を追加 (`count >= MIN_VALID_COUNT=3`)。`snapshot-curator.ts` の `computeGlobalStats` / spike・dip 検出 / baseline タイル選出が invalid 窓を除外 (全窓 invalid の場合は全窓にフォールバック)。テスト: `lens.test.ts` +2件、`snapshot-curator.test.ts` +1件
+3. **baseline 有効性ゲート + 床 (B4/B5)**: `rule-brain.ts` の `updateBaselines` に `eventCount < MIN_OBS_COUNT=3` のティックをスキップするゲートを追加 (warmup カウントとも直交 — 薄い窓は obsCount も進めない)。`thresholdFor` に `THRESHOLD_FLOOR=0` の下限クランプを追加。テスト: `rule-brain.test.ts` +2件
+
+**設計判断の記録**:
+- MIN_VALID_COUNT (lens) と MIN_OBS_COUNT (rule-brain) は同値 (3) だが別定数のまま — 観測層 (レンズ) とドメイン層 (Brain) の責務境界を保つため、意図的に共有していない
+- THRESHOLD_FLOOR=0 は pass率が有界 [0,1] という観測量の測度空間から導出 (B5 の「測度空間で閾値形を選ぶ」を適用)。baseline が 0 近傍まで落ちた場合、閾値は負にならず単に発火しなくなる (床の役割)
+- L1 の 3 項目は mock (定常密度) では顕在化しない不具合だったため、テストは意図的に薄い窓・未来イベントを注入する構成にした (06-15 finding 6 の適用)
+
+**残課題**: なし (L1 完了)。次は L2 (`$Q[schema]` 昇格・区間指定 replay・粗/細対比 UI)。

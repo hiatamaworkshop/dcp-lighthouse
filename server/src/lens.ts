@@ -27,6 +27,16 @@ export interface LensEvent {
   value: number;
 }
 
+/**
+ * Minimum event count for a window's mean/std to be treated as statistically
+ * meaningful (ROADMAP_BRIEF L1-2, traders field finding A2: sparse/bursty
+ * streams produce low-count windows whose mean is noise, not signal — e.g.
+ * count=1 has std=0 and can look like a "perfectly stable" spike/dip). Below
+ * this, WindowStat.valid is false so downstream (curator) can exclude it from
+ * baseline stats and anomaly detection instead of treating noise as shape.
+ */
+export const MIN_VALID_COUNT = 3;
+
 /** One window's aggregate. */
 export interface WindowStat {
   /** window start (inclusive), aligned to windowStart of the segment. */
@@ -36,6 +46,8 @@ export interface WindowStat {
   count: number;
   /** mean of `value` over the window; NaN-free: 0 when count===0 is not emitted. */
   mean: number;
+  /** Whether this window has enough events (>= MIN_VALID_COUNT) to trust its mean. */
+  valid: boolean;
 }
 
 /** Result of re-observing a segment: the lens applied and the windows produced. */
@@ -82,6 +94,7 @@ export function applyLens(events: readonly LensEvent[], lens: QObserveParams = {
       windowEnd: windowStart + window_ms,
       count,
       mean: sum / count,
+      valid: count >= MIN_VALID_COUNT,
     });
     sum = 0;
     count = 0;

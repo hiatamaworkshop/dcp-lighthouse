@@ -116,6 +116,39 @@ describe("RuleBrain — AR rule (per-agent baseline)", () => {
   });
 });
 
+// ── Baseline validity gate + threshold floor (ROADMAP L1-3) ──────────────────
+
+describe("RuleBrain — baseline validity gate (low-count ticks don't corrupt baseline)", () => {
+  test("thin windows (eventCount below MIN_OBS_COUNT) do not move the learned baseline", () => {
+    const brain = new RuleBrain();
+    // Establish a solid baseline ~0.95 with full-count ticks.
+    warmup(brain, [makeAgent("agent-C", 0.95, 100)]);
+    // Flood with thin, noisy windows (eventCount=1, passRate=0) that would
+    // collapse the baseline via the EWMA if not gated out.
+    feedN(brain, makeSnapshot([makeAgent("agent-C", 0.0, 1)]), 50);
+    // A healthy, full-count tick at the original baseline should not register
+    // as a regression — if the thin windows had leaked in, threshold would
+    // have collapsed toward 0 and this could misbehave in either direction,
+    // but the direct check is: still-healthy passRate stays clear of AR.
+    const decisions = feedN(brain, makeSnapshot([makeAgent("agent-C", 0.95, 100)]), 2);
+    assert.equal(
+      decisions.filter((d) => d.type === "rerouteSchema").length, 0,
+      "baseline should still reflect the original ~0.95 healthy rate, not be dragged down by thin windows",
+    );
+  });
+
+  test("thin windows do not count toward warmup", () => {
+    const brain = new RuleBrain();
+    // All thin (eventCount=1): should never leave warmup, so AR/RC never fire
+    // regardless of passRate.
+    const decisions = feedN(brain, makeSnapshot([makeAgent("agent-C", 0.10, 1)]), 30);
+    assert.equal(
+      decisions.filter((d) => d.type === "rerouteSchema").length, 0,
+      "thin-window ticks must not advance warmup or seed a baseline",
+    );
+  });
+});
+
 // ── CG rule ──────────────────────────────────────────────────────────────────
 
 describe("RuleBrain — CG rule", () => {
