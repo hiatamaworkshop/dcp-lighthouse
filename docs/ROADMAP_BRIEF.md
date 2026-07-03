@@ -539,6 +539,7 @@ ClaudeBrain が読む snapshot の歪みを先に除く。06-15 findings A2/A3/B
 ### L4. レンズチェーン残段
 
 - `applyLens` の group_by → downsample → decay → agg_func。**group_by 着手前に `LensResult.windows` 構造変化の SnapshotCurator 影響を設計** (06-11 残課題の警告どおり)
+- group_by の実利 (L2 チェックで実測): 本番配線の RetentionBuffer は全 4 agent を混合保持するため、agent-C の 0.20 バーストが replay では (3×0.92+0.20)/4 ≈ 0.74 に薄まり z ≈ −1.7 で dip 閾値 (2.0σ) に届かず、ライブの replay タイルに dip が出ない (E2E は per-agent バッファ注入で回避している)。`group_by: ["agentId"]` がこれを解消する
 - L3 の後に置く理由: ClaudeBrain MVP は window_ms + replay で成立する。残段は「レバーの追加」であり本丸の前提ではない
 
 ### L5. retention 参照ゾーン (疎化)

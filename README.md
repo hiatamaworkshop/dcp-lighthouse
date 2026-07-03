@@ -37,7 +37,11 @@ npm test       # tsc && node --test dist/*.test.js
 
 ## ステータス
 
-Phase 0 着手。実装順序は [CLAUDE.md](CLAUDE.md) を参照。
+Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 詳細は
+[docs/ROADMAP_BRIEF.md](docs/ROADMAP_BRIEF.md) の「本体ロードマップ再編」節、
+実装順序の全体像は [CLAUDE.md](CLAUDE.md) を参照。
+
+**Phase 0 — コア機構検証 (Minecraft ベースライン + 自作異常)**
 
 - [x] scaffold (server / dashboard / docs)
 - [x] $Q レジストリ — `server/src/q-registry.ts` (scope パース・レイヤー別 read・swap history・onChange)
@@ -51,9 +55,19 @@ Phase 0 着手。実装順序は [CLAUDE.md](CLAUDE.md) を参照。
 - [x] Step 4: MockStreamGenerator + TestorAdapter — `server/src/mock-stream-generator.ts`, `server/src/testor-adapter.ts`。test_result:v1 生成・正規化、per-agent/per-domain STSnapshot
 - [x] Step 5: bitpos — `server/src/bitpos.ts`。256-bit 固定仮想 area space (auth/payment/ui/utils)、coverageGaps、randomBits
 - [x] Step 6: BrainAdapter + RuleBrain — `server/src/brain-adapter.ts`, `server/src/rule-brain.ts`。AR/CG/RC の 3 ルール、rerouteSchema/schemaUpdate/replayRequest 提案
-- [x] Step 7: DashboardServer + UI — `server/src/dashboard.ts`, `dashboard/index.html`, `dashboard/app.js`。SSE ブリッジ + per-agent バー・domain ヒートマップ・スナップショットタイル・Brain decision log (テスト計 72 件)
+- [x] Step 7: DashboardServer + UI — `server/src/dashboard.ts`, `dashboard/index.html`, `dashboard/app.js`。SSE ブリッジ + per-agent バー・domain ヒートマップ・スナップショットタイル・Brain decision log
 
 灯台モデルのコアはドメイン非依存。Phase 0 は真値が既知のストリーム
 (Minecraft イベント + 自作異常) で機構を検証し、Phase 1 でコードテスト
 ドメイン (`test_result:v1`) に皮を貼る。詳細は
 [docs/LIGHTHOUSE_PILOT_DATA.md](docs/LIGHTHOUSE_PILOT_DATA.md) §1.5。
+
+**本体ロードマップ (L1–L5、traders 派生との並走から生まれた再編)**
+
+- [x] **L1** 足場固め — traders 実運用からの field findings を core に還元 (ts≤now クロック方針・count 窓の有効性フラグ・baseline 有効性ゲート+閾値フロア)
+- [x] **L2** Brain write surface + replay 表面化 — `$Q[schema].baseline_delta` 昇格 (RuleBrain がレジストリ経由で読み、dashboard から書ける)・RC replayRequest の区間指定 (fromTs/toTs)・dashboard 粗(live)/細(replay) 対比 UI
+- [ ] **L3 (本丸)** ClaudeBrain — §12 A/B 実験 (数列のみ vs snapshot package) → `BRAIN_MODE=claude` で RuleBrain と shadow 併走。LLM 起点の $Q 操作が核心
+- [ ] **L4** レンズチェーン残段 — `applyLens` の group_by → downsample → decay → agg_func
+- [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)
+
+現在テスト計 124 件、全 green。
