@@ -206,7 +206,7 @@ E2E 検証は完了済み (テスト 113 件、§10 基準を実測)。以後の
 **`docs/ROADMAP_BRIEF.md` の「2026-07-03 — 本体ロードマップ再編」を正とする**。要約:
 
 - **L1 ✅ (2026-07-03)** 足場固め — field findings の core 還元 (ts≤now クロック方針 / count 窓・有効性 / baseline ゲート+床)。テスト 113→121 件
-- **L2** Brain write surface + replay 表面化 — $Q[schema] 昇格・区間指定 replay・粗/細対比 UI
+- **L2 ✅ (2026-07-03)** Brain write surface + replay 表面化 — $Q[schema] baseline_delta 昇格・区間指定 replay (fromTs/toTs)・dashboard 粗/細対比 UI。テスト 121→124 件。残: UI のブラウザ実地確認
 - **L3** **ClaudeBrain (本丸)** — §12 A/B 実験 → `BRAIN_MODE=claude` shadow 併走。LLM 起点の $Q 操作が核心
 - **L4** レンズチェーン残段 (group_by 他。curator 影響を先に設計)
 - **L5** retention 参照ゾーン (疎化)

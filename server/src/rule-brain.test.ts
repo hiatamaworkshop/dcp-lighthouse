@@ -9,6 +9,7 @@ import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { RuleBrain } from "./rule-brain.js";
 import { seededRng } from "./mock-stream-generator.js";
+import { QRegistry } from "./q-registry.js";
 import type { STSnapshot, AgentStats, DomainStats } from "./testor-adapter.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -146,6 +147,66 @@ describe("RuleBrain — baseline validity gate (low-count ticks don't corrupt ba
       decisions.filter((d) => d.type === "rerouteSchema").length, 0,
       "thin-window ticks must not advance warmup or seed a baseline",
     );
+  });
+});
+
+// ── $Q[schema] baseline_delta write surface (ROADMAP L2-1) ───────────────────
+
+describe("RuleBrain — $Q[schema] baseline_delta (Brain write surface)", () => {
+  test("reads baseline_delta from the registry, overriding the built-in default", () => {
+    const registry = new QRegistry();
+    registry.set("schema:test_result:v1", { baseline_delta: 0.30 }); // wide band
+    const brain = new RuleBrain(registry);
+    warmup(brain, [makeAgent("agent-C", 0.95)]); // threshold ≈ 0.95 - 0.30 = 0.65
+    // 0.70 is below the default-delta threshold (~0.85) but above this wider one.
+    const decisions = feedN(brain, makeSnapshot([makeAgent("agent-C", 0.70)]), 5);
+    assert.equal(
+      decisions.filter((d) => d.type === "rerouteSchema").length, 0,
+      "a wider $Q[schema] baseline_delta should widen the healthy band and suppress AR firing",
+    );
+  });
+
+  test("a live write to $Q[schema] reconfigures RuleBrain's threshold without restart", () => {
+    const registry = new QRegistry();
+    const brain = new RuleBrain(registry);
+    warmup(brain, [makeAgent("agent-C", 0.95)]); // default delta 0.10 → threshold ≈ 0.85
+    const firstDrop = feedN(brain, makeSnapshot([makeAgent("agent-C", 0.70)]), 2);
+    assert.ok(firstDrop.some((d) => d.type === "rerouteSchema"), "0.70 regresses under the default delta");
+
+    // Recover, then widen the delta via a $Q write (the same write the dashboard's
+    // /control/baseline-delta endpoint performs) — no RuleBrain restart involved.
+    feedN(brain, makeSnapshot([makeAgent("agent-C", 0.95)]), 3);
+    registry.set("schema:test_result:v1", { baseline_delta: 0.30 });
+    const afterWrite = feedN(brain, makeSnapshot([makeAgent("agent-C", 0.70)]), 5);
+    assert.equal(
+      afterWrite.filter((d) => d.type === "rerouteSchema").length, 0,
+      "after widening baseline_delta via $Q write, 0.70 should fall inside the new healthy band",
+    );
+  });
+});
+
+// ── Interval-specified replay (ROADMAP L2-2) ──────────────────────────────────
+
+describe("RuleBrain — replay interval bounds (ROADMAP L2-2)", () => {
+  test("replayRequest qProposal.params carries fromTs/toTs bounding the observed dip, padded", () => {
+    const brain = new RuleBrain();
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
+
+    const T0 = 100_000;
+    const dipTicks = [T0, T0 + 1000, T0 + 2000];
+    for (const ts of dipTicks) {
+      brain.observe({ ts, agents: [makeAgent("agent-C", 0.65)], domains: [], touchedBitsThisTick: [] });
+    }
+    const recoveryTs = T0 + 3000;
+    brain.observe({ ts: recoveryTs, agents: [makeAgent("agent-C", 0.92)], domains: [], touchedBitsThisTick: [] });
+
+    const d = brain.decide().find((d) => d.type === "replayRequest");
+    assert.ok(d, "replayRequest should fire on recovery");
+    const params = d!.qProposal!.params as { fromTs: number; toTs: number };
+    assert.equal(params.fromTs, dipTicks[0] - 5000, "fromTs = first dip-tick ts − REPLAY_PADDING_MS");
+    assert.equal(params.toTs, recoveryTs + 5000, "toTs = recovery-tick ts + REPLAY_PADDING_MS");
+    assert.ok(params.fromTs < dipTicks[0] && params.toTs > recoveryTs,
+      "the replay interval must fully contain the observed dip window");
   });
 });
 

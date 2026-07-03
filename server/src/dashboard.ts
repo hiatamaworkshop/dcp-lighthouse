@@ -154,6 +154,23 @@ export class DashboardServer {
       return;
     }
 
+    if (url.startsWith("/control/baseline-delta")) {
+      // Brain write surface demo (ROADMAP L2-1, PILOT_DATA §11): write
+      // $Q[schema:test_result:v1].baseline_delta and RuleBrain's live AR/RC
+      // threshold reconfigures on the next tick without a restart.
+      const raw = parseQuery(url).get("value");
+      const value = raw === null ? NaN : Number(raw);
+      if (!Number.isFinite(value) || value < 0) {
+        jsonHeaders(res, 400);
+        res.end(JSON.stringify({ error: "value must be a non-negative number" }));
+        return;
+      }
+      this.registry.set("schema:test_result:v1", { baseline_delta: value });
+      jsonHeaders(res);
+      res.end(JSON.stringify({ scope: "schema:test_result:v1", baseline_delta: value }));
+      return;
+    }
+
     if (url.startsWith("/status")) {
       jsonHeaders(res);
       res.end(JSON.stringify(this.generator.getCurrentLoad()));

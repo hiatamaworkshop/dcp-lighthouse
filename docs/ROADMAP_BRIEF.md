@@ -567,3 +567,20 @@ ClaudeBrain が読む snapshot の歪みを先に除く。06-15 findings A2/A3/B
 - L1 の 3 項目は mock (定常密度) では顕在化しない不具合だったため、テストは意図的に薄い窓・未来イベントを注入する構成にした (06-15 finding 6 の適用)
 
 **残課題**: なし (L1 完了)。次は L2 (`$Q[schema]` 昇格・区間指定 replay・粗/細対比 UI)。
+
+---
+
+## 2026-07-03 — L2 完了 (Brain write surface + replay 表面化)
+
+**完了した修正** (テスト 121→124 件、全 green):
+
+1. **`$Q[schema]` 昇格**: `q-registry.ts` の `QSchemaParams` に `baseline_delta?: number` を追加。`rule-brain.ts` に `RuleBrain(registry?: QRegistry)` を追加し、`updateBaselines`/`thresholdFor` は `registry.getSchema("test_result:v1").baseline_delta` を読み、registry 未指定時のみ従来の `BASELINE_DELTA=0.10` 定数にフォールバック（テスト単体呼び出しの後方互換を維持）。`index.ts` は起動時に `registry.set("schema:test_result:v1", { baseline_delta: 0.10 })` し `new RuleBrain(registry)` で配線。書込面のデモとして `dashboard.ts` に `GET /control/baseline-delta?value=N` を追加し、`registry.set` を叩く。dashboard UI (`index.html`/`app.js`) にも入力欄+ボタンを追加。テスト: `rule-brain.test.ts` +2件（レジストリ経由の値がデフォルトを上書きすること、再起動なしのライブ書込で閾値が即座に変わること）
+2. **区間指定 replay**: `RuleBrain` の RC 検知 (`checkRC`) に `agentDipStartTs: Map<agentId, ts>` を追加し、dip zone に最初に入ったティックの `ts` を記録。回復ティックで `replayRequest` の `qProposal.params` に `fromTs = dipStartTs - REPLAY_PADDING_MS`, `toTs = recoveryTs + REPLAY_PADDING_MS` (`REPLAY_PADDING_MS=5000` = 粗窓幅と同じ) を載せる。`index.ts` は `buffer.replay({ window_ms }, fromTs, toTs)` で区間を渡すよう変更（`RetentionBuffer.replay` 自体は fromTs/toTs 引数を既に持っていた — 呼び出し側の未配線が残課題だった）。テスト: `rule-brain.test.ts` +1件（fromTs/toTs が観測した dip 区間をパディング込みで正しく包含すること）
+3. **dashboard 粗/細対比 UI**: `panel-snapshot` を2カラム化（`coarse (live)` / `fine (last RC replay)`）。`app.js` の decisions SSE ハンドラで `type === "replay_snapshot"` を判別し `renderReplayTiles` へ分岐（従来は `replay_snapshot` イベントが `renderDecisions` に誤って渡り黙って無視されていた）。tile 描画ロジックは `tileHtml(t)` に共通化。UI テストは無し（ブラウザ手動確認は未実施 — 次回起動時に確認予定）
+
+**設計判断の記録**:
+- `baseline_delta` の書込は「誰が」書くかを固定しない設計にした。デモは operator 手動 (`/control/baseline-delta`) だが、将来 ClaudeBrain がここに同じ経路で書けば L3 の「Brain 決定 → $Q 書込」がそのまま成立する。RuleBrain 側は書込元を区別しない
+- `REPLAY_PADDING_MS` は既存の粗窓幅 (5000ms, `testor-adapter.ts` の `windowMs`) と同値を採用。dip 検知/回復検知そのものが粗窓の遅延を継承しているため、粗窓幅ぶん両側にパディングすれば実際のバースト境界を切り落とさない理屈（`rule-brain.ts` コメント参照）
+- `RetentionBuffer.replay(lens, fromTs, toTs)` は Step 2 の時点で既に区間引数を持っていた。「区間指定 replay 未実装」の実体は呼び出し側 (`index.ts`) が常に全域を渡していたことだった — API 設計は先行していて配線だけが遅れていたパターン
+
+**残課題**: UI のブラウザ実地確認 (`npm run dev` → dashboard で RC シナリオを流し、fine 側タイルが表示されること)。次は L3 (ClaudeBrain 本丸)。

@@ -29,7 +29,14 @@ function connect() {
 
   const esD = new EventSource(DEC_URL);
   esD.onmessage = (e) => {
-    try { renderDecisions(JSON.parse(e.data)); } catch (_) {}
+    try {
+      const data = JSON.parse(e.data);
+      if (data.type === "replay_snapshot") {
+        renderReplayTiles(data.replayPackage);
+      } else {
+        renderDecisions(data);
+      }
+    } catch (_) {}
   };
 }
 
@@ -88,19 +95,32 @@ function renderDomains(domains) {
 
 // ── Snapshot tiles ──────────────────────────────────────────────────────────
 
+function tileHtml(t) {
+  const mag = t.magnitude != null ? `<span class="tile-mag">${t.magnitude.toFixed(1)}σ</span>` : "";
+  return `<div class="tile ${t.shapeTag}">
+    <div class="tile-label">${mag}${t.label}</div>
+    <div class="tile-desc">${t.description}</div>
+  </div>`;
+}
+
 function renderTiles(pkg) {
   const el = document.getElementById("tiles");
   if (!pkg || !pkg.tiles || pkg.tiles.length === 0) {
     el.innerHTML = '<span style="color:var(--muted);font-size:11px">No characteristic moments yet.</span>';
     return;
   }
-  el.innerHTML = pkg.tiles.map((t) => {
-    const mag = t.magnitude != null ? `<span class="tile-mag">${t.magnitude.toFixed(1)}σ</span>` : "";
-    return `<div class="tile ${t.shapeTag}">
-      <div class="tile-label">${mag}${t.label}</div>
-      <div class="tile-desc">${t.description}</div>
-    </div>`;
-  }).join("");
+  el.innerHTML = pkg.tiles.map(tileHtml).join("");
+}
+
+// ── Replay tiles (fine-window re-observation, ROADMAP L2-3) ─────────────────
+
+function renderReplayTiles(pkg) {
+  const el = document.getElementById("replay-tiles");
+  if (!pkg || !pkg.tiles || pkg.tiles.length === 0) {
+    el.innerHTML = '<span style="color:var(--muted);font-size:11px">Replay produced no tiles.</span>';
+    return;
+  }
+  el.innerHTML = pkg.tiles.map(tileHtml).join("");
 }
 
 // ── Decision log ─────────────────────────────────────────────────────────────
@@ -144,4 +164,12 @@ function runScenario(id) {
 
 function stopGen() {
   fetch(`${API}/demo/stop`).catch(console.error);
+}
+
+// ── $Q[schema] write surface (ROADMAP L2-1) ──────────────────────────────────
+
+function setBaselineDelta() {
+  const input = document.getElementById("baseline-delta-input");
+  const value = input.value;
+  fetch(`${API}/control/baseline-delta?value=${encodeURIComponent(value)}`).catch(console.error);
 }

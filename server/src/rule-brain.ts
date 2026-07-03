@@ -34,6 +34,9 @@
 
 import type { BrainAdapter, BrainDecision } from "./brain-adapter.js";
 import type { STSnapshot, AgentStats, DomainStats } from "./testor-adapter.js";
+import type { QRegistry } from "./q-registry.js";
+
+const SCHEMA_ID = "test_result:v1";
 
 // ── Per-agent baseline (learned) ──────────────────────────────────────────────
 
@@ -45,6 +48,10 @@ const BASELINE_ALPHA = 0.05;         // EWMA weight for the learned baseline.
 const BASELINE_DELTA = 0.10;         // regression threshold = learned baseline − this.
                                      // agent-C(0.95)→0.85, agent-B(0.88)→0.78. agent-B's
                                      // window noise (σ≈0.04) is >2σ from 0.78 → quiet.
+                                     // Fallback only — if a registry is wired in, the live
+                                     // value comes from $Q[schema:test_result:v1].baseline_delta
+                                     // (ROADMAP L2-1). Kept as a constant so RuleBrain works
+                                     // standalone (no registry) in tests and other callers.
 const WARMUP_TICKS = 10;             // ticks observed before an agent's threshold is trusted.
                                      // No AR/RC firing during warmup (no baseline yet).
 const MIN_OBS_COUNT = 3;             // events required in a tick's window for that tick to
@@ -89,6 +96,12 @@ const DIP_MAX_TICKS = 7;             // if dip persists > this many ticks, it is
                                      // does not recover, so it never reaches the RC recovery branch
                                      // regardless of this cap.
 const REPLAY_FINE_WINDOW_MS = 1000;
+const REPLAY_PADDING_MS = 5000;      // margin added on both sides of the tracked dip
+                                     // interval before proposing it as replay fromTs/toTs
+                                     // (ROADMAP L2-2). The coarse adapter window (5s) smears
+                                     // the true burst, so the tick where RuleBrain *observes*
+                                     // entry/recovery lags the actual burst edges — padding by
+                                     // that same window keeps the interval from clipping it.
 
 // ── RuleBrain ───────────────────────────────────────────────────────────────
 
@@ -112,11 +125,24 @@ export class RuleBrain implements BrainAdapter {
   private readonly agentDipTicks = new Map<string, number>();
   /** Agents with a confirmed brief dip (dipTicks in [DIP_REQUIRE_TICKS, DIP_MAX_TICKS]). */
   private readonly agentDipActive = new Set<string>();
+  /** ts of the tick where each agent's current dip zone was first entered. */
+  private readonly agentDipStartTs = new Map<string, number>();
   /** Agents for which replayRequest has already been emitted this session. */
   private readonly agentReplayEmitted = new Set<string>();
 
   private lastSnapshot: STSnapshot | null = null;
   private pendingDecisions: BrainDecision[] = [];
+
+  constructor(private readonly registry?: QRegistry) {}
+
+  /**
+   * Current AR/RC threshold delta. Reads $Q[schema:test_result:v1].baseline_delta
+   * when a registry is wired in (ROADMAP L2-1, "Brain write surface"); falls back
+   * to the BASELINE_DELTA constant so RuleBrain works standalone.
+   */
+  private baselineDelta(): number {
+    return this.registry?.getSchema(SCHEMA_ID)?.baseline_delta ?? BASELINE_DELTA;
+  }
 
   observe(snapshot: STSnapshot): void {
     this.lastSnapshot = snapshot;
@@ -150,6 +176,7 @@ export class RuleBrain implements BrainAdapter {
     this.gapAlerted.clear();
     this.agentDipTicks.clear();
     this.agentDipActive.clear();
+    this.agentDipStartTs.clear();
     this.agentReplayEmitted.clear();
     this.pendingDecisions = [];
   }
@@ -176,7 +203,7 @@ export class RuleBrain implements BrainAdapter {
         this.agentBaseline.set(a.agentId, a.passRate);
       } else {
         const warming = obs < WARMUP_TICKS;
-        const healthy = a.passRate >= prev - BASELINE_DELTA;
+        const healthy = a.passRate >= prev - this.baselineDelta();
         if (warming || healthy) {
           this.agentBaseline.set(
             a.agentId,
@@ -197,7 +224,7 @@ export class RuleBrain implements BrainAdapter {
   private thresholdFor(agentId: string): number | null {
     if ((this.agentObsCount.get(agentId) ?? 0) < WARMUP_TICKS) return null;
     const baseline = this.agentBaseline.get(agentId);
-    return baseline === undefined ? null : Math.max(baseline - BASELINE_DELTA, THRESHOLD_FLOOR);
+    return baseline === undefined ? null : Math.max(baseline - this.baselineDelta(), THRESHOLD_FLOOR);
   }
 
   // ── AR: agent regression ──────────────────────────────────────────────────
@@ -278,6 +305,10 @@ export class RuleBrain implements BrainAdapter {
       if (inDipZone) {
         const ticks = (this.agentDipTicks.get(a.agentId) ?? 0) + 1;
         this.agentDipTicks.set(a.agentId, ticks);
+        if (ticks === 1) {
+          // First tick observed in the dip zone — anchor the replay interval here.
+          this.agentDipStartTs.set(a.agentId, this.lastSnapshot!.ts);
+        }
 
         if (ticks >= DIP_REQUIRE_TICKS && ticks <= DIP_MAX_TICKS) {
           // Confirmed brief dip (not noise, not AR-length)
@@ -293,22 +324,34 @@ export class RuleBrain implements BrainAdapter {
         // Recovery from confirmed brief dip: emit replayRequest once per session
         this.agentDipTicks.set(a.agentId, 0);
         this.agentDipActive.delete(a.agentId);
+        const dipStartTsForCleanup = this.agentDipStartTs.get(a.agentId);
+        this.agentDipStartTs.delete(a.agentId);
         if (!this.agentReplayEmitted.has(a.agentId)) {
           this.agentReplayEmitted.add(a.agentId);
+          // Interval-specified replay (ROADMAP L2-2): bound the re-observation to
+          // the tracked dip interval (padded) instead of replaying the whole
+          // retention buffer. dipStartTs is set the moment RuleBrain first noticed
+          // the dip; the current tick (this.lastSnapshot.ts) is when it noticed
+          // recovery. Both lag the true burst edges by up to one coarse window,
+          // hence REPLAY_PADDING_MS on both sides.
+          const dipStartTs = dipStartTsForCleanup ?? this.lastSnapshot!.ts;
+          const fromTs = dipStartTs - REPLAY_PADDING_MS;
+          const toTs = this.lastSnapshot!.ts + REPLAY_PADDING_MS;
           this.pendingDecisions.push({
             type: "replayRequest",
             reason: `Agent ${a.agentId} recovered from a brief pass-rate dip — requesting fine-window re-observation to recover burst shape averaged by coarse window`,
             qProposal: {
               scope: "observe:test_result:v1#fine",
-              params: { window_ms: REPLAY_FINE_WINDOW_MS },
+              params: { window_ms: REPLAY_FINE_WINDOW_MS, fromTs, toTs },
             },
-            meta: { agentId: a.agentId, targetWindowMs: REPLAY_FINE_WINDOW_MS },
+            meta: { agentId: a.agentId, targetWindowMs: REPLAY_FINE_WINDOW_MS, fromTs, toTs },
           });
         }
       } else {
         // Below BRIEF_DIP_FLOOR (too severe) or healthy without active dip: reset state
         this.agentDipTicks.set(a.agentId, 0);
         this.agentDipActive.delete(a.agentId);
+        this.agentDipStartTs.delete(a.agentId);
       }
     }
   }

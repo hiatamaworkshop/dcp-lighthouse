@@ -30,6 +30,10 @@ const registry = new QRegistry();
 registry.set("observe:test_result:v1#coarse", { window_ms: 10_000 });
 registry.set("observe:test_result:v1#fine",   { window_ms: 1_000  });
 registry.set("pipeline:*", { retention_window_ms: 120_000 });
+// AR/RC regression threshold delta (ROADMAP L2-1, "Brain write surface" demo,
+// PILOT_DATA.md §11). RuleBrain reads this live via QRegistry.getSchema — a
+// write to this scope reconfigures its threshold without a restart.
+registry.set("schema:test_result:v1", { baseline_delta: 0.10 });
 
 // ── Build layers ──────────────────────────────────────────────────────────────
 
@@ -38,7 +42,7 @@ const adapter    = new TestorAdapter({ windowMs: 5_000 });
 const buffer     = new RetentionBuffer<TestEvent>(testEventExtractor, { retentionWindowMs: 120_000 });
 const overlay    = new ObservationOverlay(registry);
 const curator    = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
-const brain      = new RuleBrain();
+const brain      = new RuleBrain(registry);
 const dashboard  = new DashboardServer(generator, adapter, brain, registry, curator, overlay);
 
 // Two parallel observation views
@@ -73,10 +77,16 @@ setInterval(() => {
       console.log(`[brain] ${d.type}: ${d.reason}`);
       // RC replayRequest: re-observe the retention buffer at the proposed fine window
       if (d.type === "replayRequest" && d.qProposal) {
-        const proposedParams = d.qProposal.params as Record<string, unknown> & { window_ms?: number };
+        const proposedParams = d.qProposal.params as Record<string, unknown> & {
+          window_ms?: number;
+          fromTs?: number;
+          toTs?: number;
+        };
         registry.set(d.qProposal.scope, proposedParams);
         const windowMs = proposedParams.window_ms ?? 1_000;
-        const fineResult = buffer.replay({ window_ms: windowMs });
+        // Interval-specified replay (ROADMAP L2-2): re-observe only the segment
+        // RuleBrain flagged, not the whole retention buffer.
+        const fineResult = buffer.replay({ window_ms: windowMs }, proposedParams.fromTs, proposedParams.toTs);
         const pkg = curator.curate(fineResult);
         console.log(`[brain] replay snapshot: ${pkg.tiles.length} tiles, span ${JSON.stringify(pkg.spanMs)}`);
         dashboard.broadcastReplay(pkg);

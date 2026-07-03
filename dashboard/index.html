@@ -53,6 +53,9 @@
     .coverage-num { width: 60px; text-align: right; font-size: 11px; color: var(--muted); }
 
     /* Snapshot tiles */
+    .snapshot-cols { display: flex; gap: 14px; }
+    .snapshot-col { flex: 1; min-width: 0; }
+    .col-label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
     .tile-grid { display: flex; flex-direction: column; gap: 6px; }
     .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 8px 10px; }
     .tile.spike { border-left: 3px solid var(--fail); }
@@ -84,6 +87,12 @@
     <h1>dcp-lighthouse</h1>
     <span id="status-badge">connecting…</span>
     <div class="scenario-btns">
+      <label style="font-size:11px;color:var(--muted);display:flex;align-items:center;gap:4px;">
+        baseline_delta
+        <input id="baseline-delta-input" type="number" step="0.01" min="0" value="0.10"
+               style="width:56px;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:2px 4px;border-radius:4px;font-family:inherit;font-size:11px;">
+        <button onclick="setBaselineDelta()">Set $Q[schema]</button>
+      </label>
       <button onclick="runScenario('AR')">Scenario AR</button>
       <button onclick="runScenario('CG')">Scenario CG</button>
       <button onclick="runScenario('RC')">Scenario RC</button>
@@ -100,8 +109,19 @@
       <div id="domain-bars"></div>
     </section>
     <section id="panel-snapshot">
-      <h2>Observation Snapshot (Brain-facing tiles)</h2>
-      <div class="tile-grid" id="tiles"></div>
+      <h2>Observation Snapshot — coarse (live) vs fine (replay)</h2>
+      <div class="snapshot-cols">
+        <div class="snapshot-col">
+          <div class="col-label">coarse (live)</div>
+          <div class="tile-grid" id="tiles"></div>
+        </div>
+        <div class="snapshot-col">
+          <div class="col-label">fine (last RC replay)</div>
+          <div class="tile-grid" id="replay-tiles">
+            <span style="color:var(--muted);font-size:11px">No replay yet.</span>
+          </div>
+        </div>
+      </div>
     </section>
     <section id="panel-decisions">
       <h2>Brain Decisions / $Q Changes</h2>

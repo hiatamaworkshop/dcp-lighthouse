@@ -50,6 +50,14 @@ export interface QPipelineParams {
 export interface QSchemaParams {
   pass_rate_floor?: number;
   flaky_threshold?: number;
+  /**
+   * AR regression threshold = per-agent learned baseline − this delta
+   * (ROADMAP L2-1, PILOT_DATA §11 "Brain write surface"). Lives here rather
+   * than only as a RuleBrain constant so a second Brain implementation reads
+   * the same value RuleBrain does, and so a write to this scope visibly
+   * reconfigures RuleBrain's live threshold.
+   */
+  baseline_delta?: number;
 }
 
 export type QParams = QObserveParams | QPipelineParams | QSchemaParams;
