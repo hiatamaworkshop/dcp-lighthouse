@@ -15,6 +15,8 @@
  */
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { MockStreamGenerator } from "./mock-stream-generator.js";
 import type { TestorAdapter, STSnapshot } from "./testor-adapter.js";
 import type { RuleBrain } from "./rule-brain.js";
@@ -59,6 +61,7 @@ function parseQuery(url: string): URLSearchParams {
 export class DashboardServer {
   private readonly snapshotSubs = new Set<ServerResponse>();
   private readonly decisionSubs = new Set<ServerResponse>();
+  private readonly dashboardDir = resolve(import.meta.dirname, "../../dashboard");
 
   constructor(
     private readonly generator: MockStreamGenerator,
@@ -174,6 +177,30 @@ export class DashboardServer {
     if (url.startsWith("/status")) {
       jsonHeaders(res);
       res.end(JSON.stringify(this.generator.getCurrentLoad()));
+      return;
+    }
+
+    if (url === "/" || url === "/index.html") {
+      try {
+        const html = readFileSync(resolve(this.dashboardDir, "index.html"), "utf-8");
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Access-Control-Allow-Origin": "*" });
+        res.end(html);
+      } catch {
+        res.writeHead(404);
+        res.end("Dashboard HTML not found");
+      }
+      return;
+    }
+
+    if (url === "/app.js") {
+      try {
+        const js = readFileSync(resolve(this.dashboardDir, "app.js"), "utf-8");
+        res.writeHead(200, { "Content-Type": "application/javascript; charset=utf-8", "Access-Control-Allow-Origin": "*" });
+        res.end(js);
+      } catch {
+        res.writeHead(404);
+        res.end("App script not found");
+      }
       return;
     }
 
