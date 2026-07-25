@@ -20,7 +20,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | 未実装 |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1-L2 完了 + L4 前段 (テスト132件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -191,14 +191,10 @@ Minecraft で検証済みのパターン。
 
 ---
 
-## 現在の状態 (2026-06-01)
+## 現在の状態
 
-**Phase 0 + Phase 1 実装完了。テスト計 72 件。**
-
-- Phase 0 (Step 1–3b): $Q レジストリ・retention buffer・ObservationOverlay・SnapshotCurator すべて実装済み
-- Phase 1 (Step 4–7): MockStreamGenerator / TestorAdapter / bitpos / RuleBrain / DashboardServer + UI すべて実装済み
-- 起動: `cd server && npm run dev` → `http://localhost:3001` (SSE dashboard on port 3001)
-- シナリオ: `/demo/start?scenario=AR|CG|RC`
+Phase 0 + Phase 1 実装完了 (詳細・ファイル対応は [README.md](README.md) のステータス表参照)。
+起動: `cd server && npm run dev` → `http://localhost:3001`。シナリオ: `/demo/start?scenario=AR|CG|RC`。
 
 ## 次のステップ (工程 L1–L5)
 
@@ -206,8 +202,78 @@ E2E 検証は完了済み (テスト 113 件、§10 基準を実測)。以後の
 **`docs/ROADMAP_BRIEF.md` の「2026-07-03 — 本体ロードマップ再編」を正とする**。要約:
 
 - **L1 ✅ (2026-07-03)** 足場固め — field findings の core 還元 (ts≤now クロック方針 / count 窓・有効性 / baseline ゲート+床)。テスト 113→121 件
-- **L2 ✅ (2026-07-03)** Brain write surface + replay 表面化 — $Q[schema] baseline_delta 昇格・区間指定 replay (fromTs/toTs)・dashboard 粗/細対比 UI。テスト 121→124 件。残: UI のブラウザ実地確認
+- **L2 ✅ (2026-07-03)** Brain write surface + replay 表面化 — $Q[schema] baseline_delta 昇格・区間指定 replay (fromTs/toTs)・dashboard 粗/細対比 UI。テスト 121→124 件。ブラウザ実地確認も完了 (2026-07-25)
 - **L3** **ClaudeBrain (本丸)** — §12 A/B 実験 → `BRAIN_MODE=claude` shadow 併走。LLM 起点の $Q 操作が核心
-- **L4** レンズチェーン残段 (group_by 他。curator 影響を先に設計)
+- **L4** レンズチェーン残段 (group_by 他)。**前段の「参照レンズ設計」は実装済み** (2026-07-25) —
+  curator を `curate(observation, reference = observation)` の二項演算に変更、SE は
+  **参照分散のみ**から `sqrt(var_ref × (1/n_w + 1/n_ref))`。テスト 124→132件。
+  ROADMAP_BRIEF.md「参照レンズ設計 実装完了」+「自己レビューで実装バグ 2 件」参照
+  (観測窓自身の分散を分母に使うと有界データで定数の誤警報になる / 参照が空の時の盲目は明示する)。
+  次は group_by 本体 (混合ストリームが比較器の単一分布前提を破るため、比較演算子の後で正しい)
 - **L5** retention 参照ゾーン (疎化)
 - 常設: traders 還元フィルタ — 「機構を行使/変更する or ドメイン非依存知見を生む」もののみ灯台の実証に数える
+
+
+---
+
+## Cairn 投稿・検索（H7 測定期間: 2026-07-10〜約2週間）
+
+<!-- 原本: CAIRN_HOME\snippets\cairn.md（Phase 0-1 検証用・絶対パス適応版）。Phase 4 で実 API 版に差し替える -->
+
+Cairn = AI が作った機能の概要と gotcha を投稿・検索する公開ショーケース DB（検証中）。
+- **CAIRN_HOME** = `C:\Users\kazuh\Desktop\Various\programming\DockerFiles\cairn`
+- CLI は CAIRN_HOME をカレントディレクトリにして実行する。事前に Qdrant 起動が必要（CAIRN_HOME で `docker compose up -d`）。
+
+### 1. 書き手側：完成検知 → 投稿提案
+
+機能をひとつ完成させたら（ユーザが「ありがとう」「これで OK」「動いた」等の満足・終了を示したら）:
+
+1. **投稿価値を判断せよ**：新規機能 かつ ハマりどころ（gotcha）が 1 個以上あるか。
+   typo 修正・軽微な調整では提案しない。
+2. 価値があれば、**テンプレを書く前に** この機能の実装区間だけ `git log --oneline`
+   （直近 20〜30 件程度）を軽く俯瞰せよ。**diff は開くな**（詳細が要るときだけ該当 commit を 1 件 `git show`）。
+   fix / revert が続く箇所、同じ対象を何度も触っている箇所が「詰まった現場」だ。
+   そこから最も伝えたい困難を解釈し、実際に踏んだ罠と躱し方を再現条件（バージョン・環境）込みで書け。
+   会話の記憶だけに頼るな。モデルが既に知っていそうな定石は書くな。
+   **git を使っていないプロジェクトでは**、エラーと修正の往復が多かった箇所を
+   会話履歴・変更したファイル群から同様に俯瞰して代用せよ。
+3. `CAIRN_HOME\docs\template.md` 準拠のテンプレを記入せよ。**テンプレの全フィールドは英語で書く**
+   （embedding 品質と公開 DB のグローバル共有のため。template.md の言語ポリシー参照）。
+   ユーザには「Cairn に push しておきますか？例えば↓」と英語テンプレ全文を提示し、
+   **ユーザの言語で要旨（何を記録するか）を 1〜2 行添えよ**。
+4. 承認されたら CAIRN_HOME で `npm run cairn-post <記入済みテンプレの絶対パス>` を実行せよ。
+   拒否・修正指示があれば従い、再提案するか中止せよ。**完全自動投稿はしない**。
+
+### 2. 読み手側：詰まった時のフェッチ
+
+実装中にエラーで **2 回以上詰まったら**:
+
+1. CAIRN_HOME で `npm run cairn-search "<エラーメッセージ・意図文>" -- --lang <自スタック>` を引け。
+   **クエリは英語で書く**（レコードは英語で保存されている。エラーメッセージは大抵そのまま使える）。
+2. ヒットが薄ければ facet フィルタ（`--lang` 等）を外して再検索せよ。
+   言語非依存の gotcha が他スタックの記録に埋まっていることがある。
+3. ヒットした記録の gotcha を読み、自分の状況に当てはまるか判断してから適用せよ。
+   盲信するな — 記録は他者の環境固有の情報を含む。
+   当てはめの説明をユーザに見せる時は**ユーザの言語**で行え（保存＝英語、会話＝ユーザの言語）。
+
+### 3. 測定ログ（H7 検証期間のみ・配布版では削除）
+
+上記 1・2 が発火するたびに、`CAIRN_HOME\logs\h7-log.jsonl` に **1 イベント 1 行の JSON** を追記せよ：
+
+```json
+{"ts": "<ISO8601>", "type": "post|search", "hit": true|false|null, "attribution": "<レコードID引用 or 'unused'>|null", "turns_to_resolve": <int|null>}
+```
+
+- **①発火**：`type` に `post`（投稿発火）または `search`（検索発火）を記録。
+  **`hit` / `attribution` / `turns_to_resolve` は search 専用フィールド**。
+  `post` イベントでは 3 つとも `null` にせよ（投稿の成功や自レコード ID を入れない）。
+- **②ヒット有無**：`search` の場合、top-k に関連 gotcha があったかを `hit` に記録。
+- **③帰属申告**：詰まりが解決した後、以下の問いに答えて記録せよ（評価ではなく帰属を聞く。追従バイアス対策）：
+
+  > 解決に至った今、フェッチ結果のうち**実際にお前の行動を変えた行があれば引用しろ**。
+  > レコード ID 付きで。**「どれも使わなかった」が正当な回答である。**
+
+  実際に行動（コード・アプローチ）を変えた記録があれば `attribution` にそのレコード ID を、
+  無ければ `"unused"` を入れよ。「役に立ったか」を聞かれても忖度で答えるな。
+- **④解決ターン数**：search 発火から実際に詰まりが解消するまでの会話ターン数を
+  `turns_to_resolve` に記録せよ（フェッチ無しで解決した場合は `null`）。

@@ -23,7 +23,7 @@
  * requests a new replay — the curator does NOT regenerate; the caller re-runs.
  */
 
-import type { LensResult, WindowStat } from "./lens.js";
+import { MIN_VALID_COUNT, type LensResult, type WindowStat } from "./lens.js";
 
 // ── Shape tags ─────────────────────────────────────────────────────────────
 
@@ -81,10 +81,26 @@ export interface SnapshotPackage {
    */
   spanMs?: { start: number; end: number };
   /**
-   * Overall shape of the observed window: the mean and std-dev over all window
-   * means. Brain uses this as the global context before reading individual tiles.
+   * The reference population every tile was scored against: the event-count-
+   * weighted mean and standard deviation pooled over the reference lens's
+   * windows, plus how many reference windows contributed. Brain uses this as
+   * the global context before reading individual tiles.
+   *
+   * Note this is pooled at the *event* level, not the spread of window means:
+   * a count=1 window no longer weighs as much as a count=500 one.
    */
   globalStats: { mean: number; stdDev: number; windowCount: number };
+  /**
+   * False when the reference lens could not support a comparison (empty, or
+   * fewer than 2 pooled events, so no variance exists). Detection is then
+   * impossible and `tiles` carries no anomalies — which is BLINDNESS, not
+   * quiet. Callers must distinguish the two: an empty tile list with
+   * referenceUsable=false means "I have no yardstick", and reading it as "all
+   * clear" is exactly the failure mode recorded in the silence-vs-blindness
+   * field finding. Only reference-derived tiles (spike/dip/step/divergence) are
+   * suppressed; gap tiles are structural and still emitted.
+   */
+  referenceUsable: boolean;
   /** The curated tiles, sorted by regionStart ascending. */
   tiles: SnapshotTile[];
 }
@@ -122,14 +138,10 @@ export interface CurationOptions {
    */
   includeBaseline?: boolean;
   /**
-   * Optional second LensResult for divergence detection — when the same stream is
-   * observed under two different lenses (parallel overlay), windows where the views
-   * disagree strongly are tagged "divergence". Divergence is per-window absolute
-   * difference / mean of the two views.
-   */
-  compareLens?: LensResult;
-  /**
    * z-score threshold for divergence across two parallel views (default 1.5).
+   * Divergence only runs when `reference` passed to curate() is a distinct
+   * LensResult from `observation` (see curate() doc) — comparing a view to
+   * itself window-by-window is meaningless.
    */
   divergenceZThreshold?: number;
 }
@@ -137,9 +149,7 @@ export interface CurationOptions {
 // ── SnapshotCurator ─────────────────────────────────────────────────────────
 
 export class SnapshotCurator {
-  private readonly opts: Required<Omit<CurationOptions, "compareLens">> & {
-    compareLens?: LensResult;
-  };
+  private readonly opts: Required<CurationOptions>;
 
   constructor(opts: CurationOptions = {}) {
     this.opts = {
@@ -150,63 +160,100 @@ export class SnapshotCurator {
       maxTiles: opts.maxTiles ?? 12,
       includeBaseline: opts.includeBaseline !== false,
       divergenceZThreshold: opts.divergenceZThreshold ?? 1.5,
-      compareLens: opts.compareLens,
     };
   }
 
   /**
-   * Curate a snapshot package from a LensResult. This is the $U "present" step.
+   * Curate a snapshot package by comparing an observation lens output against a
+   * reference lens output. This is the $U "present" step.
+   *
+   * Detection is a binary operation, not a property of a single window
+   * (ROADMAP_BRIEF.md 2026-07-25 "参照レンズ設計"): a tile is a relation between
+   * two lens outputs — `reference` supplies the baseline population (mean +
+   * pooled variance) that `observation`'s windows are scored against. Computing
+   * that baseline is itself a lens application, so `reference` is a LensResult,
+   * not a config value.
+   *
+   * `reference` defaults to `observation` — self-reference is a legitimate
+   * declared comparison (accumulate stats over the same windows being scored),
+   * not a special case. Callers that want a reproducible, non-drifting baseline
+   * (e.g. RC replay re-scoring a flagged interval) pass an explicit `reference`
+   * segment instead.
    *
    * Algorithm:
-   *  1. Compute global stats (mean + std-dev of window means).
-   *  2. Detect anomalies per window: spikes, step changes.
-   *  3. Detect gaps between consecutive windows.
-   *  4. Optionally detect divergence vs compareLens.
-   *  5. Pick one baseline tile (median-closest quiet window).
-   *  6. Sort by magnitude desc, cap at maxTiles.
+   *  1. Pool reference windows into {mean, variance, count} (Bessel-corrected,
+   *     weighted by each window's own event count — not the spread of window
+   *     means).
+   *  2. Score each observation window via a two-sample standard error derived
+   *     from both the window's own variance and the reference's pooled variance
+   *     (Welch-style). Low-count windows naturally get unresolvable (NaN)
+   *     standard error and can never cross a threshold — this subsumes the old
+   *     MIN_VALID_COUNT gate without a special case.
+   *  3. Detect sustained step changes the same way, over window runs.
+   *  4. Detect gaps between consecutive observation windows.
+   *  5. If `reference` is a distinct LensResult, also detect per-window
+   *     divergence (paired by windowStart).
+   *  6. Pick one baseline tile (window closest to the reference mean).
+   *  7. Sort by magnitude desc, cap at maxTiles.
    */
-  curate(result: LensResult): SnapshotPackage {
-    const { windows, window_ms } = result;
+  curate(observation: LensResult, reference: LensResult = observation): SnapshotPackage {
+    const { windows, window_ms } = observation;
     const now = Date.now();
 
-    const globalStats = computeGlobalStats(windows);
+    const refStats = poolStats(reference.windows);
+    // A reference with no variance to offer cannot ground any comparison. Say so
+    // explicitly rather than returning an empty tile list that reads as "quiet".
+    const referenceUsable = refStats.count >= 2 && Number.isFinite(refStats.variance);
+    const globalStats = {
+      mean: refStats.mean,
+      stdDev: referenceUsable ? Math.sqrt(refStats.variance) : 0,
+      windowCount: reference.windows.length,
+    };
     const minGapMs = this.opts.minGapMs > 0 ? this.opts.minGapMs : window_ms * 2;
 
     const tiles: SnapshotTile[] = [];
 
     // ── 1. Spikes and dips ────────────────────────────────────
-    // Low-count windows are excluded (L1-2): a count=1 window has std=0 and a
-    // mean equal to a single event's value, which can look like an extreme
-    // anomaly when it is really unresolved noise.
+    // Each window is scored against the reference population via a standard
+    // error built from the reference's variance and the window's event count.
+    //
+    // MIN_VALID_COUNT is applied here as the z-test's validity domain, not as a
+    // noise filter: the score is a normal approximation, which needs a handful
+    // of samples to mean anything. Note what changed from the pre-2026-07-25
+    // design — the window is no longer *excluded from the population*, it only
+    // cannot be *scored*. It still contributes its events to any reference that
+    // includes it. One uniform precondition on the comparator, rather than a
+    // gate that both filtered the baseline and suppressed firing.
     for (const w of windows) {
-      if (!w.valid) continue;
-      if (globalStats.stdDev === 0) break;
-      const z = (w.mean - globalStats.mean) / globalStats.stdDev;
+      if (w.count < MIN_VALID_COUNT) continue;
+      const se = comparisonSE(w, refStats);
+      if (!(se > 0)) continue;
+      const z = (w.mean - refStats.mean) / se;
       if (z >= this.opts.spikeZThreshold) {
         tiles.push({
-          label: `spike at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${globalStats.mean.toFixed(3)})`,
+          label: `spike at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${refStats.mean.toFixed(3)})`,
           shapeTag: "spike",
           regionStart: w.windowStart,
           regionEnd: w.windowEnd,
           windows: [w],
-          description: `Window mean ${w.mean.toFixed(3)} is ${z.toFixed(1)}σ above the observed baseline (${globalStats.mean.toFixed(3)}). Count: ${w.count}.`,
+          description: `Window mean ${w.mean.toFixed(3)} is ${z.toFixed(1)}σ above the reference baseline (${refStats.mean.toFixed(3)}). Count: ${w.count}.`,
           magnitude: z,
         });
       } else if (z <= -this.opts.spikeZThreshold) {
         tiles.push({
-          label: `dip at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${globalStats.mean.toFixed(3)})`,
+          label: `dip at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${refStats.mean.toFixed(3)})`,
           shapeTag: "dip",
           regionStart: w.windowStart,
           regionEnd: w.windowEnd,
           windows: [w],
-          description: `Window mean ${w.mean.toFixed(3)} is ${Math.abs(z).toFixed(1)}σ below the observed baseline (${globalStats.mean.toFixed(3)}). Count: ${w.count}.`,
+          description: `Window mean ${w.mean.toFixed(3)} is ${Math.abs(z).toFixed(1)}σ below the reference baseline (${refStats.mean.toFixed(3)}). Count: ${w.count}.`,
           magnitude: Math.abs(z),
         });
       }
     }
 
     // ── 2. Sustained step changes ──────────────────────────────
-    const stepTiles = detectSteps(windows, globalStats, this.opts.stepThreshold, this.opts.stepWindowCount);
+    const stepTiles = detectSteps(windows, refStats, this.opts.stepThreshold, this.opts.stepWindowCount);
     tiles.push(...stepTiles);
 
     // ── 3. Gaps ────────────────────────────────────────────────
@@ -224,19 +271,17 @@ export class SnapshotCurator {
       }
     }
 
-    // ── 4. Divergence vs compareLens ──────────────────────────
-    if (this.opts.compareLens) {
-      const divTiles = detectDivergence(
-        windows,
-        this.opts.compareLens.windows,
-        this.opts.divergenceZThreshold,
-      );
+    // ── 4. Divergence vs an explicit reference ─────────────────
+    // Only meaningful when reference is a genuinely different lens output —
+    // comparing observation to itself window-by-window is always zero.
+    if (reference !== observation) {
+      const divTiles = detectDivergence(windows, reference.windows, this.opts.divergenceZThreshold);
       tiles.push(...divTiles);
     }
 
     // ── 5. Baseline tile ───────────────────────────────────────
     if (this.opts.includeBaseline && windows.length > 0) {
-      const baseWin = pickBaselineWindow(windows, globalStats.mean);
+      const baseWin = pickBaselineWindow(windows, refStats.mean);
       if (baseWin && !tiles.some((t) => t.regionStart === baseWin.windowStart && t.shapeTag !== "baseline")) {
         tiles.push({
           label: `baseline at t=${baseWin.windowStart} (${baseWin.mean.toFixed(3)})`,
@@ -274,6 +319,7 @@ export class SnapshotCurator {
       window_ms,
       spanMs,
       globalStats,
+      referenceUsable,
       tiles: capped,
     };
   }
@@ -281,29 +327,63 @@ export class SnapshotCurator {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Global stats over window means. Low-count windows (WindowStat.valid===false,
- * L1-2) are excluded so a handful of noisy single-event windows can't drag the
- * baseline or inflate std-dev; falls back to all windows if none are valid
- * (sparse stream with no reliable window yet — better than {0,0}).
- */
-function computeGlobalStats(windows: WindowStat[]): {
+/** Pooled aggregate of a reference lens's windows: {mean, variance, count}. */
+interface RefStats {
   mean: number;
-  stdDev: number;
-  windowCount: number;
-} {
-  if (windows.length === 0) return { mean: 0, stdDev: 0, windowCount: 0 };
-  const reliable = windows.filter((w) => w.valid);
-  const basis = reliable.length > 0 ? reliable : windows;
-  const means = basis.map((w) => w.mean);
-  const mean = means.reduce((s, v) => s + v, 0) / means.length;
-  const variance = means.reduce((s, v) => s + (v - mean) ** 2, 0) / means.length;
-  return { mean, stdDev: Math.sqrt(variance), windowCount: basis.length };
+  /** Bessel-corrected pooled variance over every retained event, weighted by
+   * each window's own count — NaN when fewer than 2 events are pooled (spread
+   * is unresolvable, not zero). */
+  variance: number;
+  count: number;
+}
+
+/**
+ * Pool reference windows into one {mean, variance, count} triple. This is the
+ * baseline-population step of detection-as-binary-operation (ROADMAP_BRIEF.md
+ * 2026-07-25): unlike averaging window means (which weights a count=1 window
+ * the same as a count=500 window), this pools at the event level via each
+ * window's own (count, mean, sumSq) so the population stat is honestly
+ * count-weighted.
+ */
+function poolStats(windows: WindowStat[]): RefStats {
+  const count = windows.reduce((s, w) => s + w.count, 0);
+  if (count === 0) return { mean: 0, variance: 0, count: 0 };
+  const sum = windows.reduce((s, w) => s + w.mean * w.count, 0);
+  const mean = sum / count;
+  if (count < 2) return { mean, variance: NaN, count };
+  const sumSq = windows.reduce((s, w) => s + w.sumSq, 0);
+  const variance = Math.max(0, (sumSq - count * mean * mean) / (count - 1));
+  return { mean, variance, count };
+}
+
+/**
+ * Standard error for "is this window consistent with the reference?".
+ *
+ * The null hypothesis names the reference as the population the window's events
+ * were drawn from, so the yardstick is the REFERENCE's variance — spread over
+ * the window's own event count. Using the window's own variance here (a Welch
+ * two-sample form) is wrong for this question and was measurably harmful: for
+ * bounded data the within-window variance is a function of the mean, so a window
+ * whose mean is extreme necessarily has near-zero variance, collapsing its own
+ * standard error exactly when the numerator is largest. Measured on a healthy
+ * 0.95-pass stream, an all-pass window scored a constant 6.57σ "spike" at every
+ * window size — a false alarm baked into the formula rather than sampled noise
+ * (2026-07-25 self-review; see ROADMAP_BRIEF.md).
+ *
+ * Judging the observation by its own dispersion is also residual self-reference:
+ * the very thing the reference-lens design exists to remove.
+ *
+ * The `1/ref.count` term carries the reference's own estimation uncertainty, so
+ * a short reference widens the error bar instead of being trusted absolutely.
+ * NaN (reference too small to have a variance) propagates and silences firing.
+ */
+function comparisonSE(w: WindowStat, ref: RefStats): number {
+  return Math.sqrt(ref.variance * (1 / w.count + 1 / ref.count));
 }
 
 function detectSteps(
   windows: WindowStat[],
-  global: { mean: number; stdDev: number },
+  ref: RefStats,
   threshold: number,
   minRun: number,
 ): SnapshotTile[] {
@@ -314,23 +394,25 @@ function detectSteps(
 
   const emit = (start: number, end: number, dir: 1 | -1): void => {
     const run = windows.slice(start, end + 1);
-    const runMean = run.reduce((s, w) => s + w.mean, 0) / run.length;
-    const shift = Math.abs(runMean - global.mean) / (global.mean || 1);
+    const runCount = run.reduce((s, w) => s + w.count, 0);
+    const runMean = run.reduce((s, w) => s + w.mean * w.count, 0) / runCount;
+    const shift = Math.abs(runMean - ref.mean) / (ref.mean || 1);
     const shapeTag: ShapeTag = dir > 0 ? "step_up" : "step_down";
-    const z = global.stdDev > 0 ? Math.abs(runMean - global.mean) / global.stdDev : 0;
+    const se = Math.sqrt(ref.variance * (1 / runCount + 1 / ref.count));
+    const z = se > 0 ? Math.abs(runMean - ref.mean) / se : 0;
     tiles.push({
       label: `${shapeTag} t=${windows[start].windowStart}–${windows[end].windowEnd} (${(shift * 100).toFixed(1)}% shift)`,
       shapeTag,
       regionStart: windows[start].windowStart,
       regionEnd: windows[end].windowEnd,
       windows: run,
-      description: `Sustained ${dir > 0 ? "elevation" : "drop"} over ${run.length} windows. Run mean: ${runMean.toFixed(3)}, global mean: ${global.mean.toFixed(3)}.`,
+      description: `Sustained ${dir > 0 ? "elevation" : "drop"} over ${run.length} windows. Run mean: ${runMean.toFixed(3)}, reference mean: ${ref.mean.toFixed(3)}.`,
       magnitude: z,
     });
   };
 
   for (let i = 0; i < windows.length; i++) {
-    const delta = (windows[i].mean - global.mean) / (global.mean || 1);
+    const delta = (windows[i].mean - ref.mean) / (ref.mean || 1);
     const dir: 1 | -1 | null = delta >= threshold ? 1 : delta <= -threshold ? -1 : null;
     if (dir !== null && dir === runDir) {
       // continue run

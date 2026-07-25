@@ -19,7 +19,15 @@ const ev = (ts: number, value: number): LensEvent => ({ ts, value });
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Build a flat LensResult directly from windows (avoids needing applyLens). */
+/**
+ * Build a flat LensResult directly from windows (avoids needing applyLens).
+ * sumSq is synthesized as count*mean^2 — i.e. every event in the window is
+ * assumed to equal the window's mean exactly (zero within-window spread).
+ * This is the honest choice for a fixture that only specifies a mean: it
+ * means the pooled reference variance (see poolStats in snapshot-curator.ts)
+ * reduces to a count-weighted spread of window means, since there is no real
+ * per-event distribution to draw from.
+ */
 function buildResult(windows: { windowStart: number; mean: number; count?: number }[], window_ms = 1000) {
   return {
     window_ms,
@@ -30,6 +38,7 @@ function buildResult(windows: { windowStart: number; mean: number; count?: numbe
         windowEnd: w.windowStart + window_ms,
         mean: w.mean,
         count,
+        sumSq: count * w.mean * w.mean,
         valid: count >= MIN_VALID_COUNT,
       };
     }),
@@ -47,7 +56,7 @@ describe("SnapshotCurator — globalStats", () => {
     assert.equal(pkg.spanMs, undefined);
   });
 
-  it("computes mean and stdDev over window means", () => {
+  it("computes mean and stdDev pooled by event count, not spread of window means (2026-07-25 reference-lens design)", () => {
     const result = buildResult([
       { windowStart: 0, mean: 1 },
       { windowStart: 1000, mean: 3 },
@@ -55,7 +64,10 @@ describe("SnapshotCurator — globalStats", () => {
     const curator = new SnapshotCurator({ includeBaseline: false });
     const pkg = curator.curate(result);
     assert.equal(pkg.globalStats.mean, 2);
-    assert.ok(Math.abs(pkg.globalStats.stdDev - 1) < 1e-9);
+    // Bessel-corrected pooled variance over 20 events (10 at value 1, 10 at
+    // value 3): (10*1^2 + 10*3^2 - 20*2^2) / (20-1) = 20/19.
+    const expectedStdDev = Math.sqrt(20 / 19);
+    assert.ok(Math.abs(pkg.globalStats.stdDev - expectedStdDev) < 1e-9);
     assert.equal(pkg.globalStats.windowCount, 2);
   });
 });
@@ -63,10 +75,14 @@ describe("SnapshotCurator — globalStats", () => {
 // ── Window validity gating (ROADMAP L1-2) ──────────────────────────────────
 
 describe("SnapshotCurator — low-count window validity", () => {
-  it("excludes an invalid (low-count) outlier window from global stats and spike detection", () => {
-    // 10 flat, reliable windows plus one count=1 window whose mean is wildly
-    // off (noise, not signal). Without the validity gate this single-event
-    // window would drag globalStats and could itself be flagged as a spike.
+  it("pools a low-count outlier window into stats but its own SE is unresolvable so it never fires (2026-07-25 reference-lens design)", () => {
+    // 10 flat windows plus one count=1 window whose mean is wildly off. The
+    // old design excluded it via a valid/MIN_VALID_COUNT gate. The new design
+    // has no such gate: the window IS pooled (event-count-weighted) into the
+    // reference stats, but its own sample variance needs >=2 events to exist
+    // at all — at count=1 it's NaN, so its standard error is NaN and it can
+    // never cross a z threshold. The exception dissolves into the arithmetic
+    // instead of being a separate branch.
     const result = buildResult([
       ...Array.from({ length: 10 }, (_, i) => ({ windowStart: i * 1000, mean: 1.0 })),
       { windowStart: 10_000, mean: 50.0, count: 1 },
@@ -74,11 +90,16 @@ describe("SnapshotCurator — low-count window validity", () => {
     const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false });
     const pkg = curator.curate(result);
 
-    assert.equal(pkg.globalStats.mean, 1.0, "global mean should ignore the invalid window");
-    assert.equal(pkg.globalStats.stdDev, 0, "global stdDev should ignore the invalid window");
+    // Pooled over 101 events (100 at value 1.0, 1 at value 50.0).
+    assert.ok(Math.abs(pkg.globalStats.mean - 150 / 101) < 1e-9,
+      "the count=1 window should be pooled into the mean, not excluded");
+    assert.ok(pkg.globalStats.stdDev > 0,
+      "pooled stdDev should reflect the outlier's contribution");
 
-    const spikeTiles = pkg.tiles.filter((t) => t.shapeTag === "spike");
-    assert.equal(spikeTiles.length, 0, "the low-count window should not be flagged as a spike");
+    const anomalyTiles = pkg.tiles.filter((t) => t.shapeTag === "spike" || t.shapeTag === "dip");
+    assert.equal(anomalyTiles.length, 0,
+      "no window should fire: the outlier's own SE is unresolvable (count=1), and the flat " +
+      "windows sit only 1σ from the (outlier-shifted) mean — below the 2.0 threshold");
   });
 });
 
@@ -205,11 +226,10 @@ describe("SnapshotCurator — divergence across parallel lenses", () => {
       { windowStart: 3000, mean: 0.5 },
     ]);
     const curator = new SnapshotCurator({
-      compareLens: lensB,
       spikeZThreshold: 100, // suppress spike tiles so only divergence fires
       includeBaseline: false,
     });
-    const pkg = curator.curate(lensA);
+    const pkg = curator.curate(lensA, lensB);
     const divTiles = pkg.tiles.filter((t) => t.shapeTag === "divergence");
     assert.ok(divTiles.length >= 1, "should detect divergence at the spike window");
     assert.ok(divTiles.some((t) => t.regionStart === 2000), "divergence should be at t=2000");
@@ -331,5 +351,139 @@ describe("SnapshotCurator — package metadata", () => {
         `tiles should be chronological: tile ${i - 1} at ${pkg.tiles[i - 1].regionStart}, tile ${i} at ${pkg.tiles[i].regionStart}`,
       );
     }
+  });
+});
+
+// ── Explicit reference lens (ROADMAP_BRIEF.md 2026-07-25 — 参照レンズ設計) ──
+
+describe("SnapshotCurator — explicit reference lens", () => {
+  it("scores against a fixed external reference so magnitude does not drift as later windows accumulate", () => {
+    // Reference has a little real spread (window means alternate slightly)
+    // so the standard error is non-zero and z-scores are finite.
+    const reference = buildResult(
+      Array.from({ length: 20 }, (_, i) => ({ windowStart: i * 1000, mean: i % 2 === 0 ? 0.94 : 0.96 })),
+    );
+    const burstWindow = { windowStart: 20_000, mean: 0.60, count: 10 };
+
+    const curator = new SnapshotCurator({ includeBaseline: false });
+
+    const shortPkg = curator.curate(buildResult([burstWindow]), reference);
+    const shortDip = shortPkg.tiles.find((t) => t.shapeTag === "dip");
+    assert.ok(shortDip, "burst window should be flagged as a dip against the fixed reference");
+
+    // Append 30 quiet windows AFTER the burst and re-score against the SAME
+    // reference object. Under the old self-referential design (computeGlobalStats
+    // over the observation's own accumulating windows), growing the observation
+    // set would shrink the population stdDev over time and change the burst
+    // window's z-score even though nothing about the burst itself changed —
+    // this is the "late-firing coarse dip" finding. With an explicit external
+    // reference, the burst window's z-score is bit-for-bit identical.
+    const longPkg = curator.curate(
+      buildResult([
+        burstWindow,
+        ...Array.from({ length: 30 }, (_, i) => ({ windowStart: 21_000 + i * 1000, mean: 0.95 })),
+      ]),
+      reference,
+    );
+    const longDip = longPkg.tiles.find((t) => t.regionStart === burstWindow.windowStart);
+
+    assert.ok(longDip, "burst window should still be flagged after more windows accumulate");
+    assert.equal(
+      longDip!.magnitude,
+      shortDip!.magnitude,
+      "z-score must not drift when the reference is fixed externally",
+    );
+  });
+
+  it("self-reference (the default) is equivalent to passing the same LensResult explicitly", () => {
+    const result = buildResult([
+      { windowStart: 0, mean: 1.0 },
+      { windowStart: 1000, mean: 5.0 },
+    ]);
+    const curator = new SnapshotCurator({ includeBaseline: false });
+    const implicit = curator.curate(result);
+    const explicit = curator.curate(result, result);
+    assert.deepEqual({ ...implicit, generatedAt: 0 }, { ...explicit, generatedAt: 0 });
+  });
+});
+
+// ── Comparator soundness (2026-07-25 self-review regressions) ───────────────
+
+describe("SnapshotCurator — comparator scores against the reference's spread, not the window's own", () => {
+  // Regression for a bug found by self-review: scoring with a Welch-style SE
+  // that used each window's OWN variance made a perfectly uniform window look
+  // maximally anomalous, because for bounded data an extreme mean forces a
+  // near-zero within-window variance — collapsing the denominator exactly when
+  // the numerator is largest. Measured on a healthy 0.95-pass stream, an
+  // all-pass window scored a constant 6.57σ "spike" at every window size.
+  const events = (n: number, value: number, t0: number): LensEvent[] =>
+    Array.from({ length: n }, (_, i) => ev(t0 + i, value));
+
+  /** Reference: 0.95-pass-like stream — mostly 1.0 with a scattering of 0.0. */
+  const reference = applyLens(
+    Array.from({ length: 600 }, (_, i) => ev(i * 10, i % 20 === 0 ? 0 : 1)),
+    { window_ms: 1000 },
+  );
+
+  it("does not flag a perfectly uniform all-pass window as a spike", () => {
+    // Every event equals the best possible value. Its own variance is exactly
+    // zero. This must read as unremarkable, not as the strongest signal present.
+    const observation = applyLens(events(50, 1.0, 100_000), { window_ms: 1000 });
+    const curator = new SnapshotCurator({ includeBaseline: false });
+    const pkg = curator.curate(observation, reference);
+    assert.deepEqual(
+      pkg.tiles.filter((t) => t.shapeTag === "spike"),
+      [],
+      "a uniformly healthy window must not be flagged as an anomaly",
+    );
+  });
+
+  it("magnitude grows with window size for the same effect (a zero-variance window must not score a size-independent constant)", () => {
+    // The bug's signature was that z did not depend on n at all. With the
+    // reference supplying the yardstick, more events = more evidence = higher z.
+    const curator = new SnapshotCurator({ includeBaseline: false, spikeZThreshold: 0.5 });
+    const zAt = (n: number): number => {
+      const pkg = curator.curate(applyLens(events(n, 0.0, 100_000), { window_ms: 1000 }), reference);
+      return pkg.tiles.find((t) => t.shapeTag === "dip")!.magnitude!;
+    };
+    const [z10, z40] = [zAt(10), zAt(40)];
+    assert.ok(z40 > z10 * 1.5,
+      `z should scale with evidence: n=10 gave ${z10.toFixed(2)}, n=40 gave ${z40.toFixed(2)}`);
+  });
+
+  it("still detects a genuine drop", () => {
+    const observation = applyLens(events(50, 0.2, 100_000), { window_ms: 1000 });
+    const curator = new SnapshotCurator({ includeBaseline: false });
+    const pkg = curator.curate(observation, reference);
+    assert.ok(pkg.tiles.some((t) => t.shapeTag === "dip"), "a real drop must still fire");
+  });
+});
+
+describe("SnapshotCurator — unusable reference is blindness, not quiet", () => {
+  // Regression for a bug found by self-review: when the reference segment fell
+  // outside retention the pooled variance was NaN, every comparison silently
+  // evaluated false, and curate() returned an empty tile list indistinguishable
+  // from a healthy stream. That is the silence-vs-blindness confusion this
+  // project explicitly tracks, so the state is now reported.
+  const observation = buildResult([
+    { windowStart: 0, mean: 1.0 },
+    { windowStart: 1000, mean: 0.1 },
+  ]);
+
+  it("reports referenceUsable=false for an empty reference", () => {
+    const pkg = new SnapshotCurator().curate(observation, { window_ms: 1000, windows: [] });
+    assert.equal(pkg.referenceUsable, false);
+    assert.deepEqual(pkg.tiles.filter((t) => t.shapeTag === "dip"), [],
+      "no comparison is possible, so no reference-derived tiles");
+  });
+
+  it("reports referenceUsable=false when the reference holds too few events for a variance", () => {
+    const pkg = new SnapshotCurator().curate(observation, buildResult([{ windowStart: 0, mean: 1.0, count: 1 }]));
+    assert.equal(pkg.referenceUsable, false);
+  });
+
+  it("reports referenceUsable=true for a normal reference", () => {
+    const pkg = new SnapshotCurator().curate(observation);
+    assert.equal(pkg.referenceUsable, true);
   });
 });

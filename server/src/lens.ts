@@ -46,6 +46,14 @@ export interface WindowStat {
   count: number;
   /** mean of `value` over the window; NaN-free: 0 when count===0 is not emitted. */
   mean: number;
+  /**
+   * Sum of squared values over the window. Carried so a comparator can derive
+   * this window's own sample variance (Bessel-corrected: (sumSq - count*mean^2)
+   * / (count-1)) without assuming a distribution family — the reference-lens
+   * design (ROADMAP_BRIEF.md 2026-07-25) needs this to compute standard error
+   * per window rather than treating window-mean spread as the population stat.
+   */
+  sumSq: number;
   /** Whether this window has enough events (>= MIN_VALID_COUNT) to trust its mean. */
   valid: boolean;
 }
@@ -84,6 +92,7 @@ export function applyLens(events: readonly LensEvent[], lens: QObserveParams = {
   const windows: WindowStat[] = [];
   let curIdx = -1;
   let sum = 0;
+  let sumSq = 0;
   let count = 0;
 
   const flush = (): void => {
@@ -94,9 +103,11 @@ export function applyLens(events: readonly LensEvent[], lens: QObserveParams = {
       windowEnd: windowStart + window_ms,
       count,
       mean: sum / count,
+      sumSq,
       valid: count >= MIN_VALID_COUNT,
     });
     sum = 0;
+    sumSq = 0;
     count = 0;
   };
 
@@ -107,6 +118,7 @@ export function applyLens(events: readonly LensEvent[], lens: QObserveParams = {
       curIdx = idx;
     }
     sum += ev.value;
+    sumSq += ev.value * ev.value;
     count++;
   }
   flush();

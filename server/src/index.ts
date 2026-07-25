@@ -87,7 +87,28 @@ setInterval(() => {
         // Interval-specified replay (ROADMAP L2-2): re-observe only the segment
         // RuleBrain flagged, not the whole retention buffer.
         const fineResult = buffer.replay({ window_ms: windowMs }, proposedParams.fromTs, proposedParams.toTs);
-        const pkg = curator.curate(fineResult);
+        // Explicit reference lens (ROADMAP_BRIEF.md 2026-07-25 "参照レンズ設計"):
+        // score the flagged interval against the equal-length interval
+        // immediately before it, replayed through the same lens — a declared,
+        // bounded, reproducible baseline instead of the implicit self-reference
+        // that drifted as more history accumulated (the "late-firing coarse
+        // dip" finding — an old burst window would retroactively re-cross the
+        // threshold as quiet windows piled up and shrank the population stdDev).
+        const { fromTs, toTs } = proposedParams;
+        const referenceResult =
+          fromTs !== undefined && toTs !== undefined
+            ? buffer.replay({ window_ms: windowMs }, fromTs - (toTs - fromTs), fromTs)
+            : fineResult;
+        const pkg = curator.curate(fineResult, referenceResult);
+        if (!pkg.referenceUsable) {
+          // Blindness, not quiet: the preceding interval fell outside retention
+          // (or was empty), so no comparison was possible. Without this line an
+          // empty tile list would read as "the replay found nothing wrong".
+          console.warn(
+            `[brain] replay reference UNUSABLE (no comparison possible) — ` +
+            `requested [${fromTs}, ${toTs}], reference windows: ${referenceResult.windows.length}`,
+          );
+        }
         console.log(`[brain] replay snapshot: ${pkg.tiles.length} tiles, span ${JSON.stringify(pkg.spanMs)}`);
         dashboard.broadcastReplay(pkg);
       }
