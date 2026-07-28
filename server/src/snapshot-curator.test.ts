@@ -487,3 +487,60 @@ describe("SnapshotCurator — unusable reference is blindness, not quiet", () =>
     assert.equal(pkg.referenceUsable, true);
   });
 });
+
+// ── Šidák correction (2026-07-28 "対策A") ──────────────────────────────────
+
+describe("SnapshotCurator — Šidák-corrected spike/dip threshold scales with window count", () => {
+  // Reference: 100 windows alternating mean=0/mean=2 (count=100 each) pools to
+  // mean=1.0, variance~=1.0 — a fixed, reusable yardstick so every case below
+  // scores the same target window against an identical population.
+  const refWindows = Array.from({ length: 100 }, (_, i) => ({
+    windowStart: i * 1000,
+    mean: i % 2 === 0 ? 0 : 2,
+    count: 100,
+  }));
+  const reference = buildResult(refWindows);
+
+  // A quiet filler window sits exactly at the reference mean (z=0, never
+  // fires) but still counts toward N — it is what a real second, third, ...
+  // scored window in the same package would look like.
+  function withFillers(targetMean: number, fillerCount: number) {
+    const windows = [{ windowStart: 500_000, mean: targetMean, count: 100 }];
+    for (let i = 0; i < fillerCount; i++) {
+      windows.push({ windowStart: 600_000 + i * 1000, mean: 1.0, count: 100 });
+    }
+    const observation = buildResult(windows);
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false });
+    const pkg = curator.curate(observation, reference);
+    return pkg.tiles.find((t) => t.regionStart === 500_000);
+  }
+
+  it("a ~2.2σ window fires alone (N=1, threshold is a no-op there)", () => {
+    const tile = withFillers(1.221, 0);
+    assert.ok(tile, "N=1 must behave exactly like the uncorrected 2.0σ threshold");
+    assert.ok(Math.abs(tile!.magnitude! - 2.199) < 0.01);
+  });
+
+  it("the SAME ~2.2σ window is suppressed once enough other windows share the package (N=15)", () => {
+    const tile = withFillers(1.221, 14);
+    assert.equal(tile, undefined,
+      "package-wide Šidák correction must raise the effective threshold above 2.2σ at N=15");
+  });
+
+  it("suppression already applies at a modest N=5, not just large packages", () => {
+    const tile = withFillers(1.221, 4);
+    assert.equal(tile, undefined);
+  });
+
+  it("a genuine large effect (~10σ) still fires even in a large package (N=30)", () => {
+    const tile = withFillers(2.0, 29);
+    assert.ok(tile, "correction must not suppress real anomalies, only inflate the noise floor");
+    assert.ok(tile!.magnitude! > 9);
+  });
+
+  it("threshold correction is exactly a no-op at N=1: 2.05σ fires, 1.95σ does not", () => {
+    const se = Math.sqrt(1 * (1 / 100 + 1 / 10_000));
+    assert.ok(withFillers(1 + 2.05 * se, 0), "just above 2.0σ must still fire at N=1");
+    assert.equal(withFillers(1 + 1.95 * se, 0), undefined, "just below 2.0σ must not fire at N=1");
+  });
+});

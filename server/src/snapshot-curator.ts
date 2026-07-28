@@ -111,6 +111,18 @@ export interface CurationOptions {
   /**
    * z-score threshold above which a window is classified "spike" (default 2.0).
    * Lower = more sensitive; raise if the stream is noisy.
+   *
+   * Read as a FAMILY-WISE budget for the whole snapshot, not a per-window one
+   * (2026-07-28, "対策A" — ROADMAP_BRIEF.md). A curate() call scores every
+   * eligible window independently; applying this threshold per-window lets the
+   * package-level false-positive rate climb with window count (measured: 29%
+   * of 10-window QUIET packages contained a spurious tile — see ROADMAP_BRIEF.md
+   * "A/B ハーネス実行 第二弾" and its Opus 5 review). The two-sided alpha implied
+   * by this threshold is Šidák-corrected per call so the *package's* surprise
+   * budget stays constant as N grows, rather than each window silently getting
+   * its own fresh 2.0σ roll. This is not an exception bolted onto the lens: a
+   * curate() call over N windows *is* N comparisons, and correcting for that is
+   * what the "N windows in one lens" choice already implies.
    */
   spikeZThreshold?: number;
   /**
@@ -191,7 +203,10 @@ export class SnapshotCurator {
    *     ROADMAP_BRIEF.md 2026-07-25 "自己レビューで実装バグ"). `MIN_VALID_COUNT`
    *     remains a separate precondition: a window with too few events cannot be
    *     *scored* (normal-approximation validity), though it still contributes
-   *     its events to any reference that includes it.
+   *     its events to any reference that includes it. The spike/dip gate itself
+   *     uses a Šidák-corrected threshold (see spikeZThreshold doc, "対策A"
+   *     2026-07-28) so the package's false-positive budget doesn't inflate with
+   *     the number of scored windows; reported magnitudes stay uncorrected.
    *  3. Detect sustained step changes the same way, over window runs.
    *  4. Detect gaps between consecutive observation windows.
    *  5. If `reference` is a distinct LensResult, also detect per-window
@@ -227,12 +242,19 @@ export class SnapshotCurator {
     // cannot be *scored*. It still contributes its events to any reference that
     // includes it. One uniform precondition on the comparator, rather than a
     // gate that both filtered the baseline and suppressed firing.
+    //
+    // The classification GATE uses a Šidák-corrected threshold (see
+    // spikeZThreshold doc) so the package-wide false-positive budget stays
+    // fixed as the number of scored windows N grows; the reported `magnitude`
+    // stays the honest, uncorrected z so Brain sees the real effect size.
+    const scorableCount = windows.filter((w) => w.count >= MIN_VALID_COUNT).length;
+    const effectiveZThreshold = sidakCorrectedThreshold(this.opts.spikeZThreshold, scorableCount);
     for (const w of windows) {
       if (w.count < MIN_VALID_COUNT) continue;
       const se = comparisonSE(w, refStats);
       if (!(se > 0)) continue;
       const z = (w.mean - refStats.mean) / se;
-      if (z >= this.opts.spikeZThreshold) {
+      if (z >= effectiveZThreshold) {
         tiles.push({
           label: `spike at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${refStats.mean.toFixed(3)})`,
           shapeTag: "spike",
@@ -242,7 +264,7 @@ export class SnapshotCurator {
           description: `Window mean ${w.mean.toFixed(3)} is ${z.toFixed(1)}σ above the reference baseline (${refStats.mean.toFixed(3)}). Count: ${w.count}.`,
           magnitude: z,
         });
-      } else if (z <= -this.opts.spikeZThreshold) {
+      } else if (z <= -effectiveZThreshold) {
         tiles.push({
           label: `dip at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${refStats.mean.toFixed(3)})`,
           shapeTag: "dip",
@@ -382,6 +404,63 @@ function poolStats(windows: WindowStat[]): RefStats {
  */
 function comparisonSE(w: WindowStat, ref: RefStats): number {
   return Math.sqrt(ref.variance * (1 / w.count + 1 / ref.count));
+}
+
+/**
+ * Šidák-correct a two-sided z-threshold so a family of `n` independent
+ * per-window tests keeps the same overall (package-level) false-positive
+ * budget that a single test at `baseZ` would have (2026-07-28 "対策A").
+ *
+ * baseZ's two-sided alpha is treated as the *family-wise* target: shrink the
+ * per-window alpha to alpha' = 1-(1-alpha)^(1/n), then convert back to a z.
+ * n<=1 is a no-op (the formula already reduces to alpha'=alpha there).
+ */
+function sidakCorrectedThreshold(baseZ: number, n: number): number {
+  if (n <= 1) return baseZ;
+  const alpha = 2 * (1 - normalCdf(baseZ));
+  const alphaCorrected = 1 - Math.pow(1 - alpha, 1 / n);
+  return normalQuantile(1 - alphaCorrected / 2);
+}
+
+/** Standard normal CDF via the Abramowitz-Stegun 7.1.26 erf approximation (max error ~1.5e-7). */
+function normalCdf(z: number): number {
+  const sign = z < 0 ? -1 : 1;
+  const x = Math.abs(z) / Math.SQRT2;
+  const a1 = 0.254829592,
+    a2 = -0.284496736,
+    a3 = 1.421413741,
+    a4 = -1.453152027,
+    a5 = 1.061405429,
+    p = 0.3275911;
+  const t = 1 / (1 + p * x);
+  const erf = 1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+  return 0.5 * (1 + sign * erf);
+}
+
+/** Inverse standard normal CDF via Acklam's rational approximation (max error ~1.15e-9). */
+function normalQuantile(p: number): number {
+  if (p <= 0) return -Infinity;
+  if (p >= 1) return Infinity;
+  const a = [-3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2, 1.383577518672690e2, -3.066479806614716e1, 2.506628277459239e0];
+  const b = [-5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2, 6.680131188771972e1, -1.328068155288572e1];
+  const c = [-7.784894002430293e-3, -3.223964580411365e-1, -2.400758277161838e0, -2.549732539343734e0, 4.374664141464968e0, 2.938163982698783e0];
+  const d = [7.784695709041462e-3, 3.224671290700398e-1, 2.445134137142996e0, 3.754408661907416e0];
+  const plow = 0.02425;
+  const phigh = 1 - plow;
+  if (p < plow) {
+    const q = Math.sqrt(-2 * Math.log(p));
+    return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
+  }
+  if (p <= phigh) {
+    const q = p - 0.5;
+    const r = q * q;
+    return (
+      ((((( a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q /
+      (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1)
+    );
+  }
+  const q = Math.sqrt(-2 * Math.log(1 - p));
+  return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5]) / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1);
 }
 
 function detectSteps(

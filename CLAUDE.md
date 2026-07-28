@@ -20,7 +20,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1-L2 完了 + L4 前段 + L3-1 dry-run (テスト140件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1-L2 完了 + L4 前段 + L3 A/B実行+対策A実装 (テスト145件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -206,7 +206,17 @@ E2E 検証は完了済み (テスト 113 件、§10 基準を実測)。以後の
 - **L3** **ClaudeBrain (本丸)** — §12 A/B 実験 → `BRAIN_MODE=claude` shadow 併走。LLM 起点の $Q 操作が核心。
   **前段 dry-run 完了 (2026-07-28)**: A/B fixture (RC/AR + QUIET 陰性対照、シード付き、`ab-fixture.ts`) +
   ハーネス dry-run 層 (`ab-harness.ts` — prompt 2 アーム/パーサ/採点器、`askFn` 注入シームで API 接触ゼロ)。
-  テスト 132→140 件。**実行にはモデル・試行数 N・鍵/予算の判断が必要** (ROADMAP_BRIEF 07-28 残課題)
+  テスト 132→140 件。
+  **A/B 実行済 (2026-07-28、haiku 66 trial)**。ただし**再分析で当初結論を下方修正** —
+  §12 仮説「提示形式が判断を助ける」は**検証できていない**。curated アームでは LLM が
+  curator の閾値判定を転記しているだけ (タイル生成と 9/9 完全一致)。測れたのは
+  「curator の 2σ 判定 > haiku の目算」であって presentation の効果ではない。
+  **本命の発見は curator の package 単位誤警報率 29%** (出荷中の較正欠陥)。
+  **対策A実装済 (2026-07-28)**: `snapshot-curator.ts` に Šidák 補正 (spike/dip
+  判定ゲートのみ、`spikeZThreshold` は「窓ごと」から「package全体の誤警報予算」に
+  再定義)。同じ31 seedで再検証: package単位誤警報率 29%→6.5%。RC(35σ)/AR(21〜23σ)は
+  無傷。テスト 140→145件。残る対策 B〜E は未着手。
+  詳細は ROADMAP_BRIEF.md 「再分析 (Opus 5 レビュー)」「今後の対策」「対策A 実装完了」参照
 - **L4** レンズチェーン残段 (group_by 他)。**前段の「参照レンズ設計」は実装済み** (2026-07-25) —
   curator を `curate(observation, reference = observation)` の二項演算に変更、SE は
   **参照分散のみ**から `sqrt(var_ref × (1/n_w + 1/n_ref))`。テスト 124→132件。
