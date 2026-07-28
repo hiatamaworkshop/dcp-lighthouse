@@ -20,7 +20,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1-L2 完了 + L4 前段 (テスト132件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1-L2 完了 + L4 前段 + L3-1 dry-run (テスト140件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -203,7 +203,10 @@ E2E 検証は完了済み (テスト 113 件、§10 基準を実測)。以後の
 
 - **L1 ✅ (2026-07-03)** 足場固め — field findings の core 還元 (ts≤now クロック方針 / count 窓・有効性 / baseline ゲート+床)。テスト 113→121 件
 - **L2 ✅ (2026-07-03)** Brain write surface + replay 表面化 — $Q[schema] baseline_delta 昇格・区間指定 replay (fromTs/toTs)・dashboard 粗/細対比 UI。テスト 121→124 件。ブラウザ実地確認も完了 (2026-07-25)
-- **L3** **ClaudeBrain (本丸)** — §12 A/B 実験 → `BRAIN_MODE=claude` shadow 併走。LLM 起点の $Q 操作が核心
+- **L3** **ClaudeBrain (本丸)** — §12 A/B 実験 → `BRAIN_MODE=claude` shadow 併走。LLM 起点の $Q 操作が核心。
+  **前段 dry-run 完了 (2026-07-28)**: A/B fixture (RC/AR + QUIET 陰性対照、シード付き、`ab-fixture.ts`) +
+  ハーネス dry-run 層 (`ab-harness.ts` — prompt 2 アーム/パーサ/採点器、`askFn` 注入シームで API 接触ゼロ)。
+  テスト 132→140 件。**実行にはモデル・試行数 N・鍵/予算の判断が必要** (ROADMAP_BRIEF 07-28 残課題)
 - **L4** レンズチェーン残段 (group_by 他)。**前段の「参照レンズ設計」は実装済み** (2026-07-25) —
   curator を `curate(observation, reference = observation)` の二項演算に変更、SE は
   **参照分散のみ**から `sqrt(var_ref × (1/n_w + 1/n_ref))`。テスト 124→132件。

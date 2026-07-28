@@ -860,3 +860,144 @@ SSE 両チャネルを background curl でキャプチャ → シナリオ発火
   4 エージェント混合の過分散はこの前提を破る、という動機は変わらず有効。
   なお修正後の実走でもバースト窓の実測は 0.79〜0.80 (agent-C 単独なら 0.20) で、
   **希釈の実測値そのものは設計節の主張どおり**
+
+---
+
+## 2026-07-28 — L3 前段: §12 A/B 実験の fixture 第一弾 (RC)
+
+L3 (ClaudeBrain 本丸) は L1/L2 完了で前提が揃った。本丸着手前に §12 の設計仮説
+(「LLM は数値列よりタイル陳列の方が判断が良い」) 自体を検証する A/B 実験が前段として要る
+(PILOT_DATA.md §12 "Validation hook")。焦らず着手できる小粒から: 実験の**土台**
+(fixture 生成) をまず作った。LLM 呼び出し自体はまだ配線していない。
+
+**設計**: 同一の `LensResult` を素通しし、提示形式だけを変数にする。データが変数に
+混ざると比較が汚れるため。`server/src/ab-fixture.ts` の `buildRcFixture()`:
+- `raw`: fine window の `mean` を裸の配列で
+- `curated`: 同じ `fineResult` を `SnapshotCurator.curate(fine, reference)` に通した
+  タイル陳列。reference は `index.ts` の実配線と同じ「区間と同じ長さの直前区間」
+- `groundTruth`: 注入した burst の位置・pass rate (答え合わせ用)
+
+**踏んだ罠**: 初版は注入イベントの value を定数 0.95 にしていた
+(`e2e-verify.test.ts` の直接注入テストを流用した名残)。実ドメイン (pass=1/fail=0 の
+二値) では分散が生じるが、定数だと分散が機械的に 0 になり、参照レンズ側の
+`comparisonSE` が `se=0` を返して比較器全体がスキップされる
+(`referenceUsable: true` なのにタイルが 1 件も出ない — 07-25 の「盲目」とは別の、
+fixture 側の作り方に起因する沈黙)。ベルヌーイ抽出 (`Math.random() < passRate`) に
+直して解消。テスト `ab-fixture.test.ts` を8連続実行しフレーキーでないことを確認。
+
+**残課題**: AR/CG の fixture (per-agent / per-domain、RC より一段複雑)。
+実際に Claude へ2表現を渡して決定精度を比較するハーネス本体 (API 配線・スコアリング)。
+どちらも次の一手だが、今回はここで止める。
+
+---
+
+## 2026-07-28 — L3 前段: §12 A/B 実験の fixture 第二弾 (AR) + docstring 修正
+
+続き。`buildArFixture()` を追加。`mock-stream-generator.ts` の `runAR` と同じ真値
+(10s baseline P(pass)=0.95 → 30s regression P(pass)=0.70) を RC と同じ直接注入方式で
+再現。RC と違い、AR の相対シフト (0.95→0.70, 約26%) はキュレータの `stepThreshold`
+既定値 30% を下回るため `step_down` タイルは出ない設計上の想定内 — 個々の窓の
+z-score 検定 (相対シフトの床を持たない) 側が `dip` タイルとして拾う。これ自体
+「持続的だが緩やかな回帰は、1枚の `step_down` ではなく `dip` の連番として読める」
+という、A/B ハーネスに渡す価値のある観察としてコード注釈に残した。
+
+**CG は対象外にした**: coverage gap は数値ストリームの平均シフトではなく
+「どの area bit が触られていないか」という穴の問題で、spike/dip/step の語彙に乗らない。
+無理に同じ fixture 型に押し込めず、別の提示設計が要るとして先送り。
+
+**ついで**: `snapshot-curator.ts` の `curate()` docstring が 07-25 の比較器バグ修正前
+(Welch型・両分散を使う版) の説明のまま残っていた。実装は直っていたがコメントが
+追随していなかった — 修正した参照レンズのみの式と `MIN_VALID_COUNT` の一役化を
+反映する記述に直した。
+
+テスト 133→134。`ab-fixture.test.ts` を8連続実行、AR/RC 双方フレーキーなし。
+
+**残課題** (変わらず): CG の提示設計。実際に Claude へ渡すハーネス本体 (API 配線・スコアリング)。
+
+---
+
+## 2026-07-28 — fixture チェック: 交絡 1 件を検出・修正 (情報パリティ)
+
+上記 fixture 第一・二弾のレビュー。統計マージンは検算で健全 (RC バースト窓 z≈−37、
+AR 回帰窓 z≈−22 — 8連続パスは偶然ではない)。ただし**実験設計に交絡が 1 件**あった。
+
+### 交絡: raw アームに参照区間が無かった
+
+モジュール docstring は「提示形式だけが変数」と宣言していたが、実装は
+curated アームだけが参照区間の情報 (globalStats + 参照に対する採点) を持ち、
+**raw アームは観測窓の mean 配列のみ** (タイムスタンプも無し) だった。
+これでは curated が勝っても「タイル提示が良いから」か「参照データを持っていたから」か
+分離できない — §12 が検証したいのは前者。
+
+**修正**: `raw: { window_ms, observation: {windowStarts, means}, reference: {windowStarts, means} }`。
+両アームが同じ 2 つのレンズ出力を見る。「検出は二項演算」(07-25) が raw 形にもそのまま写る
+— 数列で渡すときも観測と参照のペアで渡すのが概念的に一貫する。
+windowStarts は位置回答 (「異常は t≈X」) を groundTruth と照合するのに必須。
+
+### 小修正 3 件
+
+- `emit()` が JSDoc とビルダーの間に挿入され、RC fixture の doc が `emit` に付いていた
+- `buildArFixture` の doc が「deterministic」と主張するが `Math.random()` 無シードだった。
+  mulberry32 シード付き PRNG に変更、`buildXxFixture(seed = 1)`。A/B 試行の監査可能性
+  (「seed 7 でこのデータ・この判断」) にも必要。既定シードでテストは真に決定論化
+- 「mirrors runAR timeline exactly」→ 参照区間は generator の 10s ではなく 15s (5s 窓 3 枚分)。
+  レンズの都合で選んだと明記
+
+### テスト強化
+
+テスト名「同一データの 2 表現」が実際には未検証だった → `assertArmsConsistent`
+(全 dip/spike タイルが raw 側に同一 windowStart・同一 mean で存在) を両シナリオに追加。
+シード決定性テストも追加 (同シード同一 / 異シード相違)。テスト 134→135。
+シード 1–50 の掃引で RC/AR とも 50/50 通過 (フレーキー性はマージン由来でなく構造的に排除)。
+
+---
+
+## 2026-07-28 — L3-1 前進: A/B ハーネス dry-run 層 + 陰性対照 + 小粒回収
+
+「着実なルート」指示。API もコストも要らない部分を全て先行実装した。
+
+### `ab-harness.ts` — dry-run 層 (API 接触ゼロ)
+
+- **`askFn: (prompt) => Promise<string>` 注入シーム**: 実 LLM との接触はこの 1 関数のみ。
+  API 配線は後日「注入」であって「改修」ではない — BrainAdapter (`BRAIN_MODE=claude`) と
+  同じ差し替え哲学
+- `renderPrompt(fx, arm)`: 前文 (task framing) は両アーム逐語一致、本文だけが変わる。
+  raw = 観測/参照の数列そのまま、curated = curator のダイジェスト (globalStats + タイル +
+  `referenceUsable: false` 時の盲目警告)。groundTruth 語彙の漏洩はテストで検査
+- `parseAnswer`: 裸 JSON / fence 付き / 散文埋め込みを許容。verdict 欠落・不正は null
+- `scoreAnswer`: verdict 正誤 + 位置正誤 (±1 窓の猶予 — 窓は先頭イベント整列のため)。
+  **パース不能な応答は verdictCorrect=false** — 読めない判断は誤判断であってスキップではない
+- `runTrial`: prompt/応答/解釈/採点を全部 `TrialRecord` に保存 (実験の生データ)
+
+### `buildQuietFixture()` — 陰性対照
+
+設計中に気づいた穴: 異常あり fixture (RC/AR) だけでは**「常に anomaly と答える」戦略が
+満点を取る**。RC と同一ストリーム・同一レンズで何も注入しない QUIET を追加。
+`ABFixture.injectedAnomaly: {startTs, endTs} | null` を機械採点用の一級フィールドに昇格
+(groundTruth は人間向け詳細として併存)。`seed` も fixture に記録 (監査可能性)。
+QUIET の curated アームに時折出る ~2σ タイルは 5% 床由来で現実的 — タイル有無は検出器の
+出力、verdict は Brain の判断、を分けて測るのが実験の主旨。
+
+### 小粒回収
+
+- `pickBaselineWindow` の `w.valid`: **確認して閉じた**。`valid ≡ count >= MIN_VALID_COUNT`
+  (lens.ts の定義) なので比較器の前提条件と完全同値。変更不要、同値性をコメント化
+- `lens.ts` のコメント 2 箇所が 07-25 修正前の記述のまま残っていた (MIN_VALID_COUNT の
+  「baseline stats から除外」= 旧二役、`sumSq` の「窓自身の SE 用」= Welch 型時代) → 実装に追随
+
+### テスト 135→140
+
+harness 4 suite (prompt 対称性+非漏洩 / パース / 採点 / stub での full trial) + QUIET 1 本。
+**フレーク観測 1 件 (既存)**: `E2E AR — agent regression` (実タイマー版) が全体実行 ~10 回中
+1 回失敗。機構: `sleep(120)×12` warmup が CPU 競合で伸びると回帰フェーズに食い込み、
+学習ベースラインが汚染される。仮想クロック版 AR が論理を決定論的に担保済みなので、
+実時間版は §10 実測専用として現状維持。テストファイル増による並列負荷で顕在化しやすく
+なった可能性あり — 頻発するなら concurrency 分離を検討
+
+### 残課題 (更新)
+
+- **粗窓 dip 遅延発火の定量確認** (07-25 残) — 次の小粒。旧式 (窓平均の散らばり) は静穏窓の
+  蓄積で σ が縮み続けるが、新式 (pooled) は n_ref 増で se が下界 sqrt(var_ref/n_b) に収束する
+  はず。z(t) 軌跡の before/after を数値で出す
+- A/B ハーネス**実行**: モデル選定・試行数 N・鍵/予算はユーザ判断待ち。dry-run 層は完成
+- CG アーム: L4 group_by 後 (per-area 集計 = group_by(area) そのもの)

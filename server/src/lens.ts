@@ -31,9 +31,13 @@ export interface LensEvent {
  * Minimum event count for a window's mean/std to be treated as statistically
  * meaningful (ROADMAP_BRIEF L1-2, traders field finding A2: sparse/bursty
  * streams produce low-count windows whose mean is noise, not signal — e.g.
- * count=1 has std=0 and can look like a "perfectly stable" spike/dip). Below
- * this, WindowStat.valid is false so downstream (curator) can exclude it from
- * baseline stats and anomaly detection instead of treating noise as shape.
+ * count=1 has std=0 and can look like a "perfectly stable" spike/dip).
+ *
+ * Role since the reference-lens redesign (ROADMAP_BRIEF 2026-07-25): this is
+ * the comparator's validity domain — a window below it cannot be *scored*
+ * (the z-test is a normal approximation and needs a handful of samples) —
+ * but the window still contributes its events to reference pooling. It no
+ * longer excludes windows from baseline stats (the old dual role).
  */
 export const MIN_VALID_COUNT = 3;
 
@@ -47,11 +51,13 @@ export interface WindowStat {
   /** mean of `value` over the window; NaN-free: 0 when count===0 is not emitted. */
   mean: number;
   /**
-   * Sum of squared values over the window. Carried so a comparator can derive
-   * this window's own sample variance (Bessel-corrected: (sumSq - count*mean^2)
-   * / (count-1)) without assuming a distribution family — the reference-lens
-   * design (ROADMAP_BRIEF.md 2026-07-25) needs this to compute standard error
-   * per window rather than treating window-mean spread as the population stat.
+   * Sum of squared values over the window. Carried so windows can be pooled
+   * into an event-level reference variance (Bessel-corrected:
+   * (Σ sumSq - N*mean²) / (N-1)) without assuming a distribution family —
+   * the reference-lens design (ROADMAP_BRIEF.md 2026-07-25) scores each
+   * observation window against the reference's pooled variance, not against
+   * window-mean spread and not against the window's own variance (the latter
+   * was the Welch-form bug fixed the same day).
    */
   sumSq: number;
   /** Whether this window has enough events (>= MIN_VALID_COUNT) to trust its mean. */

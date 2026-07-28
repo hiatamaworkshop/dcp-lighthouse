@@ -184,11 +184,14 @@ export class SnapshotCurator {
    *  1. Pool reference windows into {mean, variance, count} (Bessel-corrected,
    *     weighted by each window's own event count — not the spread of window
    *     means).
-   *  2. Score each observation window via a two-sample standard error derived
-   *     from both the window's own variance and the reference's pooled variance
-   *     (Welch-style). Low-count windows naturally get unresolvable (NaN)
-   *     standard error and can never cross a threshold — this subsumes the old
-   *     MIN_VALID_COUNT gate without a special case.
+   *  2. Score each observation window via a standard error derived from the
+   *     reference's pooled variance only (not the window's own variance — an
+   *     earlier Welch-style version used both and produced a self-referential
+   *     false-positive/false-negative pathology on bounded data; see
+   *     ROADMAP_BRIEF.md 2026-07-25 "自己レビューで実装バグ"). `MIN_VALID_COUNT`
+   *     remains a separate precondition: a window with too few events cannot be
+   *     *scored* (normal-approximation validity), though it still contributes
+   *     its events to any reference that includes it.
    *  3. Detect sustained step changes the same way, over window runs.
    *  4. Detect gaps between consecutive observation windows.
    *  5. If `reference` is a distinct LensResult, also detect per-window
@@ -477,6 +480,9 @@ function pickBaselineWindow(
   if (windows.length === 0) return null;
   // Prefer a statistically reliable window as "representative" (L1-2); a
   // low-count window can look artificially close to the mean by chance.
+  // `valid` is definitionally count >= MIN_VALID_COUNT (lens.ts), so this is
+  // the same precondition the comparator applies before scoring — one idiom,
+  // two readers.
   const reliable = windows.filter((w) => w.valid);
   const pool = reliable.length > 0 ? reliable : windows;
   // Pick the window whose mean is closest to the global mean (most "normal").
