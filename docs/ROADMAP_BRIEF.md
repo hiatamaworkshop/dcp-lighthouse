@@ -1360,3 +1360,228 @@ seed30の3.0σ) は補正後閾値 (N=10で約2.8σ) を超える強めの外れ
 - 対策 D (真陽性側の測定) を今回の補正込みでやる場合、閾値が上がった分だけ
   境界線ケースの検出限界も動く。D は「補正後」を前提に設計し直す必要がある
 - 対策 B・C・E は未着手のまま
+
+---
+
+## 2026-07-29 — 対策C・D 実行 (AI不要分を先行消化)
+
+B・E は LLM 呼び出しが要る一方、C・D は既存コードで完結するとロードマップに書いた通り
+だったので、API 抜きで先に片づけた。両方とも使い捨てスクリプト
+(`server/src/_c-sim.ts` / `_d-sim.ts`) で実行後に削除——恒久コードには残していない
+(git 上は untracked のまま消えているので diff にも出ない)。
+
+### 対策C: raw の「極値指し」ヒューリスティックの検証 (予測の的中)
+
+QUIET 型 fixture を窓数 N=10/30/50 で汎化し (`buildQuietFixture` は変更していない
+——スクリプト内で直接 `RetentionBuffer`+`replay` を叩いて生成)、各窓を実際の
+comparisonSE 式 (補正前、生の z) でスコアし、最も極端な窓の z を N=300 seed/N で集計。
+
+| N | 実測 min-z 平均 | 理論値 (iid正規の最小値の期待値) | 素朴閾値 &#124;z&#124;>2.0 の発火率 |
+|---|---|---|---|
+| 10 | -1.573 | -1.539 | 25.7% |
+| 30 | -2.175 | -2.043 | 57.7% |
+| 50 | -2.484 | -2.249 | 78.7% |
+
+実測は理論値にほぼ一致 (窓平均は独立正規ではなく二項×共有referenceで多少の相関がある分
+理論よりわずかに極端寄り)。N=10 の 25.7% は A/B 分析で実測した package 単位誤警報率
+29% (9/31) と同オーダーで整合。**予測は的中**——raw の失敗機序が「極値を指すヒューリス
+ティック」であるという 2026-07-28 の解釈が、窓数を変えた対照実験でも裏付けられた。
+
+### 対策D: 真陽性側 (false negative) の測定、Šidák補正後を前提に再設計
+
+RC はバースト強度、AR は回帰後 pass rate を段階的にベースライン (0.95) に近づけ、
+実際の `SnapshotCurator` (補正後、現行 shipped 動作) と自前の無補正 z (対策A以前相当)
+を同じ 100 seed で並走させ、TP率 (tile が真の異常区間と重なる) を比較。
+
+**RC (baseline=0.95, burst区間2窓/10窓中)**
+
+| burst pass rate | 補正後 TP | 無補正 TP |
+|---|---|---|
+| 0.10〜0.80 (35σ〜相当) | 100% | 100% |
+| 0.85 | 97% | 100% |
+| 0.90 | **53%** | 81% |
+
+**AR (baseline=0.95, 全6窓が回帰)**
+
+| regressed pass rate | 補正後 TP | 無補正 TP |
+|---|---|---|
+| 0.70〜0.90 (21〜23σ相当) | 100% | 100% |
+| 0.92 | 94% | 98% |
+
+結論:
+- **元の RC(35σ)・AR(21〜23σ) シナリオは対策Aの補正で無傷** (100%) —
+  「対策A実装完了」の主張が graded effect size でも再確認された
+- 補正のコストはノイズフロア付近 (baseline との差が実質 5pp、かつイベント数が
+  少ない窓) に集中する。RC 0.90 (baseline比 -5pp・200イベント) で TP が
+  81%→53% と最も大きく落ちる。これは「Šidák補正は family-wise alpha を維持する
+  設計であって検出力を無償で保つ設計ではない」という対策A実装時の想定通りの
+  トレードオフで、感度の崩れ方が急激でも予期せぬものではない
+- D が求めていた「境界線ケースの検出限界がどこにあるか」は定量化できた:
+  RC は burst-baseline 差 ~10pp 未満、AR は regression-baseline 差 ~3pp 未満が
+  補正後の検出限界の目安
+
+### 残課題 (更新)
+
+- 対策 B・E は未着手 (LLM 呼び出しが必要)
+
+---
+
+## 2026-07-29 — ライブ coarse view の自己参照解消 + ブラウザ実地確認
+
+07-25/対策A の残課題だった「`dashboard.ts` のライブ coarse view が
+`curator.curate(coarseView.current())` と自己参照のまま」を解消し、そのままブラウザ実地で
+07-25 finding (粗窓dipの遅延発火・明滅) の変化を確認した。AI不要、対策C・Dと同じ枠で実施。
+
+### 診断: 自己参照は2つの問題を持っていた
+
+1. **自己参照そのもの**: 観測対象自身を参照母集団に含めるため、本物の dip がその参照の
+   平均・分散を薄め、自分自身のσを目減りさせる (index.ts の replay 経路には既に
+   2026-07-25 に "参照レンズ設計" で修正済みだったが、ライブの周期ブロードキャストだけ未対応)
+- **無限成長 (今回新たに判明)**: `LensView.current()` は view 生成以降に保持した
+  全イベントを毎回再集計するため、稼働時間とともに窓数 N が際限なく増え続ける。
+  「観測区間の直前の等長区間」を参照に取る RC/AR fixture と同じ発想で最初に直したところ
+  (`first.windowStart - (last.windowEnd-first.windowStart)`)、**observation 区間自体が
+  無限成長しているため参照区間の起点もどんどん過去へ遡り、やがて retention (120s) の外に
+  出て `referenceUsable: false` に落ちた** (実機で確認: 44秒間 windowCount=1 に張り付き)
+
+### 修正
+
+`dashboard.ts` に `LIVE_REFERENCE_WINDOW_COUNT = 3` を導入し、`RetentionBuffer.replay()` を
+直接 2 回叩いて observation (直近 3×coarse window_ms) と reference (その直前の同じ長さの
+区間) を毎回新しく構成する方式に変更 — coarse LensView の蓄積配列は使わない。
+`observation + reference` の合計スパンが retention_window_ms (120s) に収まるよう
+window_ms=10,000 × 3 = 30s を選んだ (最初 count=10 で試して retention を超え全域
+`referenceUsable:false` になる失敗を実機で踏んだ — 60s+60s=120sではマージンが無い)。
+`DashboardServer` の型を汚さないよう `RetentionBuffer<T>` の代わりに `replay()` 一本だけの
+狭い `ReplaySource` インターフェースを新設 (`RetentionBuffer<TestEvent>` を
+`RetentionBuffer<unknown>` に代入しようとして分散エラーで一度失敗している)。
+
+テスト145件 green (この経路をカバーする専用テストは無い — dashboard.ts は元々ユニット
+テスト対象外)。
+
+### ブラウザ実地確認 (RC, 130秒キャプチャ: baseline 65s → RC 60s)
+
+- **修正前** (count=10 の第一版): 全区間 `referenceUsable: false`, windowCount 1 に固着
+- **修正後**: `referenceUsable: true` が起動65秒後から安定して成立、`windowCount` は
+  終始 3 に固定 (無限成長が止まったことを実測で確認)、refMean は 0.92〜0.94 のレンジで
+  安定 (自己参照特有のドリフトなし)
+- RC の本来の検出経路 (`replayRequest` → 細窓 replay) は今回変更していない箇所で、
+  従来通り `dip 4.6σ` が正しく発火 — 回帰なし
+- **粗窓側は今回もバースト中〜直後を通じて `[baseline]` タイルのみ**。これは
+  バグではなく RC の前提通り (agent-C 1体だけが 2 秒 passRate 0.20 に落ちても、
+  4 agent 合算・10 秒粗窓に薄まると実差は ~0.03〜0.04 程度で、Šidák 補正後閾値の
+  近傍に留まり毎回は超えない) — skill doc `run-lighthouse` の「バースト進行中の
+  粗窓タイルが baseline のみなのは正常」との既存記述と整合
+- **07-25 finding (遅延発火・明滅) は再現しなかった**: 旧バグの機序 (自己参照+無限成長に
+  よって過去のバースト窓が事後的に閾値を再突破する) が今回の修正で構造的に排除された
+  (reference が固定長・非自己参照になったため、そもそも「後から効いてくる」経路が無い)。
+  ただし今回の RC 実行では粗窓dipタイル自体が一度も発火しなかったため、
+  「発火はするが遅延・明滅する」旧症状そのものをその場で再現して直接比較したわけではない
+  — 結論は「症状を再現できなかった (構造的に無くなったと推定できる根拠あり)」であって
+  「発火した上で遅延が消えたことを目視した」ではない、という留保付き
+
+### 残課題
+
+- 07-25 finding の「遅延発火」を直接再現して before/after 比較する場合は、より薄い
+  agent 数 (1/4ではなく全ストリームがdipする AR寄りの条件) か、coarse window_ms を
+  意図的に細くした $Q チューニングで粗窓側の検出力を上げてから試す必要がある
+- 対策 B・E は未着手 (LLM 呼び出しが必要)
+
+---
+
+## 2026-07-29 (2) — 上のセクションの結論を下方修正: 明滅は消えていなかった
+
+直上のライブ coarse view 修正を Opus 5 でレビューし、**「07-25 の遅延発火・明滅を構造的に
+排除した」という結論が誤りだった**ことが判明した。旧機序 (自己参照によるσ縮小) は確かに
+消えたが、**同じ症状が別機序で新規に入り込んでいた**。ブラウザ実地確認で再現しなかったのは
+「粗窓dipがそもそも一度も発火しなかった」ためで、留保として書いておいた通りの見落としだった。
+
+### 新しい機序: anchor が tick ごとに滑る
+
+`applyLens` は渡された区間の**先頭イベント**に窓格子を貼る (`lens.ts` の
+`origin = sorted[0].ts`)。修正後の `broadcast()` は `nowTs = snapshot.ts` を毎 tick
+1秒進めて `[nowTs - span, nowTs]` を要求していたので、**格子も毎 tick 1 秒ずれる**。
+2秒のバーストは「1つの粗窓に丸ごと収まる」状態と「境界で2窓に割れる」状態を周期的に
+往復し、割れると実効 delta が半減して閾値を跨いだり跨がなかったりする。
+
+修正前 (`coarseView.current()`) はプロセス最初のイベントに origin が固定されていたため、
+この滑りは存在しなかった。**つまり今回の変更は、σ縮小による明滅を消す代わりに
+格子スライドによる明滅を持ち込んでいた。**
+
+実測 (50 evt/s・4 agent・pass 0.95・agent-C が 2 秒だけ低下、seed 42、
+バーストは**過去に固定されて一切変化しない**):
+
+| バースト passRate | 発火パターン (tick 毎) | magnitude 範囲 | 同一バーストの regionStart |
+|---|---|---|---|
+| 0.55 (閾値近傍) | `YYYnnnYYYYYnnnnnnYYYY` | 2.49–3.64σ | **7 通り** |
+| 0.20 (強い異常) | 全 tick 発火 | **2.60–5.28σ** | **10 通り** |
+
+データは動いていない。動いていたのは窓の切れ目だけ。0.55 では初回発火がバースト終了の
+5 秒後という**遅延発火**まで再現している。
+
+### 併せて見つかった問題
+
+- **windowCount が 3 と 4 で揺れる**: `RetentionBuffer.segment()` は `ts <= toTs` の
+  閉区間、窓は半開区間。`spanMs` ちょうどの幅を閉区間で取ると末尾に count=1 の 4 窓目が
+  生まれる。実運用では `Date.now()` のジッタ次第で 3 か 4 かが決まる非決定で、Šidák の
+  family size がそれに引きずられ実効閾値が 2.42σ ⇄ 2.52σ で揺れる
+  (上の実測では常に 4 窓。定数名が「ちょうど3」を約束していたぶん紛らわしかった)
+- **レンズが `window_ms` に矮小化されていた**: `coarseView.current().window_ms` だけを
+  拾って `{ window_ms }` を組み直しており、`lens.ts` が明示している契約
+  (*callers hand the observeParams object over unchanged*) に反する。現状は applyLens が
+  window_ms しか実装していないので挙動は同じだが、**L4 で group_by が入った瞬間に
+  ライブ粗窓だけが黙って別物になる**。`index.ts` の replay 経路も同型だった
+  (`proposedParams` を持っているのに `{ window_ms }` に潰していた)
+- **`referenceUsable: false` がライブ経路では無言**: `index.ts` の replay 経路には warn が
+  あるのに周期ブロードキャスト側には無かった。`$Q` で coarse window_ms を
+  `retention_window_ms / (2 × count)` = 20s より上げると黙って盲目化する
+
+### 修正 (2巡目)
+
+- `liveSpans(nowTs, windowMs, count)` を `dashboard.ts` から export。区間を
+  `floor(nowTs / windowMs) * windowMs` で**絶対時刻の固定格子に量子化**し、`toTs` は
+  `gridNow - 1` として閉区間/半開区間のズレを潰す。これで境界は 1 窓単位でしか動かず、
+  過去のバーストは射程内にいる限り同じ windowStart を保つ
+  (applyLens は依然先頭イベントに貼るが、ズレはイベント間隔 ~20ms に収まる。
+  格子を宣言可能にするのは `QObserveParams` に `origin` 段を足す話で、L4 の範囲)
+- レンズは `registry.getObserve(coarseView.schemaId, coarseView.view)` で**丸ごと**取得して
+  `replay()` にそのまま渡す。overlay は「粗い角度が attach されているか」だけを答え、
+  「その角度は何か」は $Q が答える、という役割分担にした。`index.ts` も
+  `const { fromTs, toTs, ...lens } = proposedParams` で区間指定とレンズを分離
+- `reportReferenceBlindness()` を追加 (エッジトリガ)。沈黙と盲目を混同しない、という
+  既存の field finding をライブ経路にも適用
+
+### テスト (145 → 151 件)
+
+`dashboard.test.ts` を新設。`liveSpans` を独立した関数として export したのは、
+**この経路のバグが 2 回とも 40 秒の SSE キャプチャを睨んで見つかっており、しかも
+1 回目の修正案自体が間違ったまま出荷されて 2 回目のキャプチャで初めて捕まった**ため。
+HTTP サーバもブラウザも generator も要らない性質だった。
+
+上の表の 4 つの指標 (発火の一貫性 / magnitude の安定 / windowCount / regionStart) は
+**すべて修正前のコードに対して落ちること**を確認済み。
+
+### 副次的に判明した既存の不安定さ (未修正)
+
+`e2e-verify.test.ts` の "E2E AR — agent regression" だけが `new MockStreamGenerator()` を
+**シード無し・実時計**で回しており (他は `seededRng(42)` + 仮想時計)、フルスイート 10 回中
+1 回落ちた。今回の変更は DashboardServer を経由しないので無関係。ただし「5秒以内に発火」を
+検証する受入テストなので、仮想時計に寄せると検証内容自体が変わる。方針判断が要る。
+
+### 残課題 (更新)
+
+- `QObserveParams` に `origin`/`align` 段を足して格子を宣言可能にする (L4 レンズチェーン)
+- retention 予算がコード上どこにも強制されていない。`registry.set("pipeline:*",
+  { retention_window_ms })` は本番コードから一度も読まれておらず (`getPipeline()` の
+  呼び出し元が無い)、`RetentionBuffer.setRetentionWindowMs` も未配線。120s が
+  `index.ts` のハードコードと $Q 行と定数コメントの 3 箇所に重複している
+- ライブ粗窓は参照が「直前30秒」固定になったことで **level detector から
+  change detector に意味が変わった** (AR のような持続的劣化は 30〜60 秒で参照側に
+  飲み込まれてタイルが消える)。RuleBrain が passRate で別途見ているので実害は無いが、
+  設計判断として明記しておく
+- 格子量子化の代償として、進行中の未完了窓を観測しない = 最大 window_ms ぶんの
+  検出遅延が入る (§10 の「AR 5秒以内」は RuleBrain 経路なので影響なし)
+- `LensView.push()` はイベント毎に全保持イベント (最大1万件) を再集計する。
+  50 evt/s × 2 view = 毎秒 100 回。今回 overlay は window_ms を渡す役目すら失ったので、
+  このコストが何のためかを正面から問える状態になった
+- 対策 B・E は未着手 (LLM 呼び出しが必要)

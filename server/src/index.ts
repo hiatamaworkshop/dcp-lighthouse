@@ -43,7 +43,7 @@ const buffer     = new RetentionBuffer<TestEvent>(testEventExtractor, { retentio
 const overlay    = new ObservationOverlay(registry);
 const curator    = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
 const brain      = new RuleBrain(registry);
-const dashboard  = new DashboardServer(generator, adapter, brain, registry, curator, overlay);
+const dashboard  = new DashboardServer(generator, adapter, brain, registry, curator, overlay, buffer);
 
 // Two parallel observation views
 overlay.add("coarse", "test_result:v1", { view: "coarse" });
@@ -83,10 +83,14 @@ setInterval(() => {
           toTs?: number;
         };
         registry.set(d.qProposal.scope, proposedParams);
-        const windowMs = proposedParams.window_ms ?? 1_000;
         // Interval-specified replay (ROADMAP L2-2): re-observe only the segment
-        // RuleBrain flagged, not the whole retention buffer.
-        const fineResult = buffer.replay({ window_ms: windowMs }, proposedParams.fromTs, proposedParams.toTs);
+        // RuleBrain flagged, not the whole retention buffer. fromTs/toTs select
+        // the segment; everything else in the proposal is the lens and is handed
+        // over unchanged (lens.ts's contract) — rebuilding a `{ window_ms }`
+        // literal here would silently drop the rest of the chain once L4 adds
+        // group_by and the later stages.
+        const { fromTs, toTs, ...lens } = proposedParams;
+        const fineResult = buffer.replay(lens, fromTs, toTs);
         // Explicit reference lens (ROADMAP_BRIEF.md 2026-07-25 "参照レンズ設計"):
         // score the flagged interval against the equal-length interval
         // immediately before it, replayed through the same lens — a declared,
@@ -94,10 +98,9 @@ setInterval(() => {
         // that drifted as more history accumulated (the "late-firing coarse
         // dip" finding — an old burst window would retroactively re-cross the
         // threshold as quiet windows piled up and shrank the population stdDev).
-        const { fromTs, toTs } = proposedParams;
         const referenceResult =
           fromTs !== undefined && toTs !== undefined
-            ? buffer.replay({ window_ms: windowMs }, fromTs - (toTs - fromTs), fromTs)
+            ? buffer.replay(lens, fromTs - (toTs - fromTs), fromTs)
             : fineResult;
         const pkg = curator.curate(fineResult, referenceResult);
         if (!pkg.referenceUsable) {
