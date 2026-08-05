@@ -1585,3 +1585,100 @@ HTTP サーバもブラウザも generator も要らない性質だった。
   50 evt/s × 2 view = 毎秒 100 回。今回 overlay は window_ms を渡す役目すら失ったので、
   このコストが何のためかを正面から問える状態になった
 - 対策 B・E は未着手 (LLM 呼び出しが必要)
+
+---
+
+## 2026-08-05 — 整備系 3 件 (retention の $Q 配線 / 予算チェック / LensView 遅延再集計)
+
+L4 本体 (group_by) に入る前に、07-29 の残課題のうち**機能追加を伴わないもの**を片付けた。
+3 件とも挙動不変を意図した整備だが、うち 1 件は既存テストが本物の意味変化を捕まえた (後述)。
+テスト 151 → 164 件。
+
+### ① `$Q[pipeline].retention_window_ms` を実配線 (`q-retention-binding.ts` 新規)
+
+`registry.set("pipeline:*", { retention_window_ms: 120_000 })` は**本番コードから一度も
+読まれていなかった** — `getPipeline()` に呼び出し元が無く、`RetentionBuffer.setRetentionWindowMs`
+も未配線で、120s は `index.ts` のハードコードとして別に生きていた。
+「観測パラメータは実行中に Brain が書き換えられる」を主張するプロジェクトで、retention は
+まさに Brain が広げたい (「もっと保持しろ、今から再観測する」) パラメータなのに飾りだった。
+
+`bindObserveWindow` ($Q[observe] → StCollector) と同型の `bindPipelineRetention`
+($Q[pipeline] → RetentionBuffer) を追加。bind 時に現在値を適用し、以後 `pipeline:*` への
+書き込みに追従する。`index.ts` の 120_000 リテラルは 1 箇所 (bootstrap 定数) に集約し、
+bind 後は $Q 行が正になる。
+
+**不正値は投げずに warn して拒否する**設計にした。$Q の listener は `set()` の中で
+同期的に走るので、`setRetentionWindowMs` の `RangeError` をそのまま通すと
+**この binding より後に登録された無関係な listener まで巻き添えで止まり**、
+例外は行を書いた側 (= Brain) に出る。Brain が不正な数値を 1 つ提案しただけで
+tick ループが落ちる。拒否は binding 内で完結させ、バッファは直前の正常値を保つ。
+副作用として $Q は「検証済みの値の store」ではなく「提案された値の store」になるが、
+これは意図的 — swap history は**何が提案されたか**の記録であり、拒否された提案も見えるべき。
+
+### ② ライブ粗窓の retention 予算チェック (`dashboard.ts`)
+
+`2 × count × window_ms ≤ retention_window_ms` という関係はコメントにしか無く、
+**両辺とも $Q で書き換え可能**になった (粗窓 window_ms は元から、retention は①で)。
+関係が破れても静かに壊れる: 参照区間が空で返り、view が盲目になるだけ。
+
+`liveLookbackMs()` / `maxCoarseWindowMs()` を純関数として切り出し、broadcast の前段で
+edge-trigger チェック。破れたら「window_ms を N まで下げるか retention を M まで上げろ」と
+具体値で言う。**盲目の事後検知とは別建てにした** — 予算超過は設定ミス (直せ)、
+起動直後の盲目は履歴が溜まっていないだけ (放っておけば直る) で、対処が違う。
+`ReplaySource` に `getRetentionWindowMs()` を追加 (retention が可変になった以上、
+120s を前提にしたコメントのままでは嘘になりうる)。
+
+テストは **`liveSpans` と `liveLookbackMs` を互いに固定**する形にした。片方だけ変更されると
+警告文が嘘になり、しかも**警告が存在する理由そのもののケースで黙る**。リテラル 120_000 に
+固定しても、その drift は捕まらない。
+
+### ③ `LensView` の再集計を `current()` まで遅延
+
+`push()` が毎イベント `applyLens` を全保持イベント (最大1万件) に対して回していた。
+パイロットの 50 evt/s × 2 view = **毎秒 100 回の全再集計**。消費側は tick で毎秒 1 回読むだけ。
+`stale` フラグ方式にして読み時に 1 回だけ derive する。derive は「保持イベント + registry の
+現レンズ」の純関数で、無効化源は push/backfill と $Q 変更の 2 つだけなので、
+意味は変わらず費用だけ変わる — **はずだった**。
+
+**既存テスト `stops re-shaping after detach` が落ちた。これは本物の意味変化**:
+
+```
+push → detach → $Q 変更 → current()
+```
+
+eager では push 時点で derive 済みなので detach 後の $Q 変更は届かない。遅延化すると
+未解決の invalidation が**変更後**に解決され、detach したはずの view が新レンズで再集計される。
+`detach()` が**購読解除したその変更に反応する**という、detach の定義に反する状態。
+修正は `detach()` で保留中の derive を flush すること。遅延化が観測可能になる唯一の境界が
+detach だったという話で、テストが正しく実装が間違っていた。
+
+なお `overlay` は 07-29 の変更で window_ms を渡す役目すら失っており、`current()` は
+production から実質呼ばれない。③はその死荷重を毎秒 100 回から ~0 回にしたに過ぎず、
+**「この overlay は何のためにあるのか」という問いは解いていない**。L4 の group_by は
+overlay 側に載るはずなので、そこで答えが出る。
+
+### 実地確認 (RC シナリオ)
+
+`npm run dev` + SSE 生キャプチャ 40 秒。07-29 の格子量子化の効果が実配信で確認できた:
+
+- 粗窓 dip が `regionStart=…410017` に固定されたまま **17 ティック連続で 3.58σ→3.68σ**。
+  明滅なし。07-25 に観測した「2.0σ 境界での明滅」は再現しない
+- 起動直後の 13 ティックは `refUsable=false` (retention に参照区間ぶんの履歴がまだ無い)。
+  ①の warn が retention 値込みで 1 行だけ出た (edge-trigger 通り)。予算チェックは沈黙
+  (10s ≤ 上限 20s) — 既定構成で鳴らないことも確認した
+- replay 経路 (`window_ms:1000` + fromTs/toTs) と rerouteSchema は従来どおり
+
+**副次的な気付き (未修正)**: `refUsable=false` の間、curator が `step_up magnitude=0.00` の
+タイルを出している。物差しが無い状態で形タイルが出るのは紛らわしい。今回の変更とは無関係の
+既存挙動 (curator 側の盲目時セマンティクス)。
+
+### 残課題 (更新)
+
+- `QObserveParams` に `origin`/`align` 段を足して格子を宣言可能にする (L4 レンズチェーン)
+- ~~retention 予算がコード上どこにも強制されていない~~ → ①② で解消
+- ~~`LensView.push()` の毎イベント全再集計~~ → ③ で解消。ただし overlay の存在意義自体は未解決
+- ライブ粗窓は change detector であって level detector ではない (設計判断として明記済み)
+- 格子量子化の代償: 最大 window_ms ぶんの検出遅延
+- `refUsable=false` 時に curator が magnitude=0 の形タイルを出す (上記)
+- `e2e-verify.test.ts` の "E2E AR" がシード無し実時計 (方針判断待ちで保留中)
+- 対策 B・E は未着手 (LLM 呼び出しが必要)

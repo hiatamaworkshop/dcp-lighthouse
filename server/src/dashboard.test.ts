@@ -13,7 +13,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { LIVE_REFERENCE_WINDOW_COUNT, liveSpans } from "./dashboard.js";
+import {
+  LIVE_REFERENCE_WINDOW_COUNT,
+  liveLookbackMs,
+  liveSpans,
+  maxCoarseWindowMs,
+} from "./dashboard.js";
 import { RetentionBuffer } from "./retention-buffer.js";
 import { SnapshotCurator } from "./snapshot-curator.js";
 import type { LensEvent } from "./lens.js";
@@ -37,7 +42,7 @@ test("liveSpans: reference is the equal-length span immediately before, no overl
 });
 
 test("liveSpans: both spans fit inside the shipped retention budget", () => {
-  // index.ts builds RetentionBuffer with retentionWindowMs = 120_000. If the
+  // index.ts bootstraps $Q[pipeline].retention_window_ms = 120_000. If the
   // total lookback exceeds it the reference falls outside what is retained and
   // referenceUsable silently goes false — the failure mode the first fix
   // attempt shipped with (count=10 → 200s of lookback against a 120s buffer).
@@ -48,6 +53,27 @@ test("liveSpans: both spans fit inside the shipped retention budget", () => {
     lookback < RETENTION_MS,
     `total lookback ${lookback}ms must fit in retention ${RETENTION_MS}ms`,
   );
+});
+
+test("liveLookbackMs agrees with what liveSpans actually reaches back for", () => {
+  // The budget check warns from liveLookbackMs while the reads come from
+  // liveSpans. If the two formulas drift the warning becomes a lie — silent in
+  // exactly the case it exists for. Pin them to each other, not to a literal.
+  for (const windowMs of [1_000, 10_000, 7_000]) {
+    const { observation, reference } = liveSpans(1_234_567, windowMs);
+    const actual = observation.toTs - reference.fromTs + 1; // toTs is inclusive
+    assert.equal(liveLookbackMs(windowMs), actual, `window_ms=${windowMs}`);
+  }
+});
+
+test("maxCoarseWindowMs is the largest window whose lookback still fits", () => {
+  const RETENTION_MS = 120_000;
+  const w = maxCoarseWindowMs(RETENTION_MS);
+  assert.ok(liveLookbackMs(w) <= RETENTION_MS, `${w}ms must fit`);
+  assert.ok(liveLookbackMs(w + 1) > RETENTION_MS, `${w + 1}ms must not fit`);
+  // The shipped coarse window is well inside it — the check should be quiet in
+  // the default configuration, or it is noise nobody will read.
+  assert.ok(WINDOW_MS < w, `shipped coarse window ${WINDOW_MS}ms must clear the budget`);
 });
 
 test("liveSpans: spans are pinned to an absolute grid, not to the tick clock", () => {

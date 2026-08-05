@@ -16,6 +16,7 @@ import { QRegistry } from "./q-registry.js";
 import { MockStreamGenerator } from "./mock-stream-generator.js";
 import { TestorAdapter, testEventExtractor } from "./testor-adapter.js";
 import { RetentionBuffer } from "./retention-buffer.js";
+import { bindPipelineRetention } from "./q-retention-binding.js";
 import { ObservationOverlay } from "./lens-view.js";
 import { SnapshotCurator } from "./snapshot-curator.js";
 import { RuleBrain } from "./rule-brain.js";
@@ -26,10 +27,17 @@ import type { TestEvent } from "./mock-stream-generator.js";
 
 const registry = new QRegistry();
 
+/**
+ * Bootstrap retention width. The literal appears exactly once: the $Q row below
+ * is the live authority (bindPipelineRetention keeps the buffer following it),
+ * and this constant only seeds the buffer's constructor before the bind runs.
+ */
+const RETENTION_WINDOW_MS = 120_000;
+
 // Default observe params: coarse live view + fine view for replay
 registry.set("observe:test_result:v1#coarse", { window_ms: 10_000 });
 registry.set("observe:test_result:v1#fine",   { window_ms: 1_000  });
-registry.set("pipeline:*", { retention_window_ms: 120_000 });
+registry.set("pipeline:*", { retention_window_ms: RETENTION_WINDOW_MS });
 // AR/RC regression threshold delta (ROADMAP L2-1, "Brain write surface" demo,
 // PILOT_DATA.md §11). RuleBrain reads this live via QRegistry.getSchema — a
 // write to this scope reconfigures its threshold without a restart.
@@ -39,7 +47,7 @@ registry.set("schema:test_result:v1", { baseline_delta: 0.10 });
 
 const generator  = new MockStreamGenerator();
 const adapter    = new TestorAdapter({ windowMs: 5_000 });
-const buffer     = new RetentionBuffer<TestEvent>(testEventExtractor, { retentionWindowMs: 120_000 });
+const buffer     = new RetentionBuffer<TestEvent>(testEventExtractor, { retentionWindowMs: RETENTION_WINDOW_MS });
 const overlay    = new ObservationOverlay(registry);
 const curator    = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
 const brain      = new RuleBrain(registry);
@@ -48,6 +56,11 @@ const dashboard  = new DashboardServer(generator, adapter, brain, registry, cura
 // Two parallel observation views
 overlay.add("coarse", "test_result:v1", { view: "coarse" });
 overlay.add("fine",   "test_result:v1", { view: "fine"   });
+
+// $Q[pipeline] is now the live authority for retention width: a write to that
+// scope resizes the freshness zone in place, the same way $Q[observe] reshapes
+// a collector's window. Without this the row was set and never read.
+bindPipelineRetention(registry, buffer);
 
 // ── Wire event flow ───────────────────────────────────────────────────────────
 

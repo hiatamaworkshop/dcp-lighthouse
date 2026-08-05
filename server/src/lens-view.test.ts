@@ -100,6 +100,70 @@ describe("LensView — tuning interruption (live re-shape on $Q change)", () => 
   });
 });
 
+describe("LensView — derivation is deferred to current()", () => {
+  /**
+   * derive() is the only caller of getObserve(), so counting those calls counts
+   * re-aggregations. The point of the count: push() is on the ingestion path
+   * (50 evt/s × 2 views in the pilot) while current() is read once per tick.
+   */
+  class CountingRegistry extends QRegistry {
+    getObserveCalls = 0;
+    override getObserve(schemaId: string, view?: string) {
+      this.getObserveCalls++;
+      return super.getObserve(schemaId, view);
+    }
+  }
+
+  it("does not re-aggregate per pushed event", () => {
+    const q = new CountingRegistry();
+    q.set("observe:s:v1", { window_ms: 1000 });
+    const v = new LensView(q, "s:v1");
+    const atConstruction = q.getObserveCalls;
+
+    for (let i = 0; i < 100; i++) v.push(ev(i * 10, 1));
+    assert.equal(q.getObserveCalls, atConstruction, "100 pushes must not derive");
+
+    v.current();
+    assert.equal(q.getObserveCalls, atConstruction + 1, "one read derives once");
+    v.current();
+    assert.equal(q.getObserveCalls, atConstruction + 1, "an unchanged view does not re-derive");
+  });
+
+  it("still reflects every push, and a $Q change, at the next read", () => {
+    // Deferral is a cost change, not a semantic one: the value read must be
+    // identical to what eager derivation on every push would have produced.
+    const q = new QRegistry();
+    q.set("observe:s:v1", { window_ms: 1000 });
+    const v = new LensView(q, "s:v1");
+    for (let ts = 0; ts < 5000; ts += 1000) v.push(ev(ts, ts === 2000 ? 5 : 0.5));
+
+    const before = v.current();
+    assert.equal(before.windows.length, 5);
+    assert.equal(before.windows[2].mean, 5);
+
+    // Both invalidation sources, interleaved, resolved by a single read.
+    v.push(ev(5000, 0.5));
+    q.set("observe:s:v1", { window_ms: 10_000 });
+    const after = v.current();
+    assert.equal(after.window_ms, 10_000);
+    assert.equal(after.windows.length, 1);
+    assert.equal(after.windows[0].count, 6, "the push made after the last read is included");
+  });
+
+  it("settles a pending derivation at detach, so a later $Q write cannot reach it", () => {
+    // The one place deferral is observable. Read-time derivation reads the lens
+    // live, so an unsettled snapshot would pick up a $Q change made *after*
+    // unsubscribing — the view reacting to the change it detached from.
+    const q = new QRegistry();
+    q.set("observe:s:v1", { window_ms: 1000 });
+    const v = new LensView(q, "s:v1");
+    v.push(ev(0, 1)); // invalidated, not yet read
+    v.detach();
+    q.set("observe:s:v1", { window_ms: 100 });
+    assert.equal(v.current().window_ms, 1000);
+  });
+});
+
 describe("ObservationOverlay — dynamic dataset addition", () => {
   it("adds a new view at runtime and back-fills it from a retained segment", () => {
     const q = new QRegistry();

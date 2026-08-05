@@ -39,11 +39,12 @@ export interface DashboardOptions {
  * broadcast() for why unbounded growth broke the reference lens.
  *
  * Kept small deliberately: observation + reference together must fit inside
- * RetentionBuffer's retention_window_ms (120s in index.ts) or the reference
- * request falls outside what's retained and referenceUsable goes false. At
- * the default coarse window_ms=10_000, count=3 spans observation=30s +
- * reference=30s = 60s, well inside the 120s budget with margin for the
- * process not having run that long yet.
+ * RetentionBuffer's retention_window_ms ($Q[pipeline], 120s at bootstrap) or
+ * the reference request falls outside what's retained and referenceUsable goes
+ * false. At the default coarse window_ms=10_000, count=3 spans observation=30s
+ * + reference=30s = 60s, half the shipped budget — margin for the process not
+ * having run that long yet. checkRetentionBudget() below says so out loud when
+ * a $Q write breaks the relation.
  */
 export const LIVE_REFERENCE_WINDOW_COUNT = 3;
 
@@ -97,13 +98,39 @@ export function liveSpans(
 }
 
 /**
- * The one RetentionBuffer method the dashboard needs. Narrower than the class
+ * Total history the live snapshot reaches back for: observation + reference.
+ * The buffer must still be holding all of it, or the reference request lands
+ * outside the freshness zone and the view goes blind.
+ */
+export function liveLookbackMs(
+  windowMs: number,
+  windowCount: number = LIVE_REFERENCE_WINDOW_COUNT,
+): number {
+  return 2 * windowMs * windowCount;
+}
+
+/** Largest coarse window_ms whose lookback still fits in a given retention. */
+export function maxCoarseWindowMs(
+  retentionMs: number,
+  windowCount: number = LIVE_REFERENCE_WINDOW_COUNT,
+): number {
+  return Math.floor(retentionMs / (2 * windowCount));
+}
+
+/**
+ * The RetentionBuffer surface the dashboard needs. Narrower than the class
  * itself so the constructor doesn't have to fight RetentionBuffer<T>'s
- * generic variance (replay() doesn't depend on T; observe() does, and the
+ * generic variance (neither method depends on T; observe() does, and the
  * dashboard never calls it).
+ *
+ * getRetentionWindowMs is here so the live view can check its own lookback
+ * against the budget it actually has, rather than against the 120s that used
+ * to be assumed in a comment. Retention is now $Q-writable
+ * (q-retention-binding.ts), so the assumption could be false at any tick.
  */
 export interface ReplaySource {
   replay(lens: QObserveParams, fromTs?: number, toTs?: number): LensResult;
+  getRetentionWindowMs(): number;
 }
 
 // ── SSE helpers ──────────────────────────────────────────────────────────────
@@ -140,6 +167,8 @@ export class DashboardServer {
   private readonly dashboardDir = resolve(import.meta.dirname, "../../dashboard");
   /** Edge-trigger state for reportReferenceBlindness(). */
   private referenceBlind = false;
+  /** Edge-trigger state for checkRetentionBudget(): "<window_ms>/<retention_ms>". */
+  private budgetCheckedFor = "";
 
   constructor(
     private readonly generator: MockStreamGenerator,
@@ -215,6 +244,7 @@ export class DashboardServer {
     if (coarseView) {
       const lens = this.registry.getObserve(coarseView.schemaId, coarseView.view) ?? {};
       const windowMs = lens.window_ms ?? coarseView.current().window_ms;
+      this.checkRetentionBudget(windowMs);
       const { observation, reference } = liveSpans(snapshot.ts, windowMs);
       const observed = this.buffer.replay(lens, observation.fromTs, observation.toTs);
       const referenced = this.buffer.replay(lens, reference.fromTs, reference.toTs);
@@ -262,8 +292,43 @@ export class DashboardServer {
     this.referenceBlind = true;
     console.warn(
       `[dashboard] live coarse reference UNUSABLE (no comparison possible) — ` +
-        `window_ms=${windowMs}, reference [${reference.fromTs}, ${reference.toTs}]. ` +
-        `Empty tiles now mean blindness, not quiet; check retention_window_ms.`,
+        `window_ms=${windowMs}, reference [${reference.fromTs}, ${reference.toTs}], ` +
+        `retention_window_ms=${this.buffer.getRetentionWindowMs()}. ` +
+        `Empty tiles now mean blindness, not quiet.`,
+    );
+  }
+
+  /**
+   * Warn when the live view's lookback no longer fits in retention.
+   *
+   * The budget relation (2 × count × window_ms ≤ retention_window_ms) used to
+   * live only in a comment, and both of its terms are now $Q-writable — a Brain
+   * widening the coarse window or narrowing retention breaks it. Breaking it
+   * does not fail loudly on its own: the reference request simply returns an
+   * empty segment and the view goes blind, which without this reads as "the
+   * coarse angle has nothing to report".
+   *
+   * Checked ahead of the replay rather than inferred from blindness afterwards,
+   * because the two have different causes and want different fixes: an
+   * overrunning budget is a misconfiguration (fix window_ms or retention),
+   * while blindness at startup is just history not having accumulated yet and
+   * resolves itself. Edge-triggered per (window_ms, retention) pair so a
+   * sustained overrun is one line, and a later $Q write that changes either
+   * term is reported again.
+   */
+  private checkRetentionBudget(windowMs: number): void {
+    const retentionMs = this.buffer.getRetentionWindowMs();
+    const key = `${windowMs}/${retentionMs}`;
+    if (key === this.budgetCheckedFor) return;
+    this.budgetCheckedFor = key;
+    const lookback = liveLookbackMs(windowMs);
+    if (lookback <= retentionMs) return;
+    console.warn(
+      `[dashboard] live coarse lookback ${lookback}ms exceeds retention ` +
+        `${retentionMs}ms — the reference span is older than anything retained, ` +
+        `so the live view will report no comparison. Lower coarse window_ms to ` +
+        `${maxCoarseWindowMs(retentionMs)}ms or raise $Q[pipeline].retention_window_ms ` +
+        `to ${lookback}ms.`,
     );
   }
 

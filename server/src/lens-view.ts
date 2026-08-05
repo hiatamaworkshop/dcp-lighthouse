@@ -41,6 +41,8 @@ export class LensView {
   private readonly maxEvents: number;
   private readonly events: LensEvent[] = [];
   private snapshot: LensResult;
+  /** Set by anything that invalidates the snapshot; cleared by current(). */
+  private stale = false;
   private readonly unsubscribe: () => void;
 
   constructor(registry: QRegistry, schemaId: string, opts: LensViewOptions = {}) {
@@ -56,7 +58,7 @@ export class LensView {
       const hits =
         scope.target === "*" ||
         (scope.target === schemaId && (scope.view === undefined || scope.view === this.view));
-      if (hits) this.snapshot = this.derive();
+      if (hits) this.stale = true;
     });
   }
 
@@ -66,7 +68,7 @@ export class LensView {
     if (this.events.length > this.maxEvents) {
       this.events.splice(0, this.events.length - this.maxEvents);
     }
-    this.snapshot = this.derive();
+    this.stale = true;
   }
 
   /** Back-fill from a retained segment (e.g. when a view is added late). */
@@ -75,11 +77,30 @@ export class LensView {
     if (this.events.length > this.maxEvents) {
       this.events.splice(0, this.events.length - this.maxEvents);
     }
-    this.snapshot = this.derive();
+    this.stale = true;
   }
 
-  /** Current re-derived shape under this view's lens. */
+  /**
+   * Current re-derived shape under this view's lens.
+   *
+   * Derivation is deferred to here rather than run on every push. applyLens is
+   * a full re-aggregation over every held event (up to maxEvents = 10_000), and
+   * push() is on the ingestion path: at the pilot's 50 evt/s across two views
+   * that was 100 full re-aggregations per second to serve a consumer that reads
+   * once per tick. Same result either way — derive() is a pure function of the
+   * held events and the registry's current lens, and both invalidation sources
+   * (push/backfill, $Q change) set `stale` — so this is cost, not semantics.
+   *
+   * The consequence to know: the returned object is only re-created when
+   * something has actually changed, so two consecutive current() calls with no
+   * intervening push return the *same* LensResult instance. Callers must not
+   * mutate it. (Nothing does; applyLens builds fresh arrays each time.)
+   */
   current(): LensResult {
+    if (this.stale) {
+      this.snapshot = this.derive();
+      this.stale = false;
+    }
     return this.snapshot;
   }
 
@@ -88,8 +109,19 @@ export class LensView {
     return applyLens(this.events, lens);
   }
 
-  /** Stop reacting to $Q changes. Call when removing the view. */
+  /**
+   * Stop reacting to $Q changes. Call when removing the view.
+   *
+   * Settles any pending derivation first, and that is load-bearing rather than
+   * tidiness. Deferring derivation to current() means the lens used is the one
+   * live at *read* time; while the view is attached that is harmless (a $Q
+   * change would have invalidated the snapshot anyway, so eager and deferred
+   * agree). Detach breaks the tie: without flushing here, a view that was
+   * pushed to, then detached, then read after a $Q write would re-derive under
+   * the new lens — reacting to precisely the change it unsubscribed from.
+   */
   detach(): void {
+    this.current();
     this.unsubscribe();
   }
 }
