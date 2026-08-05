@@ -1,7 +1,7 @@
 /**
  * TestorAdapter unit tests (Phase 1 Step 4).
  *
- * Focus: the clock policy added in ROADMAP_BRIEF L1-1 (traders field finding
+ * Focus: the clock policy added in ROADMAP_BRIEF L1-1 (field finding
  * A3) — a snapshot must never include events dated after the adapter's own
  * clock, since a source's ts can run ahead of receive time (skew, replay).
  */

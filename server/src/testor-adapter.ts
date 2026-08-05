@@ -103,7 +103,7 @@ export class TestorAdapter {
   snapshot(): STSnapshot {
     this.evict();
     const now = this.clockFn();
-    // Clock policy (ROADMAP_BRIEF L1-1, traders field finding A3): a source's own
+    // Clock policy (ROADMAP_BRIEF L1-1, field finding A3): a source's own
     // ts can run ahead of the adapter's clock (skew, replay, clock drift). Bound
     // the window by receive time (now) as well as event ts, so a snapshot never
     // includes events "from the future" relative to when it was taken.

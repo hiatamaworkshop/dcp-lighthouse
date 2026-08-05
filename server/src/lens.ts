@@ -29,7 +29,7 @@ export interface LensEvent {
 
 /**
  * Minimum event count for a window's mean/std to be treated as statistically
- * meaningful (ROADMAP_BRIEF L1-2, traders field finding A2: sparse/bursty
+ * meaningful (ROADMAP_BRIEF L1-2, field finding A2: sparse/bursty
  * streams produce low-count windows whose mean is noise, not signal — e.g.
  * count=1 has std=0 and can look like a "perfectly stable" spike/dip).
  *

@@ -5,23 +5,32 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 
 ## 位置づけ
 
-- 親プロジェクト: `../dcp-wrap` (DCP Pipeline コア)
-- 姉妹プロジェクト: `../dcp-minecraft` (高頻度ストリーム処理の実証)
+- 親プロジェクト: **dcp-wrap** (DCP Pipeline コア) — 非公開
+- 姉妹プロジェクト: **dcp-minecraft** (高頻度ストリーム処理の実証) — 非公開
 
 dcp-minecraft が「DCP Stream を止めずに観測層を被せられる」ことを示したのを受け、
 本プロジェクトでは同じ仕組みをコード生成検証ドメインに応用する。
+本リポジトリは単体で動く (親プロジェクトはビルドに不要)。ドキュメント中でこれらの
+名前が出てきた場合、参照先のソースは公開されていない。
 
 ## ドキュメント
 
+**設計仕様**
+
 - [docs/LIGHTHOUSE_MODEL.md](docs/LIGHTHOUSE_MODEL.md) — 灯台モデルの概念・$Q shadow・stream replay
 - [docs/LIGHTHOUSE_PILOT_DATA.md](docs/LIGHTHOUSE_PILOT_DATA.md) — モックデータ要件・シナリオ・検証基準
-- [CLAUDE.md](CLAUDE.md) — 引継ぎコンテキスト
+- [CLAUDE.md](CLAUDE.md) — 引継ぎコンテキスト (実装順序・現在地)
+
+**開発ログ** — 仕様ではなく時系列の作業記録。過去の節には後に撤回された結論もそのまま残る
+
+- [docs/devlog/ROADMAP_BRIEF.md](docs/devlog/ROADMAP_BRIEF.md)
 
 ## 構成
 
 ```
 dcp-lighthouse/
   docs/        設計仕様
+    devlog/    時系列の開発ログ
   server/      Node.js / TypeScript (MockStreamGenerator, TestorAdapter, RuleBrain, dashboard SSE)
   dashboard/   ブラウザ UI (shape-oriented panels)
 ```
@@ -38,7 +47,7 @@ npm test       # tsc && node --test dist/*.test.js
 ## ステータス
 
 Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 詳細は
-[docs/ROADMAP_BRIEF.md](docs/ROADMAP_BRIEF.md) の「本体ロードマップ再編」節、
+[docs/devlog/ROADMAP_BRIEF.md](docs/devlog/ROADMAP_BRIEF.md) の「本体ロードマップ再編」節、
 実装順序の全体像は [CLAUDE.md](CLAUDE.md) を参照。
 
 **Phase 0 — コア機構検証 (Minecraft ベースライン + 自作異常)**
@@ -62,12 +71,14 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 ドメイン (`test_result:v1`) に皮を貼る。詳細は
 [docs/LIGHTHOUSE_PILOT_DATA.md](docs/LIGHTHOUSE_PILOT_DATA.md) §1.5。
 
-**本体ロードマップ (L1–L5、traders 派生との並走から生まれた再編)**
+**本体ロードマップ (L1–L5、実データ派生との並走から生まれた再編)**
 
-- [x] **L1** 足場固め — traders 実運用からの field findings を core に還元 (ts≤now クロック方針・count 窓の有効性フラグ・baseline 有効性ゲート+閾値フロア)
+- [x] **L1** 足場固め — 実運用ストリームからの field findings を core に還元 (ts≤now クロック方針・count 窓の有効性フラグ・baseline 有効性ゲート+閾値フロア)
 - [x] **L2** Brain write surface + replay 表面化 — `$Q[schema].baseline_delta` 昇格 (RuleBrain がレジストリ経由で読み、dashboard から書ける)・RC replayRequest の区間指定 (fromTs/toTs)・dashboard 粗(live)/細(replay) 対比 UI
-- [ ] **L3 (本丸)** ClaudeBrain — §12 A/B 実験 (数列のみ vs snapshot package) → `BRAIN_MODE=claude` で RuleBrain と shadow 併走。LLM 起点の $Q 操作が核心
-- [ ] **L4** レンズチェーン残段 — `applyLens` の group_by → downsample → decay → agg_func
+- [ ] **L3 (本丸)** ClaudeBrain — §12 A/B 実験 (数列のみ vs snapshot package) → `BRAIN_MODE=claude` で RuleBrain と shadow 併走。LLM 起点の $Q 操作が核心。
+      前段の A/B 実験は実行済みだが、**当初の仮説「提示形式が判断を助ける」は検証できていない** (再分析で下方修正)。
+      副産物として curator の較正欠陥を検出し、Šidák 補正で package 単位の誤警報率 29%→6.5% に是正済み
+- [ ] **L4** レンズチェーン残段 — `applyLens` の group_by → downsample → decay → agg_func。前段の「参照レンズ」(検出を二項演算に) は実装済み
 - [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)
 
-現在テスト計 124 件、全 green。
+現在テスト計 164 件、全 green。

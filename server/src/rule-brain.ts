@@ -55,14 +55,14 @@ const BASELINE_DELTA = 0.10;         // regression threshold = learned baseline 
 const WARMUP_TICKS = 10;             // ticks observed before an agent's threshold is trusted.
                                      // No AR/RC firing during warmup (no baseline yet).
 const MIN_OBS_COUNT = 3;             // events required in a tick's window for that tick to
-                                     // count toward baseline learning (ROADMAP L1-3, traders
+                                     // count toward baseline learning (ROADMAP L1-3, field
                                      // finding B4). Orthogonal to WARMUP_TICKS: warmup only
                                      // counts ticks, not whether each tick's window had enough
                                      // events to be a trustworthy sample of pass rate. Without
                                      // this, sparse/empty windows (eventCount low or 0) feed the
                                      // EWMA and can collapse the baseline toward whatever a thin
                                      // window happened to show.
-const THRESHOLD_FLOOR = 0;           // absolute floor for the regression threshold (traders
+const THRESHOLD_FLOOR = 0;           // absolute floor for the regression threshold (field
                                      // finding B5: relative thresholds need a floor). Pass rate
                                      // is a bounded measure [0,1], so additive baseline−delta is
                                      // the right threshold shape (unlike an unbounded/multiplicative

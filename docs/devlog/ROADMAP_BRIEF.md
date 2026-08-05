@@ -1,8 +1,13 @@
-# dcp-lighthouse — Roadmap Brief
+# dcp-lighthouse — Roadmap Brief (開発ログ)
 
-> **このファイルの使い方**: 下記「読むべき順序」に従ってプロジェクトを把握し、
-> §FINDINGS 以降に発見・判断・ロードマップを直接追記してください。
-> 出力は **箇条書き + 短文** で。長い説明文は不要です。
+> **これは仕様書ではない。** 時系列の作業ログであり、追記式で伸びる。
+> 過去の節には後に**下方修正・撤回された結論**がそのまま残っている
+> (誤りの経緯自体が記録の目的)。**現在の正はコードとテスト**、
+> 次いで [CLAUDE.md](../../CLAUDE.md) と `docs/` の設計仕様 2 本。
+> ここは最新の節から遡って読むこと。
+>
+> **書き方**: §FINDINGS 以降に発見・判断・ロードマップを直接追記する。
+> **箇条書き + 短文** で。長い説明文は不要。
 
 ---
 
@@ -11,8 +16,8 @@
 | 項目 | 内容 |
 |---|---|
 | 目的 | DCP Pipeline を観測層として使う「灯台モデル」のパイロット実装 |
-| フェーズ | Phase 0 (コア機構検証) + Phase 1 (test_result:v1 ドメイン適用) **実装完了** |
-| テスト | 72件 全通過 |
+| フェーズ | Phase 0 (コア機構検証) + Phase 1 (test_result:v1 ドメイン適用) **実装完了**。以後は工程 L1–L5 |
+| テスト | 164件 全通過 (件数の変遷は各節に記録) |
 | 起動 | `cd server && npm run dev` → `http://localhost:3001` |
 | シナリオ | `GET /demo/start?scenario=AR\|CG\|RC` |
 
@@ -21,37 +26,38 @@
 ## 読むべき順序と場所
 
 ### 1. 概念 (5分)
-- [CLAUDE.md](../CLAUDE.md) — 全体構造・実装済み範囲・次のステップ候補。**ここだけで現状把握できる**
-- [docs/LIGHTHOUSE_MODEL.md](./LIGHTHOUSE_MODEL.md) §1–3, §5, §8 — 灯台モデルの「なぜ」と $Q shadow 概念。§5 は replay の意味論 (分散縮小ではなく別レンズ再観測) を正確に定義しているので必読
+- [CLAUDE.md](../../CLAUDE.md) — 全体構造・実装済み範囲・次のステップ候補。**ここだけで現状把握できる**
+- [docs/LIGHTHOUSE_MODEL.md](../LIGHTHOUSE_MODEL.md) §1–3, §5, §8 — 灯台モデルの「なぜ」と $Q shadow 概念。§5 は replay の意味論 (分散縮小ではなく別レンズ再観測) を正確に定義しているので必読
 
 ### 2. 実装済みコア (Phase 0 機構)
 読む順: 依存関係の末端から
 
 | ファイル | 役割 |
 |---|---|
-| [server/src/q-registry.ts](../server/src/q-registry.ts) | $Q の置き場。scope パース・onChange・swap history |
-| [server/src/lens.ts](../server/src/lens.ts) | `applyLens(segment, params)` — effector chain。window_ms のみ実装、他段は pass-through |
-| [server/src/retention-buffer.ts](../server/src/retention-buffer.ts) | 鮮度ゾーン ring buffer + `replay(params)` |
-| [server/src/lens-view.ts](../server/src/lens-view.ts) | `ObservationOverlay` — 1ストリームに複数 view を attach |
-| [server/src/snapshot-curator.ts](../server/src/snapshot-curator.ts) | `SnapshotCurator ($U)` — spike/gap/step_up/step_down/divergence/baseline タイル選出 |
+| [server/src/q-registry.ts](../../server/src/q-registry.ts) | $Q の置き場。scope パース・onChange・swap history |
+| [server/src/lens.ts](../../server/src/lens.ts) | `applyLens(segment, params)` — effector chain。window_ms のみ実装、他段は pass-through |
+| [server/src/retention-buffer.ts](../../server/src/retention-buffer.ts) | 鮮度ゾーン ring buffer + `replay(params)` |
+| [server/src/lens-view.ts](../../server/src/lens-view.ts) | `ObservationOverlay` — 1ストリームに複数 view を attach |
+| [server/src/snapshot-curator.ts](../../server/src/snapshot-curator.ts) | `SnapshotCurator ($U)` — spike/gap/step_up/step_down/divergence/baseline タイル選出 |
 
 ### 3. Phase 1 ドメイン層
 | ファイル | 役割 |
 |---|---|
-| [server/src/bitpos.ts](../server/src/bitpos.ts) | 256-bit 固定 area 空間 (auth/payment/ui/utils) |
-| [server/src/mock-stream-generator.ts](../server/src/mock-stream-generator.ts) | test_result:v1 生成・AR/CG/RC シナリオ注入 |
-| [server/src/testor-adapter.ts](../server/src/testor-adapter.ts) | TestEvent → STSnapshot (per-agent/per-domain) |
-| [server/src/brain-adapter.ts](../server/src/brain-adapter.ts) | `BrainAdapter` interface (ClaudeBrain 差し替え口) |
-| [server/src/rule-brain.ts](../server/src/rule-brain.ts) | `RuleBrain` — AR/CG/RC の 3 ルール実装 |
-| [server/src/dashboard.ts](../server/src/dashboard.ts) | SSE ブリッジ + REST endpoints |
-| [server/src/index.ts](../server/src/index.ts) | 配線全体。tick loop / replayRequest 処理はここ |
+| [server/src/bitpos.ts](../../server/src/bitpos.ts) | 256-bit 固定 area 空間 (auth/payment/ui/utils) |
+| [server/src/mock-stream-generator.ts](../../server/src/mock-stream-generator.ts) | test_result:v1 生成・AR/CG/RC シナリオ注入 |
+| [server/src/testor-adapter.ts](../../server/src/testor-adapter.ts) | TestEvent → STSnapshot (per-agent/per-domain) |
+| [server/src/brain-adapter.ts](../../server/src/brain-adapter.ts) | `BrainAdapter` interface (ClaudeBrain 差し替え口) |
+| [server/src/rule-brain.ts](../../server/src/rule-brain.ts) | `RuleBrain` — AR/CG/RC の 3 ルール実装 |
+| [server/src/dashboard.ts](../../server/src/dashboard.ts) | SSE ブリッジ + REST endpoints |
+| [server/src/index.ts](../../server/src/index.ts) | 配線全体。tick loop / replayRequest 処理はここ |
 
 ### 4. 検証基準 (ロードマップ策定前に必読)
-- [docs/LIGHTHOUSE_PILOT_DATA.md](./LIGHTHOUSE_PILOT_DATA.md) §10 — AR/CG/RC それぞれの合否基準 (タイミング・数値一致)
-- [docs/LIGHTHOUSE_PILOT_DATA.md](./LIGHTHOUSE_PILOT_DATA.md) §12 — SnapshotCurator の設計根拠
+- [docs/LIGHTHOUSE_PILOT_DATA.md](../LIGHTHOUSE_PILOT_DATA.md) §10 — AR/CG/RC それぞれの合否基準 (タイミング・数値一致)
+- [docs/LIGHTHOUSE_PILOT_DATA.md](../LIGHTHOUSE_PILOT_DATA.md) §12 — SnapshotCurator の設計根拠
 
 ### 5. dcp-wrap 拡張点 (コア側を触る場合のみ)
-dcp-wrap は `../dcp-wrap/` にある。灯台側が使う拡張点は3つのみ:
+dcp-wrap は**非公開の親プロジェクト** (ローカルに並べて置く)。灯台側が使う拡張点は3つのみ
+— ファイル:行はそのリポジトリ内の位置なので、公開リポジトリからは辿れない:
 
 | 拡張点 | ファイル:行 | 用途 |
 |---|---|---|
@@ -78,7 +84,7 @@ dcp-wrap は `../dcp-wrap/` にある。灯台側が使う拡張点は3つのみ
 ### C. retention 参照ゾーン (優先度: 中)
 - 現状は鮮度ゾーン (ring buffer) のみ
 - 疎化 (指数間引き) による長期保持レイヤーの設計が未着手
-- 設計方針は [LIGHTHOUSE_MODEL.md §5](./LIGHTHOUSE_MODEL.md) にある
+- 設計方針は [LIGHTHOUSE_MODEL.md §5](../LIGHTHOUSE_MODEL.md) にある
 
 ### D. ClaudeBrain (優先度: 低 / 将来)
 - `BrainAdapter` interface は確保済み (`brain-adapter.ts`)
@@ -257,7 +263,7 @@ dcp-wrap は `../dcp-wrap/` にある。灯台側が使う拡張点は3つのみ
 
 **ロードマップ C: retention 参照ゾーン**
 - 鮮度ゾーン (ring buffer 120s) のみ実装済み
-- 疎化レイヤー設計は `memory/project_retention_design.md` に方針メモあり
+- 疎化レイヤーの方針: 鮮度ゾーン (全解像 ring) の上に参照ゾーン (疎化) を後付けする。まず鮮度ゾーンだけ実装する
 - 実装未着手
 
 **ロードマップ D: ClaudeBrain**
@@ -470,15 +476,18 @@ dcp-wrap は `../dcp-wrap/` にある。灯台側が使う拡張点は3つのみ
 
 ---
 
-## Field findings — 実データ適用 (traders / Coincheck) からの core 還元 (2026-06-15)
+## Field findings — 実データ適用からの core 還元 (2026-06-15)
 
-姉妹実装 `../traders/observatory` が灯台機構を**初めて実ストリーム (Coincheck public WS, BTC/JPY) に適用**した。mock (定常 50 evt/s) では原理的に出なかった知見。core/skin を分けて記録。出所は `../traders/docs/lighthouse-integration.md` と同 `decisions.md` (ADR-010〜012)。
+**非公開の姉妹プロジェクト** (以下「実データ派生」) が灯台機構を**初めて実ストリーム
+(暗号資産取引所の public WebSocket、BTC/JPY 約定) に適用**した。mock (定常 50 evt/s) では
+原理的に出なかった知見。core/skin を分けて記録する。出所の設計文書・ADR は非公開なので、
+ここには**還元された結論のみ**を写す。
 
 ### A. core 機構/モデルに還すべき (本命)
 
 1. **「静寂」と「盲目」は別物 — transport liveness を一級入力に** *(MODEL.md「Lighthouse, restated」に第3軸として追記済み)*
    - mock では「イベント不在 = 未テスト」で済んだが、実ストリームでは不在に2種 (世界が静か=正常 / transport 断=盲目)。CG が event flow だけ見ると平常の静けさを盲目と誤認し**偽発火ストーム** (実 BTC/JPY は 10–90s 約定が来ない)。
-   - 解: gap 判定に transport liveness を別信号として配線し `connected===false` のみ盲目とみなす。traders は `GapStats.connected` で実装。
+   - 解: gap 判定に transport liveness を別信号として配線し `connected===false` のみ盲目とみなす。実データ派生は `GapStats.connected` で実装。
    - core 影響: 看板比喩「世界が変わった vs 観測を変えた」に第3軸「世界が静か vs 観測者が聾」が加わる。
 
 2. **疎・バーストなストリームで wall-clock 窓が壊れる — count ベース窓を lens 段に**
@@ -486,7 +495,7 @@ dcp-wrap は `../dcp-wrap/` にある。灯台側が使う拡張点は3つのみ
    - core 影響: lens チェーン (§137 group_by→window→downsample→decay→agg) の **window 段に「直近K件」窓の変種**を追加検討。`WindowStat` は count を持つが「統計的に信頼できない窓」を下流へ伝える手段がない。
 
 3. **クロック方針を明示せよ — ts≤now 上限と受信クロック**
-   - 既知 artifact「snapshot が未来イベントを含む」(testor-adapter は下限のみ) が実データで顕在化。取引所 ts は秒解像度で歪むため traders は**受信クロック stamp + ts≤now 上限**で対処。
+   - 既知 artifact「snapshot が未来イベントを含む」(testor-adapter は下限のみ) が実データで顕在化。取引所 ts は秒解像度で歪むため実データ派生は**受信クロック stamp + ts≤now 上限**で対処。
    - core 影響: adapter/applyLens にクロック方針を明文化し `ts≤now` 上限を core 既定にする。「future events in snapshot」は core で直す案件と確定。
 
 ### B. パターン強化 (RuleBrain は skin だが baseline 機構は再利用資産)
@@ -508,9 +517,9 @@ dcp-wrap は `../dcp-wrap/` にある。灯台側が使う拡張点は3つのみ
 
 ## 2026-07-03 — 本体ロードマップ再編 (工程 L1–L5)
 
-**背景**: traders 派生が「一適用プロジェクト」に移行し、本体固有の前進が止まっていた。
+**背景**: 実データ派生が「一適用プロジェクト」に移行し、本体固有の前進が止まっていた。
 散在していた残課題 (2026-06-11 残課題 / 06-13 ペンディング / 06-15 field findings) を工程に統合。
-**主軸**: 灯台のテーゼは「観測層 + Brain 制御」の 2 本柱。観測層は traders で実証済み。
+**主軸**: 灯台のテーゼは「観測層 + Brain 制御」の 2 本柱。観測層は実データ派生で実証済み。
 **Brain が観測を操作する側 (ClaudeBrain) が唯一の未証明の核心** — これを本丸に据える。
 
 ### L1. 足場固め — field findings の core 還元 (小粒・先行)
@@ -544,13 +553,13 @@ ClaudeBrain が読む snapshot の歪みを先に除く。06-15 findings A2/A3/B
 
 ### L5. retention 参照ゾーン (疎化)
 
-- 鮮度ゾーン (ring 120s) の上に疎化レイヤー。設計メモ: `memory/project_retention_design.md`
-- 長期稼働 (traders 型 24/7) で初めて効く層なので最後
+- 鮮度ゾーン (ring 120s) の上に疎化レイヤー。疎化は後付けの層として設計する (鮮度ゾーンの実装を先に確定させる)
+- 長期稼働 (実データ派生型 24/7) で初めて効く層なので最後
 
-### 常設: traders 還元フィルタ (advisor プロセス)
+### 常設: 実データ派生 → core 還元フィルタ (advisor プロセス)
 
-- traders の作業が灯台の実証に数えられる基準: **(a) 観測機構そのものを行使/変更する、または (b) ドメイン非依存の知見を生む**。traders レビュー毎にこのフィルタで還元有無を判定し、該当分のみ本ファイル Field findings へ追記
-- 直近の注目: **mention:v1 (traders ADR-029)** — 非構造テキストへの皮貼り。実装されたら第 3 の実証としてレビュー
+- 実データ派生の作業が灯台の実証に数えられる基準: **(a) 観測機構そのものを行使/変更する、または (b) ドメイン非依存の知見を生む**。実データ派生のレビュー毎にこのフィルタで還元有無を判定し、該当分のみ本ファイル Field findings へ追記
+- 直近の注目: **mention:v1 (非公開 ADR)** — 非構造テキストへの皮貼り。実装されたら第 3 の実証としてレビュー
 
 ---
 
@@ -658,7 +667,7 @@ L4 の動機として記録していた「本番配線の混合バッファで�
 - 希釈そのものは確認済み (0.20 → 粗窓 0.895 / 細窓 0.653)。**機序の記述は正しい**
 - 誤っていたのは結論部分: 「閾値に届かない」ではなく **「閾値をまたぐ縁にいて、run 次第で出たり出なかったりする」** が実態
 - 断続的な検出は、一貫して出ないことより**悪い**性質 (再現しないバグとして扱われる)。したがって L4 `group_by: ["agentId"]` の動機は弱まるどころか強化される
-- Cairn 訂正投稿済み (2026-07-25): 新 `f31c43fe-f252-4697-94cd-e5b26bb5aa94` が旧 `0ea8f897-6ed6-4a4d-81c5-34417b7836b6` を supersede。旧レコードは残存 (Cairn に更新/削除コマンドは無く post のみ)。訂正版は上記 3 点 (境界上の断続検出 / effect size 欠落 / σ 収縮による事後発火) + 「per-source 注入テストでは検出できない」を英語で記載
+- 外部の知見共有先へ訂正版を投稿済み (2026-07-25)。訂正内容は上記 3 点 (境界上の断続検出 / effect size 欠落 / σ 収縮による事後発火) + 「per-source 注入テストでは検出できない」
 
 ### 副産物: 起動・実地検証をスキル化
 
@@ -704,18 +713,18 @@ SSE 両チャネルを background curl でキャプチャ → シナリオ発火
 
 ### 調査結果 1: `count` は全経路にある。無いのは**分散**
 
-- [`lens.ts:41-51`](../server/src/lens.ts) `WindowStat = {windowStart, windowEnd, count, mean, valid}`。
+- [`lens.ts:41-51`](../../server/src/lens.ts) `WindowStat = {windowStart, windowEnd, count, mean, valid}`。
   `count` は `applyLens` の全経路で必ず設定される (テストヘルパも既定 10)。ここは問題なし
 - **二次モーメントが無い** → 比較演算子が標準誤差を自力で導けない
 - **前回案 (`σ_min = sqrt(p(1-p)/n)` の床) は棄却**。恣意的な clamp であるだけでなく、
-  [`index.ts:59`](../server/src/index.ts) の値域は `pass=1 / flaky=0.5 / fail=0` の **{0, 0.5, 1} で
+  [`index.ts:59`](../../server/src/index.ts) の値域は `pass=1 / flaky=0.5 / fail=0` の **{0, 0.5, 1} で
   ベルヌーイではない**ため、二項の式は単純に誤り。分布族を仮定した時点で負けている
 - **正しい形**: `WindowStat` に二次モーメント (平方和) を持たせ、**分布族を仮定せず経験分散から SE を導く**。
   `applyLens` の flush に平方和を足すだけの純加算的変更。値が 0/1 のときは二項が**特殊ケースとして自動的に落ちてくる**
 
 ### 調査結果 2: 継ぎ目は 1 箇所。`compareLens` が参照レンズの原型だった
 
-- 癒着は軽い。**すべて [`snapshot-curator.ts:172`](../server/src/snapshot-curator.ts) の
+- 癒着は軽い。**すべて [`snapshot-curator.ts:172`](../../server/src/snapshot-curator.ts) の
   `computeGlobalStats(windows)` 1 箇所**を通り、そこから spike/dip 判定 (184行)、`detectSteps` (209行)、
   `pickBaselineWindow` (239行) に配られる
 - **自己参照を確認**: 各窓は自分自身を含む統計と比較されている。異常窓が自分の baseline を汚す
@@ -738,7 +747,7 @@ SSE 両チャネルを background curl でキャプチャ → シナリオ発火
 
 ### 追加で判明した実害: `maxTiles` 追い出し
 
-[`snapshot-curator.ts:253-262`](../server/src/snapshot-curator.ts) はタイルを **z 降順にソートしてから
+[`snapshot-curator.ts:253-262`](../../server/src/snapshot-curator.ts) はタイルを **z 降順にソートしてから
 `maxTiles=12` で切り捨てる**。effect size 欠落は見た目の問題にとどまらず、**幻影タイルが本物のタイルを
 追い出す**。今回の実走では上限未達だったが、シナリオが重なれば選抜が壊れる。
 
