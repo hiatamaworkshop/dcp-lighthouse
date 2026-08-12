@@ -24,7 +24,7 @@ import type { RuleBrain } from "./rule-brain.js";
 import type { QRegistry, QObserveParams } from "./q-registry.js";
 import type { SnapshotCurator } from "./snapshot-curator.js";
 import type { ObservationOverlay } from "./lens-view.js";
-import type { LensResult } from "./lens.js";
+import { floorToWindow, resolveAlign, type LensResult } from "./lens.js";
 import type { BrainDecision } from "./brain-adapter.js";
 import type { SnapshotPackage } from "./snapshot-curator.js";
 
@@ -70,12 +70,17 @@ export interface SpanRequest {
  * same "明滅・遅延発火" the reference lens was meant to remove, re-entering
  * through the anchor instead of through a shrinking sigma.
  *
- * Snapping to `floor(nowTs / windowMs) * windowMs` pins the grid to absolute
- * time, so the boundaries move in whole-window steps and a past burst keeps
- * the same windowStart for as long as it stays in range. (applyLens still
- * anchors to the first event, but that is now within one inter-event gap of
- * the grid line rather than anywhere in the window. Making the grid explicit
- * belongs in QObserveParams as an `origin` stage — L4 lens-chain work.)
+ * Snapping to the lens's window grid pins the boundaries to absolute time, so
+ * they move in whole-window steps and a past burst keeps the same windowStart
+ * for as long as it stays in range.
+ *
+ * The grid is now declared once, in $Q — `align:"epoch"` on the coarse view
+ * (index.ts) — and both readers of it go through lens.ts's floorToWindow: this
+ * function, choosing what to request, and applyLens, placing events into
+ * windows. Until L4 those were two independent `floor` expressions that agreed
+ * by inspection; a lens whose alignment said otherwise would have silently
+ * desynchronized them. `origin` is the grid's phase (0 = the plain
+ * `floor(ts/window)*window` grid).
  *
  * `toTs` is inclusive-exclusive-corrected: RetentionBuffer.segment() filters
  * `ts <= toTs` while lens windows are half-open, so passing the raw boundary
@@ -88,9 +93,10 @@ export function liveSpans(
   nowTs: number,
   windowMs: number,
   windowCount: number = LIVE_REFERENCE_WINDOW_COUNT,
+  origin = 0,
 ): { observation: SpanRequest; reference: SpanRequest } {
   const spanMs = windowMs * windowCount;
-  const gridNow = Math.floor(nowTs / windowMs) * windowMs;
+  const gridNow = floorToWindow(nowTs, windowMs, origin);
   return {
     observation: { fromTs: gridNow - spanMs, toTs: gridNow - 1 },
     reference: { fromTs: gridNow - 2 * spanMs, toTs: gridNow - spanMs - 1 },
@@ -169,6 +175,8 @@ export class DashboardServer {
   private referenceBlind = false;
   /** Edge-trigger state for checkRetentionBudget(): "<window_ms>/<retention_ms>". */
   private budgetCheckedFor = "";
+  /** Edge-trigger state for checkGridAlignment(); starts true so only a lapse speaks. */
+  private gridAligned = true;
 
   constructor(
     private readonly generator: MockStreamGenerator,
@@ -245,7 +253,13 @@ export class DashboardServer {
       const lens = this.registry.getObserve(coarseView.schemaId, coarseView.view) ?? {};
       const windowMs = lens.window_ms ?? coarseView.current().window_ms;
       this.checkRetentionBudget(windowMs);
-      const { observation, reference } = liveSpans(snapshot.ts, windowMs);
+      this.checkGridAlignment(lens);
+      const { observation, reference } = liveSpans(
+        snapshot.ts,
+        windowMs,
+        LIVE_REFERENCE_WINDOW_COUNT,
+        lens.origin ?? 0,
+      );
       const observed = this.buffer.replay(lens, observation.fromTs, observation.toTs);
       const referenced = this.buffer.replay(lens, reference.fromTs, reference.toTs);
       snapshotPkg = this.curator.curate(observed, referenced);
@@ -329,6 +343,33 @@ export class DashboardServer {
         `so the live view will report no comparison. Lower coarse window_ms to ` +
         `${maxCoarseWindowMs(retentionMs)}ms or raise $Q[pipeline].retention_window_ms ` +
         `to ${lookback}ms.`,
+    );
+  }
+
+  /**
+   * Note when the live coarse lens leaves its grid undeclared.
+   *
+   * liveSpans always quantizes its requests, so a first_event-aligned lens
+   * still lands close to the grid — applyLens anchors to the first event
+   * inside the requested span, which on a 50 evt/s stream is within ~20ms of
+   * the line. It is the *guarantee* that weakens, not (usually) the numbers:
+   * on a sparse or bursty stream the first event can sit well inside the
+   * window, and the two spans then sit on grids that differ by that offset —
+   * the anchor-slide failure, re-entering through the lens instead of through
+   * the request. Advisory rather than a fix, because a caller replaying one
+   * specific segment legitimately wants first-event anchoring.
+   */
+  private checkGridAlignment(lens: QObserveParams): void {
+    const declared = resolveAlign(lens) === "epoch";
+    if (declared === this.gridAligned) return;
+    this.gridAligned = declared;
+    if (declared) return;
+    console.warn(
+      `[dashboard] live coarse lens does not declare a window grid ` +
+        `(align:"first_event"). Spans are still request-quantized, but the lens ` +
+        `re-anchors to the first event of each span, so window boundaries can ` +
+        `drift by up to one inter-event gap. Set align:"epoch" on ` +
+        `$Q[observe:...#coarse] to pin them.`,
     );
   }
 

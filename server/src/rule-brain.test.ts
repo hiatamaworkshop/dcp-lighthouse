@@ -339,6 +339,21 @@ describe("RuleBrain — RC rule (brief dip + recovery)", () => {
       "qProposal.params should have window_ms",
     );
   });
+
+  test("replayRequest proposes group_by as well as window_ms (ROADMAP L4)", () => {
+    // The RC proposal operates two stages of the lens chain, not one. A
+    // narrower window undoes time-averaging; only group_by undoes agent-
+    // averaging, and on the pilot's four-agent stream the latter is what left
+    // the dip sitting on the detection threshold.
+    const brain = new RuleBrain();
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
+    feedN(brain, makeSnapshot([makeAgent("agent-C", 0.65)]), 2);
+    brain.observe(makeSnapshot([makeAgent("agent-C", 0.92)]));
+
+    const d = brain.decide().find((x) => x.type === "replayRequest");
+    const params = d!.qProposal!.params as { group_by?: string[] };
+    assert.deepEqual(params.group_by, ["agentId"]);
+  });
 });
 
 // ── RC calibration (異議 3 fixes) ─────────────────────────────────────────────

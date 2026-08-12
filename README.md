@@ -78,7 +78,9 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [ ] **L3 (本丸)** ClaudeBrain — §12 A/B 実験 (数列のみ vs snapshot package) → `BRAIN_MODE=claude` で RuleBrain と shadow 併走。LLM 起点の $Q 操作が核心。
       前段の A/B 実験は実行済みだが、**当初の仮説「提示形式が判断を助ける」は検証できていない** (再分析で下方修正)。
       副産物として curator の較正欠陥を検出し、Šidák 補正で package 単位の誤警報率 29%→6.5% に是正済み
-- [ ] **L4** レンズチェーン残段 — `applyLens` の group_by → downsample → decay → agg_func。前段の「参照レンズ」(検出を二項演算に) は実装済み
+- [x] **L4** レンズチェーン — 参照レンズ (検出を二項演算に)・窓格子 (`origin`/`align` で格子をレンズの性質にする)・
+      `group_by` (比較器を単一分布の前提に戻す) を実装。混合ストリームで 1.77σ にしか見えない単一エージェントの
+      dip が、グループ内では 3.51σ になる。残るチェーン段は `downsample_factor` / `decay` / `agg_func`
 - [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)
 
-現在テスト計 164 件、全 green。
+現在テスト計 194 件、全 green。

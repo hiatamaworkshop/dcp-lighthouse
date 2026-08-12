@@ -34,11 +34,38 @@ export function resultToValue(result: TestEvent["result"]): number {
 /**
  * Extracts the overall pass-rate signal from any test event.
  * Used to feed the domain-independent RetentionBuffer (RC scenario replay).
+ *
+ * `keys` carries the axes a lens may later ask to group by (ROADMAP L4).
+ * Attaching them here rather than at aggregation time keeps the lens
+ * domain-blind: it groups by whatever key names $Q asks for and never learns
+ * what an "agentId" is. `domain` is the coarsest area roll-up — an event
+ * touching several domains is attributed to the first one its bits fall in,
+ * since a group key has to be single-valued.
  */
 export const testEventExtractor: EventExtractor<TestEvent> = (raw) => ({
   ts: raw.ts,
   value: resultToValue(raw.result),
+  keys: { agentId: raw.agentId, domain: primaryDomainOf(raw.areas) },
 });
+
+/**
+ * The domain an event is filed under for grouping: the one holding most of its
+ * area bits, ties broken by DOMAINS order so the choice is deterministic across
+ * runs (a group label that varies run to run cannot be paired with a reference).
+ */
+function primaryDomainOf(areas: number[]): string {
+  const counts = rollUpToDomains(areas);
+  let best = "";
+  let bestN = 0;
+  for (const d of DOMAINS) {
+    const n = counts[d.name] ?? 0;
+    if (n > bestN) {
+      bestN = n;
+      best = d.name;
+    }
+  }
+  return best === "" ? "(none)" : best;
+}
 
 /**
  * Per-agent extractor factory. Returns null for events from other agents.

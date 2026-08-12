@@ -21,7 +21,7 @@ import {
 } from "./dashboard.js";
 import { RetentionBuffer } from "./retention-buffer.js";
 import { SnapshotCurator } from "./snapshot-curator.js";
-import type { LensEvent } from "./lens.js";
+import { applyLens, type LensEvent } from "./lens.js";
 
 const WINDOW_MS = 10_000;
 const RATE = 50; // events/sec — index.ts's generator rate
@@ -92,6 +92,31 @@ test("liveSpans: spans are pinned to an absolute grid, not to the tick clock", (
   // Crossing a boundary advances by exactly one whole window, never a partial.
   const next = liveSpans(base + WINDOW_MS, WINDOW_MS);
   assert.equal(next.observation.fromTs - withinOneWindow[0].observation.fromTs, WINDOW_MS);
+});
+
+test("liveSpans: requested spans sit on the same grid the lens builds windows on", () => {
+  // The two readers of the grid are liveSpans (choosing what to request) and
+  // applyLens (placing events into windows). Before L4 those were independent
+  // floor expressions agreeing by inspection; now both go through the lens's
+  // declared origin. Pin that they agree, including at a non-zero phase.
+  for (const origin of [0, 250, 7_000]) {
+    const lens = { window_ms: WINDOW_MS, align: "epoch" as const, origin };
+    const { observation } = liveSpans(1_234_567, WINDOW_MS, LIVE_REFERENCE_WINDOW_COUNT, origin);
+    // One event placed at the requested start must open a window exactly there.
+    const placed = applyLens([{ ts: observation.fromTs, value: 1 }], lens);
+    assert.equal(
+      placed.windows[0].windowStart,
+      observation.fromTs,
+      `origin=${origin}: the requested span must begin on a window boundary`,
+    );
+  }
+});
+
+test("liveSpans: a non-zero origin shifts the grid by exactly that phase", () => {
+  const zero = liveSpans(1_234_567, WINDOW_MS, LIVE_REFERENCE_WINDOW_COUNT, 0);
+  const shifted = liveSpans(1_234_567, WINDOW_MS, LIVE_REFERENCE_WINDOW_COUNT, 250);
+  assert.equal(shifted.observation.fromTs - zero.observation.fromTs, 250);
+  assert.equal(shifted.reference.fromTs - zero.reference.fromTs, 250);
 });
 
 // ── window count determinism ────────────────────────────────────────────────

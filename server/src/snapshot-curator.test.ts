@@ -544,3 +544,231 @@ describe("SnapshotCurator — Šidák-corrected spike/dip threshold scales with 
     assert.equal(withFillers(1 + 1.95 * se, 0), undefined, "just below 2.0σ must not fire at N=1");
   });
 });
+
+// ── Grouped curation (ROADMAP L4 group_by) ──────────────────────────────────
+
+/**
+ * A four-agent stream at a fixed per-agent rate, built from real events so the
+ * dilution below is arithmetic rather than a hand-written fixture number.
+ *
+ * Every (agent, window) cell emits RATE_PER_AGENT events of which `passCount`
+ * are 1 and the rest 0 — deterministic, so every z-score in these tests is
+ * reproducible rather than seed-dependent.
+ */
+const RATE_PER_AGENT = 25;
+const AGENTS = ["agent-a", "agent-b", "agent-c", "agent-d"];
+const HEALTHY_PASSES = 24; // 24/25 = 0.96
+
+function cell(windowStart: number, agentId: string, passCount: number): LensEvent[] {
+  return Array.from({ length: RATE_PER_AGENT }, (_, i) => ({
+    ts: windowStart + i * (1000 / RATE_PER_AGENT),
+    value: i < passCount ? 1 : 0,
+    keys: { agentId },
+  }));
+}
+
+/** `sick` overrides one (window, agent) cell's pass count. */
+function span(
+  windowStarts: number[],
+  sick?: { windowStart: number; agentId: string; passCount: number },
+): LensEvent[] {
+  const out: LensEvent[] = [];
+  for (const ws of windowStarts) {
+    for (const agentId of AGENTS) {
+      const passes =
+        sick && sick.windowStart === ws && sick.agentId === agentId
+          ? sick.passCount
+          : HEALTHY_PASSES;
+      out.push(...cell(ws, agentId, passes));
+    }
+  }
+  return out;
+}
+
+const REF_WINDOWS = [0, 1000, 2000];
+const OBS_WINDOWS = [3000, 4000, 5000];
+const GROUPED = { window_ms: 1000, align: "epoch" as const, group_by: ["agentId"] };
+const FLAT = { window_ms: 1000, align: "epoch" as const };
+
+describe("SnapshotCurator — group_by: the mixture hides what the group shows", () => {
+  // agent-c spends part of the middle window failing: 20/25 = 0.80 against its
+  // own 0.96 baseline. In the four-agent mixture that same window reads
+  // (24+24+20+24)/100 = 0.92 — the dip diluted to roughly a quarter of its
+  // depth, which is the recorded L4 motivation (ROADMAP_BRIEF.md 2026-07-25).
+  const SICK = { windowStart: 4000, agentId: "agent-c", passCount: 20 };
+  const obsEvents = span(OBS_WINDOWS, SICK);
+  const refEvents = span(REF_WINDOWS);
+  const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+
+  const flatPkg = curator.curate(applyLens(obsEvents, FLAT), applyLens(refEvents, FLAT));
+  const groupedPkg = curator.curate(applyLens(obsEvents, GROUPED), applyLens(refEvents, GROUPED));
+
+  it("the mixed lens does not report the dip at all", () => {
+    // Not a threshold-tuning artefact: the mixed window sits ~1.8σ from
+    // baseline, under even the uncorrected 2.0σ bar.
+    assert.equal(flatPkg.tiles.filter((t) => t.shapeTag === "dip").length, 0);
+  });
+
+  it("the grouped lens reports it, attributed to the responsible agent", () => {
+    const dips = groupedPkg.tiles.filter((t) => t.shapeTag === "dip");
+    assert.equal(dips.length, 1, `expected exactly one dip, got ${dips.map((d) => d.label)}`);
+    assert.equal(dips[0].group, "agent-c");
+    assert.equal(dips[0].regionStart, 4000);
+    assert.ok(dips[0].label.includes("agent-c"), "the label must name the group");
+  });
+
+  it("the same dip is nearly twice the effect size once it is not averaged across agents", () => {
+    // The mixed window scores too low to be reported at all, so it is re-read
+    // through a deliberately loose threshold purely to obtain its z. magnitude
+    // is the uncorrected z in both packages, so the two are comparable.
+    const loose = new SnapshotCurator({ spikeZThreshold: 1.0, includeBaseline: false });
+    const mixedZ = loose
+      .curate(applyLens(obsEvents, FLAT), applyLens(refEvents, FLAT))
+      .tiles.find((t) => t.regionStart === 4000 && t.shapeTag === "dip")!.magnitude!;
+    const groupedZ = groupedPkg.tiles.find((t) => t.shapeTag === "dip")!.magnitude!;
+
+    assert.ok(mixedZ < 2.0, `mixed z ${mixedZ} must sit under the shipped 2.0σ bar`);
+    assert.ok(groupedZ > 3.4, `grouped z ${groupedZ}`);
+    assert.ok(
+      groupedZ / mixedZ > 1.9,
+      `grouping deepened the effect only ${(groupedZ / mixedZ).toFixed(2)}×`,
+    );
+  });
+
+  it("scores the groups, not the mixture — no untagged anomaly tiles", () => {
+    const anomalies = groupedPkg.tiles.filter((t) => t.shapeTag === "dip" || t.shapeTag === "spike");
+    assert.ok(anomalies.every((t) => t.group !== undefined));
+  });
+
+  it("leaves the healthy agents silent", () => {
+    const flagged = new Set(
+      groupedPkg.tiles
+        .filter((t) => t.shapeTag === "dip" || t.shapeTag === "spike")
+        .map((t) => t.group),
+    );
+    assert.deepEqual([...flagged], ["agent-c"]);
+  });
+
+  it("pairs each group with its own reference, not the pooled one", () => {
+    // Make the OTHER agents unhealthy in the reference span, moving the pooled
+    // mean a long way while agent-c's own baseline stays put. Scored against
+    // the pooled reference, agent-c's magnitude would move; against its own it
+    // must not.
+    const skewedRef = [
+      ...span(REF_WINDOWS).filter((e) => e.keys!.agentId === "agent-c"),
+      ...REF_WINDOWS.flatMap((ws) =>
+        AGENTS.filter((a) => a !== "agent-c").flatMap((a) => cell(ws, a, 5)),
+      ),
+    ];
+    //
+    // maxTiles is lifted for this comparison: the skew makes the other three
+    // agents scream (0.96 observed against a 0.20 reference), and at the
+    // default cap of 12 those louder tiles evict agent-c's — the maxTiles
+    // eviction already recorded as a known sharp edge. The question here is
+    // which reference agent-c was scored against, not which tiles survived.
+    const uncapped = new SnapshotCurator({
+      spikeZThreshold: 2.0,
+      includeBaseline: true,
+      maxTiles: 100,
+    });
+    const plain = uncapped.curate(applyLens(obsEvents, GROUPED), applyLens(refEvents, GROUPED));
+    const skewed = uncapped.curate(applyLens(obsEvents, GROUPED), applyLens(skewedRef, GROUPED));
+
+    const pick = (p: SnapshotPackage): number =>
+      p.tiles.find((t) => t.group === "agent-c" && t.shapeTag === "dip")!.magnitude!;
+    assert.ok(
+      Math.abs(pick(plain) - pick(skewed)) < 1e-9,
+      `agent-c magnitude moved ${pick(plain)} → ${pick(skewed)} when OTHER agents' reference changed`,
+    );
+  });
+});
+
+describe("SnapshotCurator — group_by: blindness is per group", () => {
+  const curator = new SnapshotCurator({ spikeZThreshold: 2.0 });
+
+  it("names groups it could not score instead of silently omitting them", () => {
+    // agent-d appears only in the observation — a newly-started agent. There is
+    // no same-group history to compare it against, and falling back to the
+    // pooled reference would compare one agent to the mixture, which is the
+    // dilution group_by exists to remove.
+    const refEvents = span(REF_WINDOWS).filter((e) => e.keys!.agentId !== "agent-d");
+    const obsEvents = span(OBS_WINDOWS, { windowStart: 4000, agentId: "agent-d", passCount: 2 });
+    const pkg = curator.curate(applyLens(obsEvents, GROUPED), applyLens(refEvents, GROUPED));
+
+    assert.deepEqual(pkg.unscoredGroups, ["agent-d"]);
+    assert.equal(
+      pkg.tiles.some((t) => t.group === "agent-d"),
+      false,
+      "an unscorable group must not produce anomaly tiles",
+    );
+  });
+
+  it("omits the field entirely when every observed group was scorable", () => {
+    const pkg = curator.curate(
+      applyLens(span(OBS_WINDOWS), GROUPED),
+      applyLens(span(REF_WINDOWS), GROUPED),
+    );
+    assert.equal(pkg.unscoredGroups, undefined);
+  });
+});
+
+describe("SnapshotCurator — group_by: the Šidák family is the package, not the group", () => {
+  // Grouping turns N windows into N×G comparisons. If each group carried its
+  // own fresh budget the package-level false-alarm rate would climb with the
+  // number of groups — exactly the inflation 対策A removed for window count.
+  // The cost is real and is pinned here: the same anomaly at the same depth
+  // fires when it is the only group and does not when it is one of four.
+  const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false });
+  const BORDERLINE = 21; // 0.84 vs 0.96 ≈ 2.63σ — above the N=3 bar, below N=12
+  const sick = { windowStart: 4000, agentId: "agent-c", passCount: BORDERLINE };
+  const onlyC = (evts: LensEvent[]): LensEvent[] =>
+    evts.filter((e) => e.keys!.agentId === "agent-c");
+
+  it("fires at family size 3 (one group × three windows)", () => {
+    const pkg = curator.curate(
+      applyLens(onlyC(span(OBS_WINDOWS, sick)), GROUPED),
+      applyLens(onlyC(span(REF_WINDOWS)), GROUPED),
+    );
+    const dip = pkg.tiles.find((t) => t.shapeTag === "dip");
+    assert.ok(dip, "a 2.63σ dip must clear the N=3 bar (2.42σ)");
+    assert.ok(dip!.magnitude! > 2.4 && dip!.magnitude! < 2.9, `magnitude ${dip!.magnitude}`);
+  });
+
+  it("does not fire at family size 12 (four groups × three windows)", () => {
+    const pkg = curator.curate(
+      applyLens(span(OBS_WINDOWS, sick), GROUPED),
+      applyLens(span(REF_WINDOWS), GROUPED),
+    );
+    assert.equal(
+      pkg.tiles.filter((t) => t.shapeTag === "dip").length,
+      0,
+      "the same depth must not clear the N=12 bar (2.89σ) — grouping costs sensitivity",
+    );
+  });
+});
+
+describe("SnapshotCurator — group_by: a single group falling silent is a gap", () => {
+  it("detects a gap inside one group that the mixed stream never shows", () => {
+    // agent-d stops reporting for three windows while the others carry on, so
+    // the mixture has no hole at all — the CG case that motivates per-group
+    // gap detection.
+    const windows = [3000, 4000, 5000, 6000, 7000];
+    const events = windows.flatMap((ws) =>
+      AGENTS.filter((a) => a !== "agent-d" || ws === 3000 || ws === 7000).flatMap((a) =>
+        cell(ws, a, HEALTHY_PASSES),
+      ),
+    );
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false });
+    const pkg = curator.curate(applyLens(events, GROUPED), applyLens(span(REF_WINDOWS), GROUPED));
+
+    const gaps = pkg.tiles.filter((t) => t.shapeTag === "gap");
+    assert.equal(gaps.length, 1, `expected one gap, got ${gaps.map((g) => g.label)}`);
+    assert.equal(gaps[0].group, "agent-d");
+    assert.equal(gaps[0].regionStart, 4000);
+    assert.equal(gaps[0].regionEnd, 7000);
+
+    // The mixed lens over the same events reports nothing missing.
+    const flatPkg = curator.curate(applyLens(events, FLAT), applyLens(span(REF_WINDOWS), FLAT));
+    assert.equal(flatPkg.tiles.filter((t) => t.shapeTag === "gap").length, 0);
+  });
+});

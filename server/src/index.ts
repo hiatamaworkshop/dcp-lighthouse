@@ -34,9 +34,16 @@ const registry = new QRegistry();
  */
 const RETENTION_WINDOW_MS = 120_000;
 
-// Default observe params: coarse live view + fine view for replay
-registry.set("observe:test_result:v1#coarse", { window_ms: 10_000 });
-registry.set("observe:test_result:v1#fine",   { window_ms: 1_000  });
+// Default observe params: coarse live view + fine view for replay.
+//
+// Both declare align:"epoch" (ROADMAP L4 `origin` stage). The grid is then a
+// property of the lens rather than of whichever segment happens to be handed
+// over, so the same event lands in the same window on every tick — the
+// anchor-slide that made an unchanging past burst flicker across ticks
+// (ROADMAP_BRIEF.md 2026-07-29). dashboard.ts's liveSpans snaps its requests
+// to this same grid via lens.ts's floorToWindow.
+registry.set("observe:test_result:v1#coarse", { window_ms: 10_000, align: "epoch" });
+registry.set("observe:test_result:v1#fine",   { window_ms: 1_000, align: "epoch" });
 registry.set("pipeline:*", { retention_window_ms: RETENTION_WINDOW_MS });
 // AR/RC regression threshold delta (ROADMAP L2-1, "Brain write surface" demo,
 // PILOT_DATA.md §11). RuleBrain reads this live via QRegistry.getSchema — a
@@ -68,9 +75,12 @@ generator.onEvent((event) => {
   // Domain adapter
   adapter.push(event);
 
-  // Observation overlay (Phase 0 core)
-  const lensEv = { ts: event.ts, value: event.result === "pass" ? 1 : event.result === "flaky" ? 0.5 : 0 };
-  overlay.push("test_result:v1", lensEv);
+  // Observation overlay (Phase 0 core). Built by the same extractor the
+  // retention buffer uses, so the overlay and the replay path see identical
+  // events — including the `keys` a group_by lens reads. Hand-rolling the
+  // value mapping here is how the two drifted apart before.
+  const lensEv = testEventExtractor(event, "test_result:v1");
+  if (lensEv !== null) overlay.push("test_result:v1", lensEv);
 
   // Retention buffer (RC replay)
   buffer.observe(event, "test_result:v1");

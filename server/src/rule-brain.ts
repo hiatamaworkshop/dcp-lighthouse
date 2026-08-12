@@ -339,12 +339,32 @@ export class RuleBrain implements BrainAdapter {
           const toTs = this.lastSnapshot!.ts + REPLAY_PADDING_MS;
           this.pendingDecisions.push({
             type: "replayRequest",
-            reason: `Agent ${a.agentId} recovered from a brief pass-rate dip — requesting fine-window re-observation to recover burst shape averaged by coarse window`,
+            reason: `Agent ${a.agentId} recovered from a brief pass-rate dip — requesting fine-window, per-agent re-observation to recover the burst shape averaged away by the coarse mixed window`,
             qProposal: {
               scope: "observe:test_result:v1#fine",
-              params: { window_ms: REPLAY_FINE_WINDOW_MS, fromTs, toTs },
+              // Two stages of the lens chain are being operated here, not one.
+              // window_ms recovers the burst from time-averaging; group_by
+              // recovers it from AGENT-averaging, which the narrower window
+              // alone does not touch: one of four agents dropping to 0.20
+              // still reads as (3×0.92 + 0.20)/4 ≈ 0.74 in the mixed stream —
+              // about a quarter of the real depth, which is what left the dip
+              // sitting on the detection threshold (ROADMAP_BRIEF.md
+              // 2026-07-25). Scored inside its own group it is a 0.20 against
+              // that agent's own ~0.95 baseline.
+              params: {
+                window_ms: REPLAY_FINE_WINDOW_MS,
+                group_by: ["agentId"],
+                fromTs,
+                toTs,
+              },
             },
-            meta: { agentId: a.agentId, targetWindowMs: REPLAY_FINE_WINDOW_MS, fromTs, toTs },
+            meta: {
+              agentId: a.agentId,
+              targetWindowMs: REPLAY_FINE_WINDOW_MS,
+              groupBy: ["agentId"],
+              fromTs,
+              toTs,
+            },
           });
         }
       } else {

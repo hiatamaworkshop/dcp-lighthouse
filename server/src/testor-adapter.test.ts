@@ -8,7 +8,8 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { TestorAdapter } from "./testor-adapter.js";
+import { TestorAdapter, testEventExtractor } from "./testor-adapter.js";
+import { RetentionBuffer } from "./retention-buffer.js";
 import type { TestEvent } from "./mock-stream-generator.js";
 
 function makeEvent(ts: number, agentId = "agent-A", result: TestEvent["result"] = "pass"): TestEvent {
@@ -61,5 +62,35 @@ describe("TestorAdapter — clock policy (ROADMAP L1-1)", () => {
     now = 12_000; // clock catches up
     snap = adapter.snapshot();
     assert.equal(snap.agents.find((a) => a.agentId === "agent-A")?.eventCount, 1);
+  });
+});
+
+describe("testEventExtractor — group keys (ROADMAP L4)", () => {
+  test("attaches the axes a group_by lens can name", () => {
+    const ev = testEventExtractor(makeEvent(1000, "agent-C", "fail"), "test_result:v1");
+    assert.equal(ev?.value, 0);
+    assert.equal(ev?.keys?.agentId, "agent-C");
+    // areas [0] is in the auth range (bits 0–31).
+    assert.equal(ev?.keys?.domain, "auth");
+  });
+
+  test("files an event by the domain holding most of its area bits", () => {
+    // bits 64+ are ui; the single auth bit must not win a 1-vs-3 majority.
+    const raw = { ...makeEvent(1000), areas: [0, 64, 65, 66] };
+    assert.equal(testEventExtractor(raw, "test_result:v1")?.keys?.domain, "ui");
+  });
+
+  test("is the path a grouped replay actually reads keys through", () => {
+    // End-to-end for the wiring rather than the extractor alone: the same
+    // events index.ts feeds the retention buffer must come back out split by
+    // agent when $Q asks for it. A key dropped anywhere in this path would
+    // collapse every event into the unkeyed group and read as "one agent".
+    const buffer = new RetentionBuffer<TestEvent>(testEventExtractor, { retentionWindowMs: 60_000 });
+    for (let i = 0; i < 12; i++) {
+      buffer.observe(makeEvent(1000 + i * 100, i % 2 === 0 ? "agent-A" : "agent-C"), "test_result:v1");
+    }
+    const result = buffer.replay({ window_ms: 1000, align: "epoch", group_by: ["agentId"] });
+    assert.deepEqual(result.groups?.map((g) => g.label), ["agent-A", "agent-C"]);
+    assert.equal(result.groups?.[0].windows.reduce((s, w) => s + w.count, 0), 6);
   });
 });

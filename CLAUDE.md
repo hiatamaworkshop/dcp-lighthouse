@@ -220,12 +220,21 @@ E2E 検証は完了済み (テスト 113 件、§10 基準を実測)。以後の
   再定義)。同じ31 seedで再検証: package単位誤警報率 29%→6.5%。RC(35σ)/AR(21〜23σ)は
   無傷。テスト 140→145件。残る対策 B〜E は未着手。
   詳細は ROADMAP_BRIEF.md 「再分析 (Opus 5 レビュー)」「今後の対策」「対策A 実装完了」参照
-- **L4** レンズチェーン残段 (group_by 他)。**前段の「参照レンズ設計」は実装済み** (2026-07-25) —
-  curator を `curate(observation, reference = observation)` の二項演算に変更、SE は
-  **参照分散のみ**から `sqrt(var_ref × (1/n_w + 1/n_ref))`。テスト 124→132件。
-  ROADMAP_BRIEF.md「参照レンズ設計 実装完了」+「自己レビューで実装バグ 2 件」参照
-  (観測窓自身の分散を分母に使うと有界データで定数の誤警報になる / 参照が空の時の盲目は明示する)。
-  次は group_by 本体 (混合ストリームが比較器の単一分布前提を破るため、比較演算子の後で正しい)
+- **L4 ✅ (2026-08-12)** レンズチェーン — 前段の「参照レンズ設計」(2026-07-25、curator を
+  `curate(observation, reference)` の二項演算化、SE は `sqrt(var_ref × (1/n_w + 1/n_ref))`) に続き、
+  **格子 (`origin`/`align`) と `group_by` を実装**。テスト 164→194件。
+  - `align:"epoch"` で窓境界がレンズの性質になる (従来は渡されたセグメントの性質だった)。
+    格子の読み手 (`liveSpans` / `applyLens`) は `floorToWindow` を共有する
+  - `group_by` は**加算的** — `LensResult.windows` の混合ビューは残り、`groups` が増える。
+    全グループが**共通 origin** を使うので窓が対応付く (これが格子を先にやる理由)
+  - curator は 1 グループ = 1 比較単位、参照は**同じグループ**と対応付け。対応が無いものは
+    スコアせず `unscoredGroups` で申告 (盲目と沈黙の区別のグループ版)。
+    **Šidák の family は package のまま** (グループごとの予算にすると対策A の膨張が戻る)
+  - RuleBrain の RC 提案が `group_by:["agentId"]` を載せる = Brain がレンズ 2 段を操作する
+  - **実測**: 混合 1.77σ (出ない) → grouped 3.51σ (出る)。実走 replay は 2.48σ → 6.5σ
+  - **代償** (仕様として記録): grouping は family を N→N×G にするので感度が下がる。
+    細窓×grouping は 1 窓の n を薄くする。詳細は ROADMAP_BRIEF.md 2026-08-12
+  - 残るチェーン段は `downsample_factor` / `decay` / `agg_func`
 - **L5** retention 参照ゾーン (疎化)
 - 常設: 実データ派生 (非公開の姉妹プロジェクト) からの還元フィルタ — 「機構を行使/変更する or ドメイン非依存知見を生む」もののみ灯台の実証に数える
 

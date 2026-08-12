@@ -4,3 +4,4 @@ server/package-lock.json
 .env
 .claude/settings.local.json
 CLAUDE.local.md
+server/server.log

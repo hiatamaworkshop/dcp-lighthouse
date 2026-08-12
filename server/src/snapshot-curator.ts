@@ -23,7 +23,7 @@
  * requests a new replay — the curator does NOT regenerate; the caller re-runs.
  */
 
-import { MIN_VALID_COUNT, type LensResult, type WindowStat } from "./lens.js";
+import { MIN_VALID_COUNT, type LensGroup, type LensResult, type WindowStat } from "./lens.js";
 
 // ── Shape tags ─────────────────────────────────────────────────────────────
 
@@ -65,6 +65,12 @@ export interface SnapshotTile {
    * gap/baseline tiles. Lets Brain compare anomaly sizes across tiles.
    */
   magnitude?: number;
+  /**
+   * Which group_by group this tile belongs to (LensGroup.label), when the
+   * observation lens declared group_by. Absent on tiles from an ungrouped lens
+   * and on the package-level baseline tile.
+   */
+  group?: string;
 }
 
 // ── Snapshot package ────────────────────────────────────────────────────────
@@ -101,6 +107,17 @@ export interface SnapshotPackage {
    * suppressed; gap tiles are structural and still emitted.
    */
   referenceUsable: boolean;
+  /**
+   * Group labels that were observed but could not be scored, because the
+   * reference lens had no same-group population to compare them against (the
+   * group is new, or it fell silent during the reference span).
+   *
+   * The group-level form of silence-vs-blindness: without this, a group with
+   * no yardstick contributes no tiles and reads exactly like a group that was
+   * checked and found healthy. Present only for grouped lenses; omitted when
+   * every observed group was scorable.
+   */
+  unscoredGroups?: string[];
   /** The curated tiles, sorted by regionStart ascending. */
   tiles: SnapshotTile[];
 }
@@ -213,6 +230,21 @@ export class SnapshotCurator {
    *     divergence (paired by windowStart).
    *  6. Pick one baseline tile (window closest to the reference mean).
    *  7. Sort by magnitude desc, cap at maxTiles.
+   *
+   * When the observation lens declared `group_by`, steps 2–4 run once PER GROUP
+   * against that same group's reference population, instead of once over the
+   * mixed stream (ROADMAP L4). This is the reason group_by belongs after the
+   * reference-lens redesign rather than before it: the comparator assumes its
+   * reference is one population, and a mixed stream is not one. Concretely, on
+   * the pilot's four-agent stream a single agent dropping to 0.20 pass rate
+   * shows up in the mixture as (3×0.92 + 0.20)/4 ≈ 0.74 — diluted to roughly a
+   * quarter of its real depth, sitting on the threshold and firing or not
+   * depending on the run (ROADMAP_BRIEF.md 2026-07-25). Scored inside its own
+   * group it is simply a 0.20 against a 0.95 baseline.
+   *
+   * The Šidák family stays the whole PACKAGE, not each group: grouping turns N
+   * windows into N×G comparisons, and letting each group carry its own fresh
+   * budget would reintroduce exactly the inflation 対策A removed.
    */
   curate(observation: LensResult, reference: LensResult = observation): SnapshotPackage {
     const { windows, window_ms } = observation;
@@ -231,6 +263,13 @@ export class SnapshotCurator {
 
     const tiles: SnapshotTile[] = [];
 
+    // ── 0. Decide what gets compared against what ─────────────
+    // Ungrouped: one unit, the whole stream against the whole reference.
+    // Grouped: one unit per observed group, each against the SAME group in the
+    // reference — paired by label, which is why applyLens puts every group on a
+    // shared grid and sorts groups deterministically.
+    const { units, unscoredGroups } = buildScoringUnits(observation, reference, refStats);
+
     // ── 1. Spikes and dips ────────────────────────────────────
     // Each window is scored against the reference population via a standard
     // error built from the reference's variance and the window's event count.
@@ -247,52 +286,68 @@ export class SnapshotCurator {
     // spikeZThreshold doc) so the package-wide false-positive budget stays
     // fixed as the number of scored windows N grows; the reported `magnitude`
     // stays the honest, uncorrected z so Brain sees the real effect size.
-    const scorableCount = windows.filter((w) => w.count >= MIN_VALID_COUNT).length;
+    const scorableCount = units.reduce(
+      (n, u) => n + u.windows.filter((w) => w.count >= MIN_VALID_COUNT).length,
+      0,
+    );
     const effectiveZThreshold = sidakCorrectedThreshold(this.opts.spikeZThreshold, scorableCount);
-    for (const w of windows) {
-      if (w.count < MIN_VALID_COUNT) continue;
-      const se = comparisonSE(w, refStats);
-      if (!(se > 0)) continue;
-      const z = (w.mean - refStats.mean) / se;
-      if (z >= effectiveZThreshold) {
-        tiles.push({
-          label: `spike at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${refStats.mean.toFixed(3)})`,
-          shapeTag: "spike",
-          regionStart: w.windowStart,
-          regionEnd: w.windowEnd,
-          windows: [w],
-          description: `Window mean ${w.mean.toFixed(3)} is ${z.toFixed(1)}σ above the reference baseline (${refStats.mean.toFixed(3)}). Count: ${w.count}.`,
-          magnitude: z,
-        });
-      } else if (z <= -effectiveZThreshold) {
-        tiles.push({
-          label: `dip at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${refStats.mean.toFixed(3)})`,
-          shapeTag: "dip",
-          regionStart: w.windowStart,
-          regionEnd: w.windowEnd,
-          windows: [w],
-          description: `Window mean ${w.mean.toFixed(3)} is ${Math.abs(z).toFixed(1)}σ below the reference baseline (${refStats.mean.toFixed(3)}). Count: ${w.count}.`,
-          magnitude: Math.abs(z),
-        });
+
+    for (const unit of units) {
+      const tag = unit.group !== undefined ? `[${unit.group}] ` : "";
+      const inGroup = unit.group !== undefined ? ` in group "${unit.group}"` : "";
+
+      for (const w of unit.windows) {
+        if (w.count < MIN_VALID_COUNT) continue;
+        const se = comparisonSE(w, unit.ref);
+        if (!(se > 0)) continue;
+        const z = (w.mean - unit.ref.mean) / se;
+        if (z >= effectiveZThreshold) {
+          tiles.push({
+            label: `${tag}spike at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${unit.ref.mean.toFixed(3)})`,
+            shapeTag: "spike",
+            regionStart: w.windowStart,
+            regionEnd: w.windowEnd,
+            windows: [w],
+            description: `Window mean ${w.mean.toFixed(3)} is ${z.toFixed(1)}σ above the reference baseline (${unit.ref.mean.toFixed(3)})${inGroup}. Count: ${w.count}.`,
+            magnitude: z,
+            ...(unit.group !== undefined ? { group: unit.group } : {}),
+          });
+        } else if (z <= -effectiveZThreshold) {
+          tiles.push({
+            label: `${tag}dip at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${unit.ref.mean.toFixed(3)})`,
+            shapeTag: "dip",
+            regionStart: w.windowStart,
+            regionEnd: w.windowEnd,
+            windows: [w],
+            description: `Window mean ${w.mean.toFixed(3)} is ${Math.abs(z).toFixed(1)}σ below the reference baseline (${unit.ref.mean.toFixed(3)})${inGroup}. Count: ${w.count}.`,
+            magnitude: Math.abs(z),
+            ...(unit.group !== undefined ? { group: unit.group } : {}),
+          });
+        }
       }
-    }
 
-    // ── 2. Sustained step changes ──────────────────────────────
-    const stepTiles = detectSteps(windows, refStats, this.opts.stepThreshold, this.opts.stepWindowCount);
-    tiles.push(...stepTiles);
+      // ── 2. Sustained step changes ──────────────────────────────
+      tiles.push(
+        ...detectSteps(unit.windows, unit.ref, this.opts.stepThreshold, this.opts.stepWindowCount, unit.group),
+      );
 
-    // ── 3. Gaps ────────────────────────────────────────────────
-    for (let i = 0; i + 1 < windows.length; i++) {
-      const gap = windows[i + 1].windowStart - windows[i].windowEnd;
-      if (gap >= minGapMs) {
-        tiles.push({
-          label: `gap ${gap}ms at t=${windows[i].windowEnd}–${windows[i + 1].windowStart}`,
-          shapeTag: "gap",
-          regionStart: windows[i].windowEnd,
-          regionEnd: windows[i + 1].windowStart,
-          windows: [windows[i], windows[i + 1]],
-          description: `No events for ${gap}ms. Before: ${windows[i].mean.toFixed(3)}, after: ${windows[i + 1].mean.toFixed(3)}.`,
-        });
+      // ── 3. Gaps ────────────────────────────────────────────────
+      // Per unit, so that a single group falling silent is visible. On a
+      // grouped lens the mixed stream almost never gaps (some other group is
+      // still reporting), which is exactly the case CG cares about.
+      for (let i = 0; i + 1 < unit.windows.length; i++) {
+        const gap = unit.windows[i + 1].windowStart - unit.windows[i].windowEnd;
+        if (gap >= minGapMs) {
+          tiles.push({
+            label: `${tag}gap ${gap}ms at t=${unit.windows[i].windowEnd}–${unit.windows[i + 1].windowStart}`,
+            shapeTag: "gap",
+            regionStart: unit.windows[i].windowEnd,
+            regionEnd: unit.windows[i + 1].windowStart,
+            windows: [unit.windows[i], unit.windows[i + 1]],
+            description: `No events for ${gap}ms${inGroup}. Before: ${unit.windows[i].mean.toFixed(3)}, after: ${unit.windows[i + 1].mean.toFixed(3)}.`,
+            ...(unit.group !== undefined ? { group: unit.group } : {}),
+          });
+        }
       }
     }
 
@@ -345,12 +400,65 @@ export class SnapshotCurator {
       spanMs,
       globalStats,
       referenceUsable,
+      ...(unscoredGroups.length > 0 ? { unscoredGroups } : {}),
       tiles: capped,
     };
   }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * One (observation windows, reference population) pair to run detection over.
+ * An ungrouped lens yields exactly one; a grouped lens yields one per group.
+ */
+interface ScoringUnit {
+  /** LensGroup.label, or undefined for the ungrouped whole-stream unit. */
+  group?: string;
+  windows: WindowStat[];
+  ref: RefStats;
+}
+
+/**
+ * Pair each observation group with its own reference population.
+ *
+ * Pairing is by label, and a group with no counterpart in the reference is
+ * dropped from scoring rather than silently falling back to the mixed-stream
+ * reference. Falling back would be worse than not scoring: it would compare a
+ * single agent against the four-agent mixture — the very dilution group_by
+ * exists to remove — and would report the resulting z as if it meant something.
+ * Dropped labels are returned so the package can say it was blind to them.
+ */
+function buildScoringUnits(
+  observation: LensResult,
+  reference: LensResult,
+  packageRef: RefStats,
+): { units: ScoringUnit[]; unscoredGroups: string[] } {
+  const obsGroups = observation.groups;
+  if (obsGroups === undefined || obsGroups.length === 0) {
+    return { units: [{ windows: observation.windows, ref: packageRef }], unscoredGroups: [] };
+  }
+
+  const refByLabel = new Map<string, LensGroup>(
+    (reference.groups ?? []).map((g) => [g.label, g]),
+  );
+  const units: ScoringUnit[] = [];
+  const unscoredGroups: string[] = [];
+
+  for (const g of obsGroups) {
+    const refGroup = refByLabel.get(g.label);
+    const ref = refGroup !== undefined ? poolStats(refGroup.windows) : undefined;
+    // Same usability test the package applies: fewer than 2 pooled events means
+    // there is no variance, so no comparison exists to make.
+    if (ref === undefined || ref.count < 2 || !Number.isFinite(ref.variance)) {
+      unscoredGroups.push(g.label);
+      continue;
+    }
+    units.push({ group: g.label, windows: g.windows, ref });
+  }
+
+  return { units, unscoredGroups };
+}
 
 /** Pooled aggregate of a reference lens's windows: {mean, variance, count}. */
 interface RefStats {
@@ -468,9 +576,11 @@ function detectSteps(
   ref: RefStats,
   threshold: number,
   minRun: number,
+  group?: string,
 ): SnapshotTile[] {
   if (windows.length < minRun) return [];
   const tiles: SnapshotTile[] = [];
+  const tag = group !== undefined ? `[${group}] ` : "";
   let runDir: 1 | -1 | null = null;
   let runStart = 0;
 
@@ -483,13 +593,14 @@ function detectSteps(
     const se = Math.sqrt(ref.variance * (1 / runCount + 1 / ref.count));
     const z = se > 0 ? Math.abs(runMean - ref.mean) / se : 0;
     tiles.push({
-      label: `${shapeTag} t=${windows[start].windowStart}–${windows[end].windowEnd} (${(shift * 100).toFixed(1)}% shift)`,
+      label: `${tag}${shapeTag} t=${windows[start].windowStart}–${windows[end].windowEnd} (${(shift * 100).toFixed(1)}% shift)`,
       shapeTag,
       regionStart: windows[start].windowStart,
       regionEnd: windows[end].windowEnd,
       windows: run,
-      description: `Sustained ${dir > 0 ? "elevation" : "drop"} over ${run.length} windows. Run mean: ${runMean.toFixed(3)}, reference mean: ${ref.mean.toFixed(3)}.`,
+      description: `Sustained ${dir > 0 ? "elevation" : "drop"} over ${run.length} windows${group !== undefined ? ` in group "${group}"` : ""}. Run mean: ${runMean.toFixed(3)}, reference mean: ${ref.mean.toFixed(3)}.`,
       magnitude: z,
+      ...(group !== undefined ? { group } : {}),
     });
   };
 

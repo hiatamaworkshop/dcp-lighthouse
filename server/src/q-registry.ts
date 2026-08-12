@@ -31,9 +31,44 @@ export interface QScope {
 
 // ── Per-layer parameter shapes ─────────────────────────────────
 
+/**
+ * Where a lens anchors its window boundaries (ROADMAP L4, lens-chain `origin`
+ * stage).
+ *
+ *   "first_event" — the grid starts at the first event of whatever segment is
+ *                   handed over. The original behaviour, and the default:
+ *                   for a one-off "re-observe exactly this segment" request it
+ *                   is the only anchor that needs no external agreement.
+ *   "epoch"       — the grid is absolute, anchored at `origin` (default 0) and
+ *                   stepping by window_ms. The same event always lands in the
+ *                   same window regardless of which segment it arrived in.
+ *
+ * The distinction is not cosmetic. Under "first_event", two overlapping
+ * segments of the same stream produce windows on *different* grids, so their
+ * results cannot be compared window-by-window — the failure recorded as
+ * "anchor が tick ごとに滑る" (ROADMAP_BRIEF.md 2026-07-29), where an
+ * unchanging past burst flickered on and off across ticks and swung 2.6σ–5.3σ
+ * purely because each tick's request re-anchored the grid. The dashboard
+ * worked around it by quantizing its *requests*; declaring the grid in $Q is
+ * the same fix stated where it belongs — as a property of the lens.
+ */
+export type WindowAlign = "first_event" | "epoch";
+
 /** $Q[observe] — how one schema's statistics are aggregated. */
 export interface QObserveParams {
   window_ms?: number;
+  /**
+   * Window-grid anchoring policy. Defaults to "first_event", or to "epoch"
+   * when `origin` is set (setting an origin and getting no grid would be a
+   * silent no-op).
+   */
+  align?: WindowAlign;
+  /**
+   * Phase of the absolute grid, in the same epoch as LensEvent.ts. Only read
+   * when the resolved alignment is "epoch"; 0 (the Unix epoch) gives the
+   * plain `floor(ts / window_ms) * window_ms` grid.
+   */
+  origin?: number;
   decay?: string;            // e.g. "exp(τ=300s)" | "step(cutoff=now-60s)"
   group_by?: string[];       // e.g. ["agentId", "area"]
   downsample_factor?: number;
