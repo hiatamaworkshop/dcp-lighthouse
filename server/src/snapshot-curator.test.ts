@@ -486,6 +486,26 @@ describe("SnapshotCurator — unusable reference is blindness, not quiet", () =>
     const pkg = new SnapshotCurator().curate(observation);
     assert.equal(pkg.referenceUsable, true);
   });
+
+  it("does not fabricate a step tile with magnitude:0 when the reference can't ground one", () => {
+    // 3 sustained windows well past stepThreshold (default 0.3) — enough to
+    // trigger detectSteps' run-length gate (default minRun=3) purely from the
+    // mean-shift check, which only needs ref.mean and does not itself require
+    // variance. Before the fix this fabricated a step_up/step_down tile with
+    // magnitude:0, misreporting "measured, no shift" instead of "no yardstick".
+    const sustained = buildResult([
+      { windowStart: 0, mean: 1.0 },
+      { windowStart: 1000, mean: 1.0 },
+      { windowStart: 2000, mean: 1.0 },
+    ]);
+    const pkg = new SnapshotCurator().curate(sustained, buildResult([{ windowStart: 0, mean: 0.5, count: 1 }]));
+    assert.equal(pkg.referenceUsable, false);
+    assert.deepEqual(
+      pkg.tiles.filter((t) => t.shapeTag === "step_up" || t.shapeTag === "step_down"),
+      [],
+      "no reference means no scored step, not a step with magnitude:0",
+    );
+  });
 });
 
 // ── Šidák correction (2026-07-28 "対策A") ──────────────────────────────────

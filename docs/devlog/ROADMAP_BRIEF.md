@@ -1784,6 +1784,57 @@ curator 側 (`buildScoringUnits`):
 - grouping 時の適正 window_ms を Brain が選ぶ根拠が無い (上記代償 2)
 - ライブ粗窓は change detector であって level detector ではない (設計判断として明記済み)
 - 格子量子化の代償: 最大 window_ms ぶんの検出遅延
-- `refUsable=false` 時に curator が magnitude=0 の形タイルを出す
-- `e2e-verify.test.ts` の "E2E AR" がシード無し実時計 (方針判断待ちで保留中)
+- ~~`refUsable=false` 時に curator が magnitude=0 の形タイルを出す~~ → 08-16 で解消
+- ~~`e2e-verify.test.ts` の "E2E AR" がシード無し実時計~~ → 08-16 で解消 (フレーク自体を修正、実時計のまま維持)
+- grouping 時の適正 window_ms を Brain が選ぶ根拠が無い (上記代償 2、未着手 — 変更すると
+  L4 で測定・公開済みの σ 値群に波及するため単独の判断・検証パスが要る)
 - 対策 B・E は未着手 (LLM 呼び出しが必要)
+
+## 2026-08-16 — 小粒残課題の整理: E2E AR フレーク修正・curator の magnitude:0 誤報を修正
+
+L4 完了後の残課題のうち、他の測定値に影響しない自己完結な 2 件を修正。テスト 194 → 195 件。
+
+### ① `e2e-verify.test.ts` "E2E AR" のフレーク (実測、方針判断ではなく実装バグだった)
+
+08-05 の記述では「方針判断待ち」としていたが、原因を辿ると判断不要の実装バグだった。
+テスト側が `sleep(120)×12 + sleep(900)` で「回帰開始のはず」の時刻を**推測**しており、
+`runAR()` 内部の独立したリアルタイマー (`sleepFn(10_000*timingScale)`) との間に実体のない
+前提を置いていた。CPU 競合でどちらかのタイマーが伸びると、この推測が外れて
+`regressionStartMs` が実際の回帰開始より遅れて記録され、レイテンシ計測が歪む
+(ROADMAP 08-05 の記述通りの機序)。
+
+**修正**: `MockStreamGenerator.runAR()` に `scenarioLog` へ `regression_start`/`regression_end`
+エントリを追加 (RC の `burst_start` と同じパターン)。テスト側は固定 sleep の後に
+`Date.now()` を取る代わりに、50ms 間隔でポーリングしながら `getScenarioLog()` に
+`regression_start` が現れるまで待ち、その実測 `ts` を使う。推測が実測に置き換わったので、
+ウォームアップがどれだけ CPU 競合で伸びても計測値は正しいまま。6 回連続 green
+(実測レイテンシ 2.4〜4.9s、§10 基準 5s 以内)。実時計テストという性質自体は維持
+(仮想時計版と役割が違うため — production-config 版は論理の決定論的検証、こちらは
+実タイマー下での §10 実測)。
+
+### ② curator が `referenceUsable=false` でも step タイルに `magnitude:0` を出していた
+
+`detectSteps()` の run 検出 (`delta = (mean - ref.mean)/ref.mean`) は分散を使わないので、
+参照が使い物にならない (`count<2` または `variance` が非有限) 場合でも run 自体は
+検出できてしまい、`emit()` 内の `se > 0 ? z : 0` フォールバックが `magnitude:0` の
+step_up/step_down タイルをそのまま push していた。spike/dip は同じ状況で `comparisonSE`
+が NaN を返して静かにスキップされる一方、step だけこの経路を素通りしていた。
+
+パッケージ全体は `referenceUsable:false` を正しく申告しているのに、その同じパッケージに
+「測定した結果、変化なし」と読める `magnitude:0` タイルが同居する — 「物差しが無い」と
+「何も起きていない」を区別する、というこのプロジェクトの一貫した方針 (`unscoredGroups` と
+同じ理屈) に反する状態だった。grouped 経路では `buildScoringUnits` が使えないグループを
+最初から `units` から除外しているので影響なし。影響はグループ無し (package-level) の
+`referenceUsable=false` 経路のみ。
+
+**修正**: `detectSteps()` の先頭に `buildScoringUnits` と同じ使用可能性チェック
+(`ref.count>=2 && Number.isFinite(ref.variance)`) を追加し、使えなければ `[]` を返す。
+回帰テストで修正前に実際に `magnitude:0` の `step_up` が出ることを確認してから修正・再確認した。
+
+### 見送った項目
+
+grouping 時の適正 `window_ms` を Brain が選ぶ根拠が無い件は今回見送った。固定 4 エージェント
+なら `window_ms` をグループ数倍する、等の対応は小さいコード変更で済むが、L4 で測定して
+ROADMAP と公開ドキュメント (`dcp-docs/docs/demos/lighthouse.md`) に載せた σ 値
+(1.77σ/3.51σ, 6.56σ 等) は現行の `window_ms=1000` 固定を前提にしている。変えるなら
+再測定・両ドキュメントの更新も込みで別途やる方が筋が良い。

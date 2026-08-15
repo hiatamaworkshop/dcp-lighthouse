@@ -83,4 +83,4 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       dip が、グループ内では 3.51σ になる。残るチェーン段は `downsample_factor` / `decay` / `agg_func`
 - [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)
 
-現在テスト計 194 件、全 green。
+現在テスト計 195 件、全 green。

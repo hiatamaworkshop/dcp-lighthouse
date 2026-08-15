@@ -191,8 +191,10 @@ export class MockStreamGenerator {
   private async runAR(): Promise<void> {
     await this.sleepFn(10_000 * this.timingScale);  // 10s baseline before regression
     this.profiles["agent-C"] = { ...this.profiles["agent-C"], passRate: 0.70 };
+    this.scenarioLog.push({ phase: "regression_start", ts: Date.now(), agentId: "agent-C", passRate: 0.70 });
     await this.sleepFn(30_000 * this.timingScale);  // 30s regression window
     this.profiles["agent-C"] = { ...DEFAULT_PROFILES["agent-C"] };
+    this.scenarioLog.push({ phase: "regression_end", ts: Date.now(), agentId: "agent-C", passRate: DEFAULT_PROFILES["agent-C"].passRate });
   }
 
   // ── Scenario CG: coverage gap ──────────────────────────────────────────────

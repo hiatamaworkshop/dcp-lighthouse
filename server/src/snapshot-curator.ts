@@ -579,6 +579,11 @@ function detectSteps(
   group?: string,
 ): SnapshotTile[] {
   if (windows.length < minRun) return [];
+  // No yardstick, no comparison — mirrors spike/dip's silent skip when the
+  // reference can't ground a z-score (buildScoringUnits applies the same
+  // test), rather than reporting a step_up/step_down with a fabricated
+  // magnitude:0. Blindness must not read as "measured, no shift".
+  if (!(ref.count >= 2 && Number.isFinite(ref.variance))) return [];
   const tiles: SnapshotTile[] = [];
   const tag = group !== undefined ? `[${group}] ` : "";
   let runDir: 1 | -1 | null = null;

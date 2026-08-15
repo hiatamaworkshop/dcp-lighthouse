@@ -135,20 +135,24 @@ describe("E2E AR — agent regression", { timeout: 15_000 }, () => {
     // Kick off scenario in background (don't await — baseline sleep is 2s)
     void gen.runScenario("AR");
 
-    // Warm up the brain on healthy baseline before the regression hits, so the
-    // per-agent threshold is trusted (WARMUP_TICKS=10). The baseline phase lasts
-    // ~2s (scaled); tick 12× at 120ms (~1.44s) while agent-C is still at 0.95.
+    // Warm up the brain on healthy baseline (WARMUP_TICKS=10) by ticking at fine
+    // granularity until the scenario log confirms regression has actually started,
+    // instead of assuming a fixed sleep offset lines up with runAR's internal
+    // timer. The two were independent real-timer chains, and under CPU contention
+    // the assumed offset could land after regression already began, silently
+    // contaminating the learned baseline and producing a flaky latency reading
+    // (§10 measurement, not scenario logic — see ROADMAP_BRIEF.md 2026-08-05).
     // This mirrors the real server, whose tick loop runs from boot.
-    for (let i = 0; i < 12; i++) {
-      await sleep(120);
+    let regressionStartMs: number | null = null;
+    const warmupDeadline = Date.now() + 8_000;
+    while (Date.now() < warmupDeadline) {
       brain.observe(adapter.snapshot());
       brain.decide();
+      const entry = gen.getScenarioLog().find((e) => e.phase === "regression_start");
+      if (entry) { regressionStartMs = entry.ts; break; }
+      await sleep(50);
     }
-
-    // Wait out the remaining baseline plus a small buffer, then start the clock.
-    // The regression starts at 2s inside runAR; ~1.44s elapsed, wait to ~2.3s.
-    await sleep(900);
-    const regressionStartMs = Date.now();
+    assert.ok(regressionStartMs !== null, "AR: scenario should log regression_start within 8s");
 
     // Brain ticks every 200ms. With 3s window: passRate drops below the per-agent
     // threshold (~0.85) after ~1.5s of regression events fill the window, then
@@ -166,7 +170,7 @@ describe("E2E AR — agent regression", { timeout: 15_000 }, () => {
     gen.stop();
 
     assert.ok(decision !== null, "AR: rerouteSchema should fire within 5s of regression start");
-    const latencyMs = Date.now() - regressionStartMs;
+    const latencyMs = Date.now() - regressionStartMs!;
     assert.ok(
       latencyMs <= 5_000,
       `AR decision latency ${latencyMs}ms exceeds 5 000ms (§10 criterion)`,
