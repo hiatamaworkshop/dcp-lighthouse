@@ -9,8 +9,8 @@
  * retroactive re-observation (MODEL.md §5): a new lens on old data, not a
  * precision gain from repetition.
  *
- * Implemented stages: group_by → window_ms (with the `origin`/`align` grid).
- * downsample_factor, decay and agg_func still pass through — callers (replay)
+ * Implemented stages: group_by → window_ms (with the `origin`/`align` grid) →
+ * downsample_factor. decay and agg_func still pass through — callers (replay)
  * keep handing over the same observeParams object unchanged, so filling them
  * later needs no change at any call site.
  *
@@ -139,6 +139,13 @@ export function floorToWindow(ts: number, window_ms: number, origin = 0): number
  * offset windows. With a shared origin, group X's window at t and group Y's
  * window at t cover the same interval by construction.
  *
+ * When the lens declares `downsample_factor` (> 1), every `factor` consecutive
+ * grid slots of window_ms are merged into one output window (same grid, same
+ * origin — see `downsample`), and the returned `window_ms` is scaled up to
+ * match so `windowEnd - windowStart === window_ms` keeps holding for every
+ * window a caller sees. Applied per group as well as to the mixed view, so a
+ * grouped and downsampled lens still shares one grid across every slice.
+ *
  * Events need not be sorted; they are sorted by ts internally so that ts-driven
  * aggregation matches in-order aggregation (the late-arrival guarantee).
  */
@@ -146,18 +153,24 @@ export function applyLens(events: readonly LensEvent[], lens: QObserveParams = {
   const window_ms = lens.window_ms ?? DEFAULT_WINDOW_MS;
   if (window_ms <= 0) throw new RangeError("window_ms must be positive");
 
-  // Stages not yet implemented — declared so the chain is visible and the
-  // wiring contract is honest. downsample_factor, decay, agg_func: pass through.
+  const downsampleFactor = lens.downsample_factor ?? 1;
+  if (!Number.isInteger(downsampleFactor) || downsampleFactor < 1) {
+    throw new RangeError("downsample_factor must be a positive integer");
+  }
+  const outputWindowMs = window_ms * downsampleFactor;
 
-  if (events.length === 0) return { window_ms, windows: [] };
+  // Stages not yet implemented — declared so the chain is visible and the
+  // wiring contract is honest. decay, agg_func: pass through.
+
+  if (events.length === 0) return { window_ms: outputWindowMs, windows: [] };
 
   const sorted = [...events].sort((a, b) => a.ts - b.ts);
   const origin = resolveAlign(lens) === "epoch" ? (lens.origin ?? 0) : sorted[0].ts;
 
-  const windows = aggregate(sorted, window_ms, origin);
+  const windows = downsample(aggregate(sorted, window_ms, origin), window_ms, downsampleFactor, origin);
 
   const groupBy = lens.group_by;
-  if (!groupBy || groupBy.length === 0) return { window_ms, windows };
+  if (!groupBy || groupBy.length === 0) return { window_ms: outputWindowMs, windows };
 
   const buckets = new Map<string, { key: string[]; events: LensEvent[] }>();
   for (const ev of sorted) {
@@ -172,10 +185,58 @@ export function applyLens(events: readonly LensEvent[], lens: QObserveParams = {
   }
 
   const groups: LensGroup[] = [...buckets.entries()]
-    .map(([label, b]) => ({ key: b.key, label, windows: aggregate(b.events, window_ms, origin) }))
+    .map(([label, b]) => ({
+      key: b.key,
+      label,
+      windows: downsample(aggregate(b.events, window_ms, origin), window_ms, downsampleFactor, origin),
+    }))
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
 
-  return { window_ms, windows, groups };
+  return { window_ms: outputWindowMs, windows, groups };
+}
+
+/**
+ * Merge every `factor` consecutive grid slots of window_ms into one output
+ * window, using pooled sufficient statistics (count / sum / sumSq) rather than
+ * re-aggregating raw events — exact, not an approximation, since count/sum/sumSq
+ * are themselves sufficient statistics for mean and pooled variance (the same
+ * property the reference-lens pooling already relies on). Buckets sit on the
+ * origin-anchored grid (`floorToWindow`), so downsampled output stays on the
+ * same grid guarantee as window_ms itself: comparable across groups and across
+ * segments requested at different times.
+ */
+function downsample(
+  windows: readonly WindowStat[],
+  window_ms: number,
+  factor: number,
+  origin: number,
+): WindowStat[] {
+  if (factor <= 1 || windows.length === 0) return [...windows];
+
+  const bucketMs = window_ms * factor;
+  const buckets = new Map<number, { count: number; sum: number; sumSq: number }>();
+  for (const w of windows) {
+    const bucketStart = floorToWindow(w.windowStart, bucketMs, origin);
+    let b = buckets.get(bucketStart);
+    if (b === undefined) {
+      b = { count: 0, sum: 0, sumSq: 0 };
+      buckets.set(bucketStart, b);
+    }
+    b.count += w.count;
+    b.sum += w.mean * w.count;
+    b.sumSq += w.sumSq;
+  }
+
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([bucketStart, b]) => ({
+      windowStart: bucketStart,
+      windowEnd: bucketStart + bucketMs,
+      count: b.count,
+      mean: b.sum / b.count,
+      sumSq: b.sumSq,
+      valid: b.count >= MIN_VALID_COUNT,
+    }));
 }
 
 /**

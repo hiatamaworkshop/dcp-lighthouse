@@ -1838,3 +1838,46 @@ grouping 時の適正 `window_ms` を Brain が選ぶ根拠が無い件は今回
 ROADMAP と公開ドキュメント (`dcp-docs/docs/demos/lighthouse.md`) に載せた σ 値
 (1.77σ/3.51σ, 6.56σ 等) は現行の `window_ms=1000` 固定を前提にしている。変えるなら
 再測定・両ドキュメントの更新も込みで別途やる方が筋が良い。
+
+## 2026-08-16 — L4 残チェーン段: `downsample_factor` 実装
+
+L4 完了後に残っていた `downsample_factor` / `decay` / `agg_func` のうち、`downsample_factor`
+だけ着手した。3 段の影響範囲が同じ大きさではないと判断したため。
+
+### 設計判断
+
+`applyLens` は既に窓の十分統計量 (`count`/`mean`/`sumSq`) だけで reference variance を pooling
+している (07-25 の参照レンズ設計)。`downsample_factor` を「window_ms 段の直後で、その十分統計量を
+さらに N 窓分プールして 1 窓にする」段として実装すれば、生イベントの再集計と数値的に等価
+(近似ではなく厳密なプーリング) になる。これなら curator の統計モデル (z 検定・Šidák 補正の
+family サイズ) に一切手を入れずに済む。
+
+マージ後の bucket は原点 (`origin`) に固定した格子 (`floorToWindow(windowStart, window_ms*factor, origin)`)
+に載せる。window_ms/group_by 段が使っているのと同じ格子保証 (07-29 の「anchor が tick ごとに滑る」
+再発防止) を downsample 段にも及ぼすため。`group_by` がある場合は各グループを同じ格子上で
+downsample するので、グループ間の対応関係は L4 group_by の保証をそのまま継承する。
+
+返す `LensResult.window_ms` は `window_ms * factor` に更新する。`windowEnd - windowStart === window_ms`
+という不変条件を維持しないと、curator の `minGapMs = window_ms * 2` 等の消費側が壊れるため。
+
+`decay` と `agg_func` は見送った。`decay` (recency 加重) は pooled variance の式そのものを
+加重版に置き換える必要があり、`agg_func` を mean 以外に切り替えると curator の z 検定が
+前提にしている「観測はガウス近似できる」という仮定自体が変わる — どちらも Šidák 補正と
+同じ重さの検証が要る話で、`downsample_factor` のような無検証の安全な追加ではない。
+
+### 実装
+
+`server/src/lens.ts` に `downsample()` を追加、`applyLens` の window 計算後・group_by 分岐前に
+挟んだ。`downsample_factor` は正の整数のみ許可 (0/負/非整数は `RangeError`)。未指定または 1 は
+no-op。`server/src/lens.test.ts` に 6 件追加 (no-op デフォルト・厳密プーリングの数値照合・
+空セグメントでの window_ms スケール・穴の保存・group_by との共存・不正値の reject)。
+テスト 195 → 201 件、全 green。
+
+### 残課題 (更新)
+
+- `decay` / `agg_func` は未着手 (上記の理由で意図的に見送り)
+- overlay の存在意義は依然未解決
+- grouping 時の適正 window_ms (見送り、変わらず)
+- 対策 B・E は未着手 (LLM 呼び出しが必要)
+- `downsample_factor` はまだどこからも呼ばれていない (Brain/dashboard から $Q に書く経路は無い) —
+  group_by の前例と同様、コアが安定してから利用側を足す順で問題ない

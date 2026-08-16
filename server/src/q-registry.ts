@@ -71,6 +71,14 @@ export interface QObserveParams {
   origin?: number;
   decay?: string;            // e.g. "exp(τ=300s)" | "step(cutoff=now-60s)"
   group_by?: string[];       // e.g. ["agentId", "area"]
+  /**
+   * Merge every N consecutive window_ms grid slots into one output window
+   * (lens.ts's `downsample`), scaling the returned window_ms by N. A positive
+   * integer; 1 (default) is a no-op. Sits after window_ms/group_by and before
+   * decay/agg_func in the chain (MODEL.md §137's stage order) — it thins the
+   * already-aggregated windows via pooled count/sum/sumSq, it does not change
+   * which raw events land in which window.
+   */
   downsample_factor?: number;
   agg_func?: string;
 }

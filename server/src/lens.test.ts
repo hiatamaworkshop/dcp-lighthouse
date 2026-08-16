@@ -205,3 +205,64 @@ describe("applyLens — window validity (ROADMAP L1-2)", () => {
     assert.equal(r.windows[0].valid, false);
   });
 });
+
+describe("applyLens — downsample_factor (ROADMAP L4 residual chain stage)", () => {
+  it("defaults downsample_factor to 1 (no-op)", () => {
+    const r = applyLens([ev(0, 1), ev(1000, 3)], { window_ms: 1000 });
+    assert.equal(r.window_ms, 1000);
+    assert.equal(r.windows.length, 2);
+  });
+
+  it("merges N consecutive grid slots and pools count/sum/sumSq exactly", () => {
+    const r = applyLens([ev(0, 1), ev(1000, 3), ev(2000, 5)], {
+      window_ms: 1000,
+      downsample_factor: 3,
+      align: "epoch",
+    });
+    assert.equal(r.window_ms, 3000);
+    assert.equal(r.windows.length, 1);
+    const w = r.windows[0];
+    assert.deepEqual([w.windowStart, w.windowEnd], [0, 3000]);
+    assert.equal(w.count, 3);
+    assert.equal(w.mean, 3); // (1+3+5)/3
+    assert.equal(w.sumSq, 1 + 9 + 25);
+  });
+
+  it("scales the returned window_ms even when there are no windows", () => {
+    const r = applyLens([], { window_ms: 500, downsample_factor: 4 });
+    assert.deepEqual(r.windows, []);
+    assert.equal(r.window_ms, 2000);
+  });
+
+  it("omits an empty merged bucket instead of fabricating one (gaps survive downsampling)", () => {
+    // window_ms=1000, factor=2 → bucketMs=2000. Events only in [0,1000) and [6000,7000).
+    const r = applyLens([ev(0, 1), ev(6000, 9)], { window_ms: 1000, downsample_factor: 2, align: "epoch" });
+    assert.equal(r.window_ms, 2000);
+    assert.equal(r.windows.length, 2);
+    assert.equal(r.windows[0].windowStart, 0);
+    assert.equal(r.windows[1].windowStart, 6000);
+  });
+
+  it("downsamples every group on the same shared grid", () => {
+    const events = [
+      kev(0, 1, { agentId: "A" }),
+      kev(1000, 2, { agentId: "A" }),
+      kev(500, 10, { agentId: "B" }),
+      kev(1500, 20, { agentId: "B" }),
+    ];
+    const r = applyLens(events, { window_ms: 1000, downsample_factor: 2, group_by: ["agentId"], align: "epoch" });
+    assert.equal(r.window_ms, 2000);
+    const a = r.groups!.find((g) => g.label === "A")!;
+    const b = r.groups!.find((g) => g.label === "B")!;
+    assert.deepEqual([a.windows[0].windowStart, a.windows[0].windowEnd], [0, 2000]);
+    assert.deepEqual([b.windows[0].windowStart, b.windows[0].windowEnd], [0, 2000]);
+    assert.equal(a.windows[0].mean, 1.5); // (1+2)/2
+    assert.equal(b.windows[0].mean, 15); // (10+20)/2
+  });
+
+  it("rejects a non-positive or non-integer downsample_factor", () => {
+    assert.throws(() => applyLens([ev(0, 1)], { window_ms: 1000, downsample_factor: 0 }), /downsample_factor/);
+    assert.throws(() => applyLens([ev(0, 1)], { window_ms: 1000, downsample_factor: -2 }), /downsample_factor/);
+    assert.throws(() => applyLens([ev(0, 1)], { window_ms: 1000, downsample_factor: 1.5 }), /downsample_factor/);
+  });
+});
