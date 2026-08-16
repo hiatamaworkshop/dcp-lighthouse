@@ -1881,3 +1881,54 @@ no-op。`server/src/lens.test.ts` に 6 件追加 (no-op デフォルト・厳�
 - 対策 B・E は未着手 (LLM 呼び出しが必要)
 - `downsample_factor` はまだどこからも呼ばれていない (Brain/dashboard から $Q に書く経路は無い) —
   group_by の前例と同様、コアが安定してから利用側を足す順で問題ない
+
+## 2026-08-17 — `downsample_factor` の配線 + ライブ経路の隠れたずれを先に修正
+
+`downsample_factor` を実際に使う経路を足す作業。先例 (group_by → RuleBrain の RC replayRequest)
+に倣い、まず `dashboard.ts` の `/control/*` 書き込み面に載せようとしたところ、着手前の設計検討で
+ライブ coarse 配信 (`broadcast()`) 側に未発火のバグを発見した。
+
+### 見つかったずれ
+
+`broadcast()` は `liveSpans` に渡すスパン幅を `lens.window_ms ?? coarseView.current().window_ms`
+から素で取っていた。`downsample_factor` がレンズに乗ると `applyLens` は `window_ms * factor` 幅の
+窓を返す (L4 実装のとおり) のに、スパン計算側は乗算前の `window_ms` のままだったため、
+`LIVE_REFERENCE_WINDOW_COUNT` 窓分のスパンを要求してもレンズ側はそれを 1/factor の本数に
+圧縮した窓を返す — 観測本数が黙って減り、比較器の family size が縮む。07-29 の「anchor が
+tick ごとに滑る」問題と同じ「格子の読み手が2箇所に分かれて食い違う」形の再発であり、
+書き込み経路を先に足していたら気づかないまま実配信に出ていた種類のバグ。
+
+### 対策
+
+`dashboard.ts` に `effectiveWindowMs(lens, fallbackWindowMs)` を追加 (`liveLookbackMs` /
+`maxCoarseWindowMs` と同じ場所)。`lens.window_ms` に `lens.downsample_factor ?? 1` を明示的に
+掛けてから `liveSpans` / `checkRetentionBudget` に渡す。`broadcast()` はこれ経由に差し替え。
+`LensResult.window_ms` を読み返す設計は既存コメントが理由付きで却下していた
+(将来のチェーン段を黙って落とすため) ので、それは踏襲しつつ downsample だけ明示的に折り込む形にした。
+
+### 実装
+
+- `server/src/dashboard.ts`: `effectiveWindowMs` 追加、`broadcast()` の windowMs 計算を差し替え、
+  `/control/coarse-downsample?factor=N` を追加 (`observe:test_result:v1#coarse` に
+  `downsample_factor` を書く。既存の `window_ms`/`align` は保持して上書き)
+- `server/src/dashboard.test.ts`: `effectiveWindowMs` の数値照合 2 件 + downsample 込みの
+  `liveSpans` が期待どおり `LIVE_REFERENCE_WINDOW_COUNT` 窓に解決することを pin する 1 件
+
+テスト 201 → 203 件、全 green。
+
+### 実地確認 (`run-lighthouse` スキル)
+
+`npm run dev` → `/control/coarse-downsample?factor=3` (base window_ms=10_000 → 実効 30_000ms) を
+実際に叩き、`qHistory` に `downsample_factor:3` が載ることと、`checkRetentionBudget` が
+`lookback 180000ms exceeds retention 120000ms` を正しい数値 (`2×3×30000`) で警告することを
+SSE キャプチャで確認。`factor=2` (実効 20_000ms、予算ちょうど 120_000ms) に戻すと
+`referenceUsable: true` に復帰することも確認— 予算チェックとの連動込みで正しく動く。
+
+### 残課題 (更新)
+
+- `decay` / `agg_func` は未着手 (変わらず)
+- overlay の存在意義は依然未解決
+- grouping 時の適正 window_ms (見送り、変わらず)
+- 対策 B・E は未着手 (LLM 呼び出しが必要)
+- `downsample_factor` は coarse view に対してのみ書き込み経路がある。fine view / RC replay 側は
+  意図的に対象外 (RC は解像度を上げたい側なので downsample は逆方向)

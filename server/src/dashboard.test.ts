@@ -15,6 +15,7 @@ import assert from "node:assert/strict";
 
 import {
   LIVE_REFERENCE_WINDOW_COUNT,
+  effectiveWindowMs,
   liveLookbackMs,
   liveSpans,
   maxCoarseWindowMs,
@@ -74,6 +75,50 @@ test("maxCoarseWindowMs is the largest window whose lookback still fits", () => 
   // The shipped coarse window is well inside it — the check should be quiet in
   // the default configuration, or it is noise nobody will read.
   assert.ok(WINDOW_MS < w, `shipped coarse window ${WINDOW_MS}ms must clear the budget`);
+});
+
+// ── downsample_factor wiring (ROADMAP L4 residual, 2026-08-17) ─────────────
+
+test("effectiveWindowMs folds downsample_factor into the live span size", () => {
+  // Undeclared factor (or no factor at all) must be a no-op: the pre-wiring
+  // behavior for every lens that doesn't touch this stage.
+  assert.equal(effectiveWindowMs({ window_ms: 10_000 }, 10_000), 10_000);
+  assert.equal(effectiveWindowMs({ window_ms: 10_000, downsample_factor: 1 }, 10_000), 10_000);
+
+  // The bug this pins: sizing liveSpans off the raw window_ms while the lens
+  // itself merges `factor` slots into one would ask for
+  // LIVE_REFERENCE_WINDOW_COUNT windows of the wrong (narrower) width.
+  assert.equal(effectiveWindowMs({ window_ms: 10_000, downsample_factor: 3 }, 10_000), 30_000);
+
+  // No window_ms declared at all (falls back to the view's own derived
+  // width) — downsample_factor is necessarily absent too on that same lens
+  // object, so the fallback is used unmultiplied.
+  assert.equal(effectiveWindowMs({}, 10_000), 10_000);
+});
+
+test("liveSpans sized via effectiveWindowMs still yields exactly LIVE_REFERENCE_WINDOW_COUNT windows once downsample_factor is set", () => {
+  const buf = new RetentionBuffer<LensEvent>((raw) => raw, { retentionWindowMs: 120_000 });
+  const T0 = 1_000_000;
+  for (let i = 0; i < 140 * RATE; i++) {
+    buf.observe({ ts: T0 + Math.floor((i / RATE) * 1000), value: 1 }, "test_result:v1");
+  }
+
+  const baseWindowMs = 2_000;
+  const factor = 3; // effective window becomes 6_000ms
+  const lens = { window_ms: baseWindowMs, downsample_factor: factor, align: "epoch" as const };
+  const windowMs = effectiveWindowMs(lens, baseWindowMs);
+  assert.equal(windowMs, baseWindowMs * factor);
+
+  const { observation, reference } = liveSpans(T0 + 130_000, windowMs);
+  assert.equal(
+    buf.replay(lens, observation.fromTs, observation.toTs).windows.length,
+    LIVE_REFERENCE_WINDOW_COUNT,
+    "observation must still resolve to the expected window count under the downsampled lens",
+  );
+  assert.equal(
+    buf.replay(lens, reference.fromTs, reference.toTs).windows.length,
+    LIVE_REFERENCE_WINDOW_COUNT,
+  );
 });
 
 test("liveSpans: spans are pinned to an absolute grid, not to the tick clock", () => {

@@ -81,7 +81,9 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **L4** レンズチェーン — 参照レンズ (検出を二項演算に)・窓格子 (`origin`/`align` で格子をレンズの性質にする)・
       `group_by` (比較器を単一分布の前提に戻す)・`downsample_factor` (十分統計量の厳密プーリングで窓を間引く)
       を実装。混合ストリームで 1.77σ にしか見えない単一エージェントの dip が、グループ内では 3.51σ になる。
+      `downsample_factor` は dashboard の `/control/coarse-downsample?factor=N` から live coarse view に
+      書き込めるよう配線済み (ライブ配信側のスパン計算に潜んでいた乗算漏れも合わせて修正)。
       残るチェーン段は `decay` / `agg_func` (curator の統計モデルに触れるため未着手)
 - [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)
 
-現在テスト計 201 件、全 green。
+現在テスト計 203 件、全 green。

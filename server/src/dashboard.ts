@@ -9,6 +9,7 @@
  *   GET /demo/start?scenario=AR|CG|RC  — trigger a scenario
  *   GET /demo/stop          — stop the generator
  *   GET /control/baseline-delta?value=N — write $Q[schema].baseline_delta
+ *   GET /control/coarse-downsample?factor=N — write $Q[observe:...#coarse].downsample_factor
  *   GET /status             — current load
  *
  * SSE payload is always newline-delimited JSON ("data: {...}\n\n").
@@ -121,6 +122,27 @@ export function maxCoarseWindowMs(
   windowCount: number = LIVE_REFERENCE_WINDOW_COUNT,
 ): number {
   return Math.floor(retentionMs / (2 * windowCount));
+}
+
+/**
+ * The window size a $Q[observe] lens actually produces, for span-sizing
+ * purposes (liveSpans / checkRetentionBudget). Folds in `downsample_factor`
+ * (ROADMAP L4 residual, wired 2026-08-17): lens.ts scales its returned
+ * `window_ms` by exactly this factor (`outputWindowMs = window_ms * factor`),
+ * so a caller sizing spans off the raw `lens.window_ms` alone would ask
+ * liveSpans for LIVE_REFERENCE_WINDOW_COUNT slots of the *pre-downsample*
+ * width while applyLens merges every `factor` of those slots into one —
+ * fewer, wider windows than the span was sized for. That shrinks the
+ * comparator's family size silently, the same class of grid mismatch the
+ * `origin`/`align` work exists to prevent, just on the downsample stage
+ * instead of the window stage. `fallbackWindowMs` (typically the view's
+ * already-derived `LensResult.window_ms`, which already has any factor
+ * baked in) is used only when the lens itself does not declare `window_ms`,
+ * in which case `downsample_factor` is absent too — the ×1 is a no-op.
+ */
+export function effectiveWindowMs(lens: QObserveParams, fallbackWindowMs: number): number {
+  const base = lens.window_ms ?? fallbackWindowMs;
+  return base * (lens.downsample_factor ?? 1);
 }
 
 /**
@@ -244,14 +266,16 @@ export class DashboardServer {
     // The overlay answers "is a coarse angle attached?"; $Q answers "what is
     // that angle?". Reading window_ms back off the LensResult would flatten
     // the lens to its one implemented stage and silently drop the rest of the
-    // chain (group_by, downsample, decay, agg) the moment L4 lands — lens.ts
-    // states the contract: callers hand the observeParams object over
-    // unchanged.
+    // chain (group_by, decay, agg) the moment those land — lens.ts states the
+    // contract: callers hand the observeParams object over unchanged.
+    // downsample_factor is the one stage that already changes the effective
+    // window size, so it is folded in explicitly via effectiveWindowMs()
+    // rather than read back off the LensResult.
     const coarseView = this.overlay.get("coarse");
     let snapshotPkg: SnapshotPackage | null = null;
     if (coarseView) {
       const lens = this.registry.getObserve(coarseView.schemaId, coarseView.view) ?? {};
-      const windowMs = lens.window_ms ?? coarseView.current().window_ms;
+      const windowMs = effectiveWindowMs(lens, coarseView.current().window_ms);
       this.checkRetentionBudget(windowMs);
       this.checkGridAlignment(lens);
       const { observation, reference } = liveSpans(
@@ -426,6 +450,28 @@ export class DashboardServer {
       this.registry.set("schema:test_result:v1", { baseline_delta: value });
       jsonHeaders(res);
       res.end(JSON.stringify({ scope: "schema:test_result:v1", baseline_delta: value }));
+      return;
+    }
+
+    if (url.startsWith("/control/coarse-downsample")) {
+      // Brain/operator write surface for the downsample_factor lens stage
+      // (ROADMAP L4 residual: implemented 2026-08-16, wired 2026-08-17). Merges
+      // N consecutive coarse grid slots into one output window without
+      // touching window_ms itself — the stage had no caller until now. Safe to
+      // expose on the live path because broadcast() sizes its spans via
+      // effectiveWindowMs(), which folds this factor in; see that function's
+      // doc for the mismatch this would otherwise silently introduce.
+      const raw = parseQuery(url).get("factor");
+      const factor = raw === null ? NaN : Number(raw);
+      if (!Number.isInteger(factor) || factor < 1) {
+        jsonHeaders(res, 400);
+        res.end(JSON.stringify({ error: "factor must be a positive integer" }));
+        return;
+      }
+      const current = this.registry.getObserve("test_result:v1", "coarse") ?? {};
+      this.registry.set("observe:test_result:v1#coarse", { ...current, downsample_factor: factor });
+      jsonHeaders(res);
+      res.end(JSON.stringify({ scope: "observe:test_result:v1#coarse", downsample_factor: factor }));
       return;
     }
 
