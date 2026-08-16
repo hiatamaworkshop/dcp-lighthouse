@@ -9,6 +9,7 @@
     "test": "tsc && node --test dist/"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.117.1",
     "dcp-wrap": "file:../../dcp-wrap"
   },
   "devDependencies": {

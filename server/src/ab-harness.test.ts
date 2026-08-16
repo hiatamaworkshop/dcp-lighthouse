@@ -47,6 +47,19 @@ describe("ab-harness — answer parsing", () => {
     assert.equal(parseAnswer('{"shape": "dip"}'), null, "missing verdict must not parse");
     assert.equal(parseAnswer('{"verdict": "maybe"}'), null, "invalid verdict must not parse");
   });
+
+  test("carries an optional reason field (対策E) without requiring it", () => {
+    assert.deepEqual(
+      parseAnswer('{"reason": "the dip tile sits at 4.2sigma, well past the reference spread", "verdict": "anomaly", "shape": "dip"}'),
+      { verdict: "anomaly", shape: "dip", reason: "the dip tile sits at 4.2sigma, well past the reference spread" },
+    );
+    // Absent reason must not fabricate one, and must not block parsing.
+    assert.deepEqual(parseAnswer('{"verdict": "none"}'), { verdict: "none" });
+    // A non-string reason is dropped rather than rejecting the whole answer —
+    // reason is explanatory, not scored, so a malformed one shouldn't cost
+    // the trial its verdict.
+    assert.deepEqual(parseAnswer('{"verdict": "none", "reason": 42}'), { verdict: "none" });
+  });
 });
 
 describe("ab-harness — scoring", () => {

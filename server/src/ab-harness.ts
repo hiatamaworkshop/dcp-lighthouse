@@ -30,6 +30,17 @@ export interface TrialAnswer {
   shape?: string;
   /** Window-start timestamp the model points at when verdict=anomaly. */
   locationTs?: number;
+  /**
+   * One or two sentences on what in the data drove the verdict (対策E,
+   * ROADMAP_BRIEF.md 2026-07-28: "reason設計"). Not scored — scoreAnswer
+   * only reads verdict/locationTs — but persisted on TrialRecord so a human
+   * or a second-pass judge can tell "read the tile and rubber-stamped it"
+   * apart from "read the tile and evaluated it", which a bare verdict cannot
+   * distinguish. Load-bearing for 対策B: a model that says "none" while a
+   * tile is shown is only informative if it can say *why* the tile doesn't
+   * hold up.
+   */
+  reason?: string;
 }
 
 export interface TrialScore {
@@ -68,7 +79,7 @@ You are given a REFERENCE interval (recorded immediately before, assumed represe
 Task: decide whether the OBSERVATION interval contains an anomaly relative to the REFERENCE.
 
 Respond with ONLY a JSON object, no other text:
-{"verdict": "anomaly" or "none", "shape": "dip|spike|step_down|step_up|other (omit if none)", "locationTs": <window start timestamp of the anomaly (omit if none)>}`;
+{"reason": "<one or two sentences: what in the data drove this verdict>", "verdict": "anomaly" or "none", "shape": "dip|spike|step_down|step_up|other (omit if none)", "locationTs": <window start timestamp of the anomaly (omit if none)>}`;
 
 function renderWindows(view: { windowStarts: number[]; means: number[] }): string {
   return view.windowStarts
@@ -134,6 +145,7 @@ export function parseAnswer(text: string): TrialAnswer | null {
   const answer: TrialAnswer = { verdict: rec.verdict };
   if (typeof rec.shape === "string") answer.shape = rec.shape;
   if (typeof rec.locationTs === "number" && Number.isFinite(rec.locationTs)) answer.locationTs = rec.locationTs;
+  if (typeof rec.reason === "string") answer.reason = rec.reason;
   return answer;
 }
 

@@ -77,7 +77,13 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **L2** Brain write surface + replay 表面化 — `$Q[schema].baseline_delta` 昇格 (RuleBrain がレジストリ経由で読み、dashboard から書ける)・RC replayRequest の区間指定 (fromTs/toTs)・dashboard 粗(live)/細(replay) 対比 UI
 - [ ] **L3 (本丸)** ClaudeBrain — §12 A/B 実験 (数列のみ vs snapshot package) → `BRAIN_MODE=claude` で RuleBrain と shadow 併走。LLM 起点の $Q 操作が核心。
       前段の A/B 実験は実行済みだが、**当初の仮説「提示形式が判断を助ける」は検証できていない** (再分析で下方修正)。
-      副産物として curator の較正欠陥を検出し、Šidák 補正で package 単位の誤警報率 29%→6.5% に是正済み
+      副産物として curator の較正欠陥を検出し、Šidák 補正で package 単位の誤警報率 29%→6.5% に是正済み。
+      **対策 E (reason フィールド) 実装済み** — 回答 JSON に verdict の根拠を書かせ、
+      「タイルを読んだだけ」か「吟味したか」を区別できるようにした。
+      **対策 B の実行基盤も整備済み** — `@anthropic-ai/sdk` 直叩きの `askFn`
+      (`server/src/anthropic-ask.ts`)・false-positive QUIET seed 選定
+      (`server/src/ab-strategy-b.ts`)・実行スクリプト (`server/src/run-ab-strategy-b.ts`)。
+      実行には `ANTHROPIC_API_KEY` が必要で、本体はまだ未実行 (実課金を伴うため)
 - [x] **L4** レンズチェーン — 参照レンズ (検出を二項演算に)・窓格子 (`origin`/`align` で格子をレンズの性質にする)・
       `group_by` (比較器を単一分布の前提に戻す)・`downsample_factor` (十分統計量の厳密プーリングで窓を間引く)
       を実装。混合ストリームで 1.77σ にしか見えない単一エージェントの dip が、グループ内では 3.51σ になる。
@@ -86,4 +92,4 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       残るチェーン段は `decay` / `agg_func` (curator の統計モデルに触れるため未着手)
 - [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)
 
-現在テスト計 203 件、全 green。
+現在テスト計 209 件、全 green。

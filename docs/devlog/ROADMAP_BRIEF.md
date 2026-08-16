@@ -1932,3 +1932,56 @@ SSE キャプチャで確認。`factor=2` (実効 20_000ms、予算ちょうど 
 - 対策 B・E は未着手 (LLM 呼び出しが必要)
 - `downsample_factor` は coarse view に対してのみ書き込み経路がある。fine view / RC replay 側は
   意図的に対象外 (RC は解像度を上げたい側なので downsample は逆方向)
+
+## 2026-08-17 — 対策E 実装 + 対策B 実行基盤の整備 (実行は未着手)
+
+L3 の「今後の対策」(2026-07-28) のうち、A・C・D は片付いていたが B・E は
+LLM 呼び出しが要るため保留していた。今回は E を実装し、B は**インフラのみ**整備した
+(実行には課金を伴う API キーが要るため、実行そのものはユーザ判断待ち)。
+
+### 対策E: reason フィールド
+
+`ab-harness.ts` の `TrialAnswer` に `reason?: string` を追加、プロンプトの JSON スキーマに
+`"reason"` を先頭フィールドとして要求するよう変更、`parseAnswer` で抽出。スコアリング
+(`scoreAnswer`) は変更なし — reason は判定材料ではなく、人間や二段目の judge が後から
+「タイルを読んだだけ」か「吟味したか」を見分けるための記録。既存プロンプト/パーサ挙動への
+後方非互換変化なし (reason はオプショナルで、欠けていても解析は通る)。
+
+### 対策B: 実行基盤 (askFn 直叩き化 + false-positive seed 選定)
+
+07-28 の「実行基盤について」の指摘 (Claude Code の Agent tool 経由は 1 trial ≈ 30k tokens の
+うち実タスク 1KB 未満で非効率、かつ足場が結果を汚染しうる) を踏まえ、Anthropic SDK を直接
+叩く経路を用意した:
+
+- `server/src/anthropic-ask.ts` — `@anthropic-ai/sdk` (新規依存, `^0.117.1`) を使う
+  `AskFn` 実装。`ab-harness.ts` の `askFn` シームにそのまま挿せる。API キーが無ければ
+  即座に throw (trial 1 本目の途中で失敗するより先に失敗させる設計)
+- `server/src/ab-strategy-b.ts` — 対策B の fixture 選定ロジック。QUIET fixture の seed を
+  スイープし、`curated.tiles.length > 0` (何も注入していないのにタイルが出た = 較正済み
+  false-positive floor、対策A後で package 単位 ~6.5%) なものを `count` 個集める。
+  対策B が RC/AR ではなく QUIET を使う理由: RC/AR ではタイルが正解なので「none」は
+  ただの見逃しであり、「却下」を測れるのは正解が「none」の QUIET だけ
+- `server/src/run-ab-strategy-b.ts` — 上記2つと `runTrial` を配線したランナー。
+  `ANTHROPIC_API_KEY=... node dist/run-ab-strategy-b.js <model...>` で 9 seed × モデル数の
+  curated-arm trial を実行し、1 trial 1 行の JSON を stdout に、進捗と
+  「ceiling を破ったか」を stderr に出す。実際に課金される API 呼び出しをするので
+  `npm test` の対象には含めない (node の test glob は `*.test.js` のみを拾うため
+  ビルドはされるが実行はされない)
+
+### 実装・検証
+
+`ab-harness.test.ts` に reason フィールドのパース確認 3 件、`ab-strategy-b.test.ts` を新設し
+seed 選定ロジックのテスト 5 件 (9 seed 取得・再現性・startSeed のシフト・予算不足時の
+throw・fixture 自体の決定性)。`anthropic-ask.ts` / `run-ab-strategy-b.ts` は実ネットワーク
+呼び出しのラッパーなので単体テストはせず、ビルドが通ることのみ確認。テスト 203 → 209 件、
+全 green。
+
+### 残課題 (更新)
+
+- 対策B の**実行**そのものは未着手 — `ANTHROPIC_API_KEY` が要る (このセッションの実行環境には無い)
+  ため、実際に Sonnet/Opus へ 9 seed を投げて ceiling を破るか見る作業はユーザ判断待ち
+- 対策B が投げるのは curated arm のみ (raw arm は対象外 — 07-25 で raw/curated の比較は
+  決着済みという前提のまま)
+- `decay` / `agg_func` は未着手 (変わらず)
+- overlay の存在意義は依然未解決
+- grouping 時の適正 window_ms (見送り、変わらず)
