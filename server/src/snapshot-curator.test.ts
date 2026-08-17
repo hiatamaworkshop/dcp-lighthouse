@@ -45,6 +45,70 @@ function buildResult(windows: { windowStart: number; mean: number; count?: numbe
   };
 }
 
+// ── selection context ───────────────────────────────────────────────────────
+
+describe("SnapshotCurator — selection context (multiple-comparisons metadata)", () => {
+  it("reports the family size it actually corrected over, not the reference window count", () => {
+    // The two counts differ and conflating them would misstate the family:
+    // globalStats.windowCount counts REFERENCE windows, scoredWindowCount
+    // counts the OBSERVATION windows eligible for scoring.
+    const observation = buildResult([
+      { windowStart: 0, mean: 0.95 },
+      { windowStart: 1000, mean: 0.95 },
+      { windowStart: 2000, mean: 0.95 },
+    ]);
+    const reference = buildResult([
+      { windowStart: -2000, mean: 0.95 },
+      { windowStart: -1000, mean: 0.95 },
+    ]);
+    const pkg = new SnapshotCurator().curate(observation, reference);
+    assert.equal(pkg.selection.scoredWindowCount, 3);
+    assert.equal(pkg.globalStats.windowCount, 2);
+  });
+
+  it("excludes windows below MIN_VALID_COUNT from the family", () => {
+    // An unscorable window is not a comparison, so counting it would inflate
+    // the correction and silently desensitize the whole package.
+    const observation = buildResult([
+      { windowStart: 0, mean: 0.95, count: 10 },
+      { windowStart: 1000, mean: 0.95, count: MIN_VALID_COUNT - 1 },
+    ]);
+    const reference = buildResult([{ windowStart: -1000, mean: 0.95, count: 10 }]);
+    const pkg = new SnapshotCurator().curate(observation, reference);
+    assert.equal(pkg.selection.scoredWindowCount, 1);
+  });
+
+  it("carries the declared base threshold and a Šidák-corrected effective one", () => {
+    const observation = buildResult(
+      Array.from({ length: 10 }, (_, i) => ({ windowStart: i * 1000, mean: 0.95 })),
+    );
+    const reference = buildResult([
+      { windowStart: -2000, mean: 0.95 },
+      { windowStart: -1000, mean: 0.96 },
+    ]);
+    const pkg = new SnapshotCurator({ spikeZThreshold: 2.0 }).curate(observation, reference);
+
+    assert.equal(pkg.selection.baseZThreshold, 2.0);
+    assert.equal(pkg.selection.scoredWindowCount, 10);
+    // Correcting for a family of 10 must raise the bar, never lower it.
+    assert.ok(
+      pkg.selection.effectiveZThreshold > pkg.selection.baseZThreshold,
+      `effective ${pkg.selection.effectiveZThreshold} must exceed base ${pkg.selection.baseZThreshold}`,
+    );
+    // 対策A's documented figure for N=10 at a 2.0σ family budget is ~2.8σ.
+    assert.ok(
+      Math.abs(pkg.selection.effectiveZThreshold - 2.8) < 0.1,
+      `expected ~2.8σ for N=10, got ${pkg.selection.effectiveZThreshold}`,
+    );
+  });
+
+  it("is present even on an empty package, so a reader never has to guess", () => {
+    const pkg = new SnapshotCurator().curate({ window_ms: 1000, windows: [] });
+    assert.equal(pkg.selection.scoredWindowCount, 0);
+    assert.equal(pkg.selection.baseZThreshold, 2.0);
+  });
+});
+
 // ── globalStats ─────────────────────────────────────────────────────────────
 
 describe("SnapshotCurator — globalStats", () => {

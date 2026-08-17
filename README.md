@@ -53,10 +53,15 @@ ANTHROPIC_API_KEY=sk-... node dist/run-ab-strategy-b.js claude-sonnet-5 claude-o
 
 # 失敗した trial だけ再実行 (バッチ全体を再サンプリングしない)
 ANTHROPIC_API_KEY=sk-... node dist/run-ab-strategy-b.js --seeds=36,89 claude-opus-5
+
+# 多重比較の文脈を足したアームの検証 (偽陰性ガード込み)
+ANTHROPIC_API_KEY=sk-... node dist/run-ab-strategy-b.js --arm=curated_context --fixtures=fp,rc,ar claude-opus-5
 ```
 
 1 trial 1 行の JSON を stdout に、進捗 (`stop_reason` / output token 数を含む) と
-集計を stderr に出す。
+集計を stderr に出す。`--fixtures` の `fp` は偽陽性 (正解=棄却)、`rc`/`ar` は真陽性
+(正解=追認) で**正解の向きが逆**なので、集計は真値に対する正誤で報告される。
+アームの優劣は「fp が改善し、かつ rc/ar が悪化しない」場合にのみ主張できる。
 
 ## ステータス
 
@@ -103,6 +108,8 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       `max_tokens` 予算を食っていた (再実行で解消、両方 anomaly)。
       なお `reason` フィールドを見るとモデルは σ 値・近傍窓・形状まで吟味した上で追認しており、
       プロンプトが「N 窓中の 1 本」という多重比較の文脈を伝えていないことが効いている可能性がある。
+      これを検証する第3アーム `curated_context` と、その前提となる `SnapshotPackage.selection`
+      (package が自分の family size と閾値を自己記述する) を整備済み — **実行は未着手**。
       詳細は ROADMAP_BRIEF.md 2026-08-17 参照
 - [x] **L4** レンズチェーン — 参照レンズ (検出を二項演算に)・窓格子 (`origin`/`align` で格子をレンズの性質にする)・
       `group_by` (比較器を単一分布の前提に戻す)・`downsample_factor` (十分統計量の厳密プーリングで窓を間引く)
@@ -112,4 +119,4 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       残るチェーン段は `decay` / `agg_func` (curator の統計モデルに触れるため未着手)
 - [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)
 
-現在テスト計 215 件、全 green。
+現在テスト計 225 件、全 green。

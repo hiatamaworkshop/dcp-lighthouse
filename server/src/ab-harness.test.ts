@@ -30,6 +30,43 @@ describe("ab-harness — prompt rendering", () => {
     // Deterministic: same fixture renders the same prompt.
     assert.equal(raw, renderPrompt(buildRcFixture(), "raw"));
   });
+
+  test("curated_context adds the family facts but withholds the corrected threshold", () => {
+    const fx = buildRcFixture();
+    const curated = renderPrompt(fx, "curated");
+    const withContext = renderPrompt(fx, "curated_context");
+    const sel = fx.curated.selection;
+
+    // Strict superset: the arms must differ ONLY by the added context, or the
+    // experiment measures presentation changes it did not intend.
+    assert.ok(withContext.startsWith(curated), "curated_context must extend the curated arm verbatim");
+    assert.ok(withContext.length > curated.length);
+
+    // The two facts the model needs to reason about multiplicity itself.
+    assert.ok(
+      withContext.includes(String(sel.scoredWindowCount)),
+      "must state how many windows were scanned",
+    );
+    assert.ok(
+      withContext.includes(sel.baseZThreshold.toFixed(1)),
+      "must state the per-comparison threshold",
+    );
+
+    // The conclusion must stay withheld: leaking the Šidák-corrected bar turns
+    // the trial back into transcription (the 2026-07-28 confound).
+    assert.ok(
+      !withContext.includes(sel.effectiveZThreshold.toFixed(1)),
+      "must NOT hand over the corrected threshold — that is the curator's conclusion",
+    );
+    assert.ok(
+      !/šidák|sidak|corrected|bonferroni/i.test(withContext),
+      "must not name the correction method",
+    );
+
+    // Same guarantees the other arms carry.
+    assert.equal(withContext.split("\n")[0], curated.split("\n")[0], "preamble must be shared");
+    assert.ok(!/burst|inject|groundTruth|answer key/i.test(withContext), "prompt leaks ground-truth vocabulary");
+  });
 });
 
 describe("ab-harness — answer parsing", () => {

@@ -2118,3 +2118,69 @@ thinking の長さは確率的なので、Opus 9 件中 2 件だけが失敗し�
 - `decay` / `agg_func` は未着手 (変わらず)
 - overlay の存在意義は依然未解決
 - grouping 時の適正 window_ms (見送り、変わらず)
+
+## 2026-08-17 — 多重比較コンテキスト実験の整備 (`selection` + 第3アーム)
+
+前節の発見「モデルは吟味した上で追認しており、提示に多重比較の文脈が無いことが効いている
+可能性」を、実際に検証できる形に整備した。**実行 (課金) はしていない** — 整備までで区切る。
+テスト 215 → 225 件。
+
+### `SnapshotPackage.selection` — package を自己記述的にする
+
+`curate()` は family size (`scorableCount`) と Šidák 補正後の閾値を内部で計算して**捨てて**
+いた。結果、Brain 向けの成果物である package が「このタイルは N 比較中の 1 本である」という、
+対策A が内部で補正していたまさにその文脈を述べられない構造になっていた。
+
+`selection: { scoredWindowCount, baseZThreshold, effectiveZThreshold }` を追加。
+`globalStats.windowCount` は**参照窓**の数であって family size ではない (両者を混同すると
+family を誤る) ので別フィールドにした。`curate()` の return は 1 箇所なので、空 package でも
+必ず載る (読み手が「無いのか 0 なのか」を推測せずに済む)。
+
+### 第3アーム `curated_context`
+
+`Arm` を `raw | curated | curated_context` に拡張。新アームは curated の**厳密な上位集合**で、
+末尾に選定文脈を 1 段落足すだけ (テストで `startsWith` を pin してある — 他の差分が混入したら
+測っているものが変わる)。
+
+**渡すのは `scoredWindowCount` と `baseZThreshold` だけで、`effectiveZThreshold` は渡さない。**
+補正後の閾値を渡すことは curator の**結論**を渡すことであり、モデルがそれに同意しても
+07-28 の再分析が暴いた転記の交絡 (「提示形式が効いた」ように見えて実は curator の判定を
+写していただけ) を繰り返すだけになる。N と素の閾値だけ渡し、多重比較の推論自体は
+モデルにやらせる — それが検証対象だからだ。テストで補正値と補正手法名の非混入を pin してある。
+
+実際に描画される文脈:
+
+> Selection context: these tiles were not handed to you in isolation — they were chosen by
+> scanning 10 window(s) of the observation interval and flagging any window whose deviation
+> from the reference exceeded a per-comparison threshold of 2.0σ. Judge accordingly.
+
+### ランナー: `--arm=` と `--fixtures=` (偽陰性ガード)
+
+**`fp` だけを回しても新アームの優劣は測れない** — 「何でも棄却するようになっただけ」の
+アームは fp 単独では完璧な勝利に見えるが、実際には厳密に悪化している。そこで
+`--fixtures=fp,rc,ar` で真陽性セット (RC/AR) も同じアームで回せるようにした。
+`fp` では「棄却」が正解、`rc`/`ar` では「追認」が正解と**正解の向きが逆**なので、
+集計は verdict の生カウントではなく**各 fixture の真値に対する正誤**で報告する形に変えた。
+`unusable` (パース不能) は正誤どちらにも畳まず別建てのまま — 何も測っていない試行を
+どちらかに数えると証拠を過大申告する。
+
+### 次に実行すべきこと (未実行)
+
+```sh
+# 対照: 現行アーム
+node dist/run-ab-strategy-b.js --arm=curated          --fixtures=fp,rc,ar <model>
+# 処置: 文脈付きアーム
+node dist/run-ab-strategy-b.js --arm=curated_context  --fixtures=fp,rc,ar <model>
+```
+
+判定基準: **fp の正解率が上がり、かつ rc/ar の正解率が落ちない**場合にのみ
+「多重比較の文脈が判断を助ける」と言える。片方だけでは言えない。
+
+### 残課題 (更新)
+
+- 上記実験の**実行**は未着手 (課金を伴うためユーザ判断待ち)
+- thinking ブロックの本文は依然として捨てている (型だけ記録)
+- 対策B の結果を L3 着手判断にどう反映するかはユーザ判断待ち
+- `decay` / `agg_func` は未着手 (変わらず)
+- overlay の存在意義は依然未解決
+- grouping 時の適正 window_ms (見送り、変わらず)

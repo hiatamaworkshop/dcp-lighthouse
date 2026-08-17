@@ -118,8 +118,52 @@ export interface SnapshotPackage {
    * every observed group was scorable.
    */
   unscoredGroups?: string[];
+  /**
+   * How this package was selected — the multiple-comparisons context behind
+   * every tile in it.
+   *
+   * A tile says "this window is 2.9σ from baseline". What it cannot say on
+   * its own is "and it is the most extreme of 10 windows I scanned", which is
+   * the difference between a finding and a coincidence. Before this field the
+   * package simply dropped that context: `curate()` computed the family size
+   * and the corrected threshold, used them for its own gate, and discarded
+   * both — leaving the Brain-facing artifact unable to state the very thing
+   * 対策A had to correct for internally.
+   *
+   * Measured consequence (ROADMAP_BRIEF.md 2026-08-17): Sonnet 5 and Opus 5
+   * confirmed every false-positive tile they were shown, and their stated
+   * reasons were substantive — σ values, neighbouring windows, shape. They
+   * were not rubber-stamping; they were reasoning correctly from a prompt
+   * that never mentioned the tile was one of N. This is the 07-28 "対策A" note
+   * ("閾値は動かさず、タイルに『N窓中の1本』という文脈を明示して判断は Brain に委ねる")
+   * made available: 対策A moved the threshold, this hands over the context so
+   * a Brain can weigh multiplicity itself.
+   */
+  selection: SelectionContext;
   /** The curated tiles, sorted by regionStart ascending. */
   tiles: SnapshotTile[];
+}
+
+/** The comparison family a package's tiles were selected out of. */
+export interface SelectionContext {
+  /**
+   * Number of windows eligible to be scored — the family size N the Šidák
+   * correction was computed over. Not the same as
+   * `globalStats.windowCount`, which counts REFERENCE windows.
+   */
+  scoredWindowCount: number;
+  /** The per-comparison two-sided z threshold, before correcting for N. */
+  baseZThreshold: number;
+  /**
+   * The threshold actually applied to each window, Šidák-corrected for
+   * `scoredWindowCount`. Carried so the package can explain its own gate;
+   * note that a consumer handed only this number learns the curator's
+   * conclusion rather than the facts behind it — the transcription confound
+   * the 2026-07-28 re-analysis found. Readers wanting the Brain to do its own
+   * multiplicity reasoning should hand over scoredWindowCount and
+   * baseZThreshold instead.
+   */
+  effectiveZThreshold: number;
 }
 
 // ── Curation options ────────────────────────────────────────────────────────
@@ -401,6 +445,11 @@ export class SnapshotCurator {
       globalStats,
       referenceUsable,
       ...(unscoredGroups.length > 0 ? { unscoredGroups } : {}),
+      selection: {
+        scoredWindowCount: scorableCount,
+        baseZThreshold: this.opts.spikeZThreshold,
+        effectiveZThreshold,
+      },
       tiles: capped,
     };
   }

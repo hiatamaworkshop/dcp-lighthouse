@@ -21,7 +21,23 @@ import type { ABFixture } from "./ab-fixture.js";
 
 // ── Types ───────────────────────────────────────────────────────────────────
 
-export type Arm = "raw" | "curated";
+/**
+ * Which presentation of the same underlying LensResult pair a trial shows.
+ *
+ *   "raw"      — the observation/reference windows as bare number lists.
+ *   "curated"  — the curator's tile digest of that same pair.
+ *   "curated_context" — the same tiles, plus the multiple-comparisons context
+ *                they were selected under (ROADMAP_BRIEF.md 2026-08-17).
+ *
+ * The third arm exists because of a measured result, not a hunch: on
+ * false-positive QUIET packages, Sonnet 5 and Opus 5 confirmed every tile
+ * they were shown, and their stated reasons cited σ values, neighbouring
+ * windows and shape — reasoning, not transcription. A prompt that shows one
+ * 2.9σ window and never says it is the most extreme of ten scanned gives no
+ * basis to discount it, so "anomaly" is the correct read of what was asked.
+ * This arm supplies the missing fact and asks the same question again.
+ */
+export type Arm = "raw" | "curated" | "curated_context";
 
 /** The answer format the prompt asks for. */
 export interface TrialAnswer {
@@ -117,8 +133,32 @@ Curated snapshot tiles (mechanically selected characteristic/exceptional moments
 ${tiles}`;
 }
 
+/**
+ * Arm (c): the curated digest plus the family the tiles were selected from.
+ *
+ * States two facts and stops: how many windows were scanned, and the
+ * per-comparison threshold used. It deliberately does NOT pass
+ * `selection.effectiveZThreshold` — the Šidák-corrected bar. Handing over the
+ * corrected number would hand over the curator's conclusion, and a model
+ * agreeing with a conclusion it was given is the transcription confound the
+ * 2026-07-28 re-analysis found in the original curated arm: what looked like
+ * "presentation helps" was the LLM copying curator's verdict. Giving N and
+ * the base threshold instead leaves the multiplicity reasoning to the model,
+ * which is the thing under test.
+ */
+function renderCuratedContextArm(fx: ABFixture): string {
+  const sel = fx.curated.selection;
+  const context = `Selection context: these tiles were not handed to you in isolation — they were chosen by scanning ${sel.scoredWindowCount} window(s) of the observation interval and flagging any window whose deviation from the reference exceeded a per-comparison threshold of ${sel.baseZThreshold.toFixed(1)}σ. Judge accordingly.`;
+  return `${renderCuratedArm(fx)}\n\n${context}`;
+}
+
 export function renderPrompt(fx: ABFixture, arm: Arm): string {
-  const body = arm === "raw" ? renderRawArm(fx) : renderCuratedArm(fx);
+  const body =
+    arm === "raw"
+      ? renderRawArm(fx)
+      : arm === "curated_context"
+        ? renderCuratedContextArm(fx)
+        : renderCuratedArm(fx);
   return `${PREAMBLE}\n\n${body}`;
 }
 
