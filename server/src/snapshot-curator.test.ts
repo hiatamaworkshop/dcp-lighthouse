@@ -45,6 +45,65 @@ function buildResult(windows: { windowStart: number; mean: number; count?: numbe
   };
 }
 
+// ── reference usability (blindness vs quiet) ────────────────────────────────
+
+describe("SnapshotCurator — a degenerate reference is blindness, not quiet", () => {
+  it("declares referenceUsable=false when every reference event is identical", () => {
+    // The bug this pins (2026-08-17): Number.isFinite(0) is true, so a
+    // zero-variance reference passed the usability check while comparisonSE
+    // returned 0 for every window and the scoring loop skipped them all. The
+    // package then said "usable yardstick, no anomalies" — the exact
+    // silence-read-as-quiet failure the flag exists to prevent.
+    const reference = buildResult([
+      { windowStart: -2000, mean: 1.0, count: 50 },
+      { windowStart: -1000, mean: 1.0, count: 50 },
+    ]);
+    const observation = buildResult([{ windowStart: 0, mean: 0.4, count: 50 }]);
+    const pkg = new SnapshotCurator({ includeBaseline: false }).curate(observation, reference);
+
+    assert.equal(pkg.globalStats.eventCount, 100, "the reference did have events");
+    assert.equal(pkg.referenceUsable, false, "but no variance, so nothing could be scored");
+    assert.equal(
+      pkg.tiles.filter((t) => t.shapeTag === "dip" || t.shapeTag === "spike").length,
+      0,
+      "and the flag must agree with the scoring loop, which already emitted nothing",
+    );
+  });
+
+  it("still reports a usable reference when there is real variance", () => {
+    const reference = buildResult([
+      { windowStart: -2000, mean: 0.90, count: 50 },
+      { windowStart: -1000, mean: 0.98, count: 50 },
+    ]);
+    const observation = buildResult([{ windowStart: 0, mean: 0.94, count: 50 }]);
+    const pkg = new SnapshotCurator({ includeBaseline: false }).curate(observation, reference);
+    assert.equal(pkg.referenceUsable, true);
+    assert.ok(pkg.globalStats.stdDev > 0);
+  });
+
+  it("reports the reference's event weight, which windowCount cannot convey", () => {
+    // Three windows can hold three events or three thousand, and the
+    // comparator divides by the event total, not the window total.
+    const thin = buildResult([
+      { windowStart: -2000, mean: 0.9, count: 3 },
+      { windowStart: -1000, mean: 1.0, count: 3 },
+    ]);
+    const fat = buildResult([
+      { windowStart: -2000, mean: 0.9, count: 500 },
+      { windowStart: -1000, mean: 1.0, count: 500 },
+    ]);
+    const observation = buildResult([{ windowStart: 0, mean: 0.94, count: 50 }]);
+    const curator = new SnapshotCurator({ includeBaseline: false });
+
+    const thinPkg = curator.curate(observation, thin);
+    const fatPkg = curator.curate(observation, fat);
+    assert.equal(thinPkg.globalStats.eventCount, 6);
+    assert.equal(fatPkg.globalStats.eventCount, 1000);
+    // Same window count, three orders of magnitude apart in weight.
+    assert.equal(thinPkg.globalStats.windowCount, fatPkg.globalStats.windowCount);
+  });
+});
+
 // ── selection context ───────────────────────────────────────────────────────
 
 describe("SnapshotCurator — selection context (multiple-comparisons metadata)", () => {
@@ -115,7 +174,7 @@ describe("SnapshotCurator — globalStats", () => {
   it("returns zeros for an empty result", () => {
     const curator = new SnapshotCurator();
     const pkg = curator.curate({ window_ms: 1000, windows: [] });
-    assert.deepEqual(pkg.globalStats, { mean: 0, stdDev: 0, windowCount: 0 });
+    assert.deepEqual(pkg.globalStats, { mean: 0, stdDev: 0, windowCount: 0, eventCount: 0 });
     assert.equal(pkg.tiles.length, 0);
     assert.equal(pkg.spanMs, undefined);
   });

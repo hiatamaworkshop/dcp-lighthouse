@@ -94,12 +94,24 @@ export interface SnapshotPackage {
    *
    * Note this is pooled at the *event* level, not the spread of window means:
    * a count=1 window no longer weighs as much as a count=500 one.
+   *
+   * `eventCount` is that pooled event total — the yardstick's actual
+   * statistical weight, which `windowCount` does not convey (three windows can
+   * hold three events or three thousand). It is what the comparator's standard
+   * error divides by: `sqrt(var_ref × (1/n_w + 1/n_ref))` inflates by
+   * `sqrt(1 + n_w/n_ref)` relative to an unlimited reference, so a reader can
+   * tell a yardstick that costs 2% from one that costs 40%. Reported rather
+   * than acted on — nothing here changes a score or a threshold; the judgment
+   * about whether a thin reference is good enough belongs to whoever reads the
+   * package. Made visible after a decayed reference collapsed to 18 events
+   * (ROADMAP_BRIEF.md 2026-08-17) with nothing in the package saying so.
    */
-  globalStats: { mean: number; stdDev: number; windowCount: number };
+  globalStats: { mean: number; stdDev: number; windowCount: number; eventCount: number };
   /**
-   * False when the reference lens could not support a comparison (empty, or
-   * fewer than 2 pooled events, so no variance exists). Detection is then
-   * impossible and `tiles` carries no anomalies — which is BLINDNESS, not
+   * False when the reference lens could not support a comparison (empty, fewer
+   * than 2 pooled events, or every pooled event identical so the variance is
+   * zero). Detection is then impossible and `tiles` carries no anomalies —
+   * which is BLINDNESS, not
    * quiet. Callers must distinguish the two: an empty tile list with
    * referenceUsable=false means "I have no yardstick", and reading it as "all
    * clear" is exactly the failure mode recorded in the silence-vs-blindness
@@ -297,11 +309,29 @@ export class SnapshotCurator {
     const refStats = poolStats(reference.windows);
     // A reference with no variance to offer cannot ground any comparison. Say so
     // explicitly rather than returning an empty tile list that reads as "quiet".
-    const referenceUsable = refStats.count >= 2 && Number.isFinite(refStats.variance);
+    //
+    // `variance > 0` is part of that test, not a pedantic addition (fixed
+    // 2026-08-17). `Number.isFinite(0)` is true, so a reference whose events
+    // are all identical — 18 consecutive passes on a pass/fail stream, easily
+    // produced by a short or decayed reference span — used to report
+    // referenceUsable=TRUE while comparisonSE returned 0 for every window and
+    // `!(se > 0)` skipped them all. Measured: a 17σ dip vanished with the flag
+    // still claiming a usable yardstick, which is exactly the silence-read-as-
+    // quiet failure this flag exists to prevent, produced by the flag itself.
+    //
+    // Zero sample variance is blindness rather than certainty for the same
+    // reason the Welch-form denominator was wrong (2026-07-25): a homogeneous
+    // sample does not mean a homogeneous population, and treating it as one
+    // makes every deviation infinitely significant precisely when the estimate
+    // is least trustworthy. The scoring loop already declined to score these
+    // windows; only the flag disagreed.
+    const referenceUsable =
+      refStats.count >= 2 && Number.isFinite(refStats.variance) && refStats.variance > 0;
     const globalStats = {
       mean: refStats.mean,
       stdDev: referenceUsable ? Math.sqrt(refStats.variance) : 0,
       windowCount: reference.windows.length,
+      eventCount: refStats.count,
     };
     const minGapMs = this.opts.minGapMs > 0 ? this.opts.minGapMs : window_ms * 2;
 
