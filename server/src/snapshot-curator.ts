@@ -161,8 +161,41 @@ export interface SnapshotPackage {
    * a Brain can weigh multiplicity itself.
    */
   selection: SelectionContext;
+  /**
+   * Tails the gate could not have fired on, whatever the stream did.
+   *
+   * The silence-vs-blindness rule applied to a DIRECTION rather than to the
+   * whole package. `referenceUsable` answers "was any comparison possible";
+   * this answers "was a spike possible", and the two come apart: a package can
+   * have a perfectly good yardstick and still be structurally unable to report
+   * one side.
+   *
+   * How it happens (measured, ROADMAP_BRIEF.md 2026-08-17): a window mean
+   * cannot exceed the largest value the stream produces. On the pilot's
+   * 0.95-pass stream that ceiling is 1.0, which at ~100 events per window sits
+   * 2.29σ above the reference — under the 2.81σ Šidák-corrected gate. So no
+   * spike could fire at any point in 2000 null trials, and the package
+   * reported "no spikes" in exactly the words it would have used after
+   * looking. 136 dips to 1 spike is that, not the data.
+   *
+   * Reported, never acted on: no threshold moves and no tile appears or
+   * disappears because of this field. It says which half of the answer was
+   * never on offer, so a reader stops treating "no spikes" as evidence.
+   */
+  unreachableTails: UnreachableTail[];
   /** The curated tiles, sorted by regionStart ascending. */
   tiles: SnapshotTile[];
+}
+
+/** One direction the gate could not fire in, and the arithmetic that says so. */
+export interface UnreachableTail {
+  direction: "spike" | "dip";
+  /** Group label when the lens was grouped; absent for the ungrouped population. */
+  group?: string;
+  /** Most extreme z the data's own observed range allows in this direction. */
+  attainableZ: number;
+  /** The gate it would have had to clear. */
+  requiredZ: number;
 }
 
 /** The comparison family a package's tiles were selected out of. */
@@ -374,10 +407,13 @@ export class SnapshotCurator {
       0,
     );
     const effectiveZThreshold = sidakCorrectedThreshold(this.opts.spikeZThreshold, scorableCount);
+    const unreachableTails: UnreachableTail[] = [];
 
     for (const unit of units) {
       const tag = unit.group !== undefined ? `[${unit.group}] ` : "";
       const inGroup = unit.group !== undefined ? ` in group "${unit.group}"` : "";
+
+      collectUnreachableTails(unit, effectiveZThreshold, unreachableTails);
 
       for (const w of unit.windows) {
         if (w.count < MIN_VALID_COUNT) continue;
@@ -489,6 +525,7 @@ export class SnapshotCurator {
         baseZThreshold: this.opts.spikeZThreshold,
         effectiveZThreshold,
       },
+      unreachableTails,
       tiles: capped,
     };
   }
@@ -594,6 +631,52 @@ function poolStats(windows: WindowStat[]): RefStats {
   const denom = sumW - sumW2 / sumW;
   const variance = Math.max(0, (sumSq - sumW * mean * mean) / denom);
   return { mean, variance, count, effectiveN: nEff };
+}
+
+/**
+ * Note the tails this unit's gate could not have fired in.
+ *
+ * A window mean is an average of values the stream actually produced, so it
+ * cannot exceed the largest value observed nor fall below the smallest. That
+ * ceiling and floor, converted to z against the same reference and the same
+ * standard error the gate uses, bound what the gate could ever see. When the
+ * bound falls short of the threshold, "no tile in that direction" carries no
+ * information at all.
+ *
+ * The bound comes from the OBSERVED range rather than an assumed domain, which
+ * keeps this domain-blind and makes it conservative in the right direction: a
+ * real ceiling can only be lower than the largest value seen, so the tail is at
+ * least as unreachable as reported.
+ *
+ * Uses the most generous window in the unit — the one with the largest
+ * effective n, since a bigger window has the smallest standard error and
+ * therefore the best chance of clearing the gate. If even that window cannot,
+ * none can.
+ */
+function collectUnreachableTails(
+  unit: { windows: WindowStat[]; ref: RefStats; group?: string },
+  requiredZ: number,
+  out: UnreachableTail[],
+): void {
+  const scorable = unit.windows.filter((w) => w.count >= MIN_VALID_COUNT && w.range !== undefined);
+  if (scorable.length === 0 || !(unit.ref.variance > 0)) return;
+
+  const best = scorable.reduce((a, b) => (effectiveN(b) > effectiveN(a) ? b : a));
+  const se = comparisonSE(best, unit.ref);
+  if (!(se > 0)) return;
+
+  const observedMax = Math.max(...scorable.map((w) => w.range!.max));
+  const observedMin = Math.min(...scorable.map((w) => w.range!.min));
+  const maxZ = (observedMax - unit.ref.mean) / se;
+  const minZ = (observedMin - unit.ref.mean) / se;
+
+  const group = unit.group !== undefined ? { group: unit.group } : {};
+  if (maxZ < requiredZ) {
+    out.push({ direction: "spike", ...group, attainableZ: maxZ, requiredZ });
+  }
+  if (-minZ < requiredZ) {
+    out.push({ direction: "dip", ...group, attainableZ: minZ, requiredZ });
+  }
 }
 
 /**

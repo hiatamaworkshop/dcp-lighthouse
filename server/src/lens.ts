@@ -109,6 +109,27 @@ export interface WindowStat {
    * count/sum/sumSq without revisiting raw events.
    */
   weights?: { sumW: number; sumW2: number };
+  /**
+   * Smallest and largest raw value seen in this window.
+   *
+   * Carried because the comparator otherwise cannot tell a tail it DECLINED to
+   * flag from a tail it COULD NOT REACH. Measured (ROADMAP_BRIEF.md
+   * 2026-08-17): on the pilot's 0.95-pass stream at ~100 events per window,
+   * the largest attainable window mean is 1.0, which sits 2.29σ above the
+   * reference — below the 2.81σ Šidák-corrected gate. No spike can fire at
+   * that geometry no matter what the stream does, and the package still
+   * reported "no spikes" exactly as if it had looked and found none. 136 dips
+   * to 1 spike across 2000 null trials is that asymmetry, not a property of
+   * the data.
+   *
+   * min/max are the natural sufficient statistics for that question: they pool
+   * associatively (min of mins, max of maxes), so downsampling and reference
+   * pooling stay exact, and they say nothing about what the values MEAN — the
+   * lens stays domain-blind. Inferring the same bound from an assumed [0,1]
+   * range would hard-code the Phase 1 skin into a module whose whole contract
+   * is that `value` is an arbitrary number.
+   */
+  range?: { min: number; max: number };
 }
 
 /**
@@ -512,13 +533,15 @@ function downsample(
     sum: number;
     sumSq: number;
     weighted: boolean;
+    min: number;
+    max: number;
   }
   const buckets = new Map<number, Bucket>();
   for (const w of windows) {
     const bucketStart = floorToWindow(w.windowStart, bucketMs, origin);
     let b = buckets.get(bucketStart);
     if (b === undefined) {
-      b = { count: 0, sumW: 0, sumW2: 0, sum: 0, sumSq: 0, weighted: false };
+      b = { count: 0, sumW: 0, sumW2: 0, sum: 0, sumSq: 0, weighted: false, min: Infinity, max: -Infinity };
       buckets.set(bucketStart, b);
     }
     b.count += w.count;
@@ -529,6 +552,12 @@ function downsample(
     b.sum += w.mean * weightTotal(w);
     b.sumSq += w.sumSq;
     if (w.weights !== undefined) b.weighted = true;
+    // min of mins / max of maxes — associative, so a downsampled window bounds
+    // its events exactly as an un-downsampled one would.
+    if (w.range !== undefined) {
+      b.min = Math.min(b.min, w.range.min);
+      b.max = Math.max(b.max, w.range.max);
+    }
   }
 
   return [...buckets.entries()]
@@ -543,6 +572,7 @@ function downsample(
       // Emitted only when something upstream was actually weighted, so an
       // unweighted downsample produces byte-identical windows to before.
       ...(b.weighted ? { weights: { sumW: b.sumW, sumW2: b.sumW2 } } : {}),
+      ...(Number.isFinite(b.min) ? { range: { min: b.min, max: b.max } } : {}),
     }));
 }
 
@@ -556,6 +586,8 @@ function aggregate(sorted: readonly LensEvent[], window_ms: number, origin: numb
   let sum = 0;
   let sumSq = 0;
   let count = 0;
+  let min = Infinity;
+  let max = -Infinity;
 
   const flush = (): void => {
     if (count === 0) return;
@@ -567,10 +599,13 @@ function aggregate(sorted: readonly LensEvent[], window_ms: number, origin: numb
       mean: sum / count,
       sumSq,
       valid: count >= MIN_VALID_COUNT,
+      range: { min, max },
     });
     sum = 0;
     sumSq = 0;
     count = 0;
+    min = Infinity;
+    max = -Infinity;
   };
 
   for (const ev of sorted) {
@@ -582,6 +617,8 @@ function aggregate(sorted: readonly LensEvent[], window_ms: number, origin: numb
     sum += ev.value;
     sumSq += ev.value * ev.value;
     count++;
+    if (ev.value < min) min = ev.value;
+    if (ev.value > max) max = ev.value;
   }
   flush();
 

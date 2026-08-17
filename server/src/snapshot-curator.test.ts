@@ -12,7 +12,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { applyLens, MIN_VALID_COUNT, type LensEvent } from "./lens.js";
+import { applyLens, MIN_VALID_COUNT, type LensEvent, type LensResult } from "./lens.js";
 import { SnapshotCurator, type SnapshotPackage } from "./snapshot-curator.js";
 
 const ev = (ts: number, value: number): LensEvent => ({ ts, value });
@@ -28,7 +28,10 @@ const ev = (ts: number, value: number): LensEvent => ({ ts, value });
  * reduces to a count-weighted spread of window means, since there is no real
  * per-event distribution to draw from.
  */
-function buildResult(windows: { windowStart: number; mean: number; count?: number }[], window_ms = 1000) {
+function buildResult(
+  windows: { windowStart: number; mean: number; count?: number; range?: { min: number; max: number } }[],
+  window_ms = 1000,
+): LensResult {
   return {
     window_ms,
     windows: windows.map((w) => {
@@ -40,10 +43,88 @@ function buildResult(windows: { windowStart: number; mean: number; count?: numbe
         count,
         sumSq: count * w.mean * w.mean,
         valid: count >= MIN_VALID_COUNT,
+        ...(w.range ? { range: w.range } : {}),
       };
     }),
   };
 }
+
+// ── unreachable tails (blindness applied to a direction) ────────────────────
+
+/** Seeded PRNG so these fixtures are reproducible. */
+function rng32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * A real Bernoulli stream through the real lens, rather than a hand-built
+ * LensResult. buildResult synthesizes sumSq as count*mean², i.e. zero
+ * within-window spread, which makes the pooled σ an order of magnitude smaller
+ * than a genuine pass/fail stream's and puts every tail comfortably in reach —
+ * so the property under test here can only be exercised on real aggregation.
+ */
+function bernoulliResult(seed: number, passRate: number, fromTs: number, spanMs: number) {
+  const rand = rng32(seed);
+  const events: LensEvent[] = [];
+  for (let i = 0; i < 1000; i++) {
+    events.push({ ts: fromTs + Math.floor(rand() * spanMs), value: rand() < passRate ? 1 : 0 });
+  }
+  return applyLens(events, { window_ms: 1000, align: "epoch" });
+}
+
+describe("SnapshotCurator — a tail that cannot fire is blindness, not quiet", () => {
+  it("declares the spike tail unreachable when the data's ceiling sits under the gate", () => {
+    // A window mean cannot exceed the largest value the stream produces. On the
+    // pilot's 0.95-pass shape that ceiling is 1.0, only a couple of σ above
+    // baseline, so the Šidák-corrected gate sits above anything the data could
+    // ever produce. "No spikes" then reports a question that was never askable
+    // — measured as 136 dips to 1 spike over 2000 null trials
+    // (ROADMAP_BRIEF.md 2026-08-17).
+    const observation = bernoulliResult(1, 0.95, 0, 10_000);
+    const reference = bernoulliResult(2, 0.95, -10_000, 10_000);
+    const pkg = new SnapshotCurator({ spikeZThreshold: 2.0 }).curate(observation, reference);
+
+    const spike = pkg.unreachableTails.find((t) => t.direction === "spike");
+    assert.ok(
+      spike,
+      `expected the spike tail to be declared unreachable, got ${JSON.stringify(pkg.unreachableTails)}`,
+    );
+    assert.ok(
+      spike.attainableZ < spike.requiredZ,
+      `attainable ${spike.attainableZ} must fall short of the gate ${spike.requiredZ}`,
+    );
+    // The dip side is reachable at this shape, so only one direction is named.
+    assert.equal(pkg.unreachableTails.filter((t) => t.direction === "dip").length, 0);
+  });
+
+  it("says nothing when the distribution puts both tails in reach", () => {
+    // Same machinery at a 0.5 pass rate: the mean sits far from either bound,
+    // so both directions can clear the gate and reporting one would be noise.
+    // This is also the shape whose measured false-alarm rate matches design.
+    const observation = bernoulliResult(1, 0.5, 0, 10_000);
+    const reference = bernoulliResult(2, 0.5, -10_000, 10_000);
+    const pkg = new SnapshotCurator({ spikeZThreshold: 2.0 }).curate(observation, reference);
+    assert.deepEqual(pkg.unreachableTails, []);
+  });
+
+  it("stays silent when windows carry no observed range to reason from", () => {
+    // Hand-built fixtures and any caller predating `range`: absence of evidence
+    // about reachability must not be reported as evidence of unreachability.
+    const reference = buildResult([
+      { windowStart: -2000, mean: 0.90, count: 100 },
+      { windowStart: -1000, mean: 0.99, count: 100 },
+    ]);
+    const observation = buildResult([{ windowStart: 0, mean: 0.95, count: 100 }]);
+    const pkg = new SnapshotCurator({ spikeZThreshold: 2.0 }).curate(observation, reference);
+    assert.deepEqual(pkg.unreachableTails, []);
+  });
+});
 
 // ── reference usability (blindness vs quiet) ────────────────────────────────
 
