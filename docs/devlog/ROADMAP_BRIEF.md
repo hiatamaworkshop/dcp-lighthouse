@@ -2912,3 +2912,23 @@ Kish のスケール不変性の帰結として実測: 先頭 1 秒に埋めた�
 
 修正後の再確認: 無加重 88/2000 (flagged 数まで同一)、exp(τ=30s) 90/2000、
 RC 35.18/38.00σ、AR 21.39〜23.48σ、fp シード集合も不変。テスト 291 → **292 件**。
+
+### 既知の flake — `E2E AR — agent regression` (未解決)
+
+ドキュメント追従の確認中に `npm test` が 1 回だけ落ちた。27 連続では再現せず、
+時計依存スイートだけを 20 回叩いて**2 回再現** (約 10%)。
+落ちるのは `e2e-verify.test.ts` の壁時計版 AR
+(`rerouteSchema fires within 5s of regression start`)。
+
+**今回の変更とは無関係**であることは確認済み: AR の判定経路
+(MockStreamGenerator → TestorAdapter → RuleBrain) は `lens.ts` を
+**型 import しかしていない** (コンパイル時に消える) ので、
+今回触った `applyLens` / `snapshot-curator` のコードを 1 行も実行しない。
+`14a5de0 fix: E2E AR flake` が同じ flake の修正コミットなので、**取り切れていない既存問題**。
+
+機序は `timingScale: 0.2` で 5 倍速にしたシナリオを実 `setTimeout` で 50〜200ms 粒度で
+ポーリングしていること。ホストが混むと `sleep(200)` が overshoot して 5s 期限を跨ぐ。
+同ファイルには仮想時計版 (`E2E AR — production-config (virtual clock)`) が既にあり、
+そちらは決定論的。**壁時計版を残す価値は「実タイマーで配線が動くこと」の確認だけ**なので、
+期限を緩めるか、仮想時計版に §10 のレイテンシ判定を寄せて壁時計版は配線確認に
+限定するのが筋。未着手。

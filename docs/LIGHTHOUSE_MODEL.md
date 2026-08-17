@@ -2,7 +2,9 @@
 
 ## Status
 
-Conceptual design note. Not yet implemented. Captures a thinking pattern that emerged from the Minecraft demo and extends naturally to multi-agent code generation pipelines.
+Conceptual design note. Captures a thinking pattern that emerged from the Minecraft demo and extends naturally to multi-agent code generation pipelines.
+
+The pilot that implements it now exists: §8's Phase 0 and Phase 1 both ship, and the lens chain of §137 is complete except `agg_func` (blocked on a real obstacle — median and percentile cannot be pooled from sufficient statistics, so they do not compose with `downsample_factor` or the reference lens). This document stays a design note and is not updated to track implementation; for current state see [../README.md](../README.md) and [devlog/ROADMAP_BRIEF.md](devlog/ROADMAP_BRIEF.md).
 
 ---
 

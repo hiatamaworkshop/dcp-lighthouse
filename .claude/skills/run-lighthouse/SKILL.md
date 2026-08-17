@@ -6,7 +6,7 @@ description: Launch the dcp-lighthouse observation dashboard and drive a scenari
 # dcp-lighthouse — 起動と実地検証
 
 観測ダッシュボードを実際に立ち上げ、シナリオを流して**決定の連鎖とタイル描画を実配信で確認**するための手順。
-ユニットテスト (`npm test`, 124件) は機構を保証するが、**配信経路は保証しない** —
+ユニットテスト (`npm test`) は機構を保証するが、**配信経路は保証しない** —
 静的配信の欠落や SSE の分岐ミスはテスト green のまま通り抜ける (2026-07 に実際に発生)。
 
 ## 1. 起動

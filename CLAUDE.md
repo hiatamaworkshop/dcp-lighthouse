@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1-L2 完了 + L4 前段 + L3 A/B実行+対策A実装 (テスト164件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1/L2/L4 完了 (agg_func のみ保留)・L3 は A/B 実験と較正修正まで (ClaudeBrain 本体は未着手)・L5 未着手 (テスト292件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -123,23 +123,34 @@ bit 128-255: utils     low
 
 ## ディレクトリ構成
 
+各 `*.ts` に `*.test.ts` が隣接する (テストは実装の隣に置く)。
+
 ```
 dcp-lighthouse/
   CLAUDE.md              ← このファイル
   docs/
     LIGHTHOUSE_MODEL.md          ← 概念設計
     LIGHTHOUSE_PILOT_DATA.md     ← モック要件
-  server/                ← Node.js / TypeScript
-    package.json
-    tsconfig.json
-    src/
-      index.ts
+    devlog/ROADMAP_BRIEF.md      ← 時系列の開発ログ (追記式)
+  server/src/            ← Node.js / TypeScript
+    ── 観測層コア (Phase 0 / L4) ──
+      q-registry.ts              ← $Q レジストリ (observe/pipeline/schema、書込時バリデート)
+      lens.ts                    ← applyLens = レンズチェーン本体 (window/origin/group_by/downsample/decay)
+      lens-view.ts               ← LensView / ObservationOverlay (1ストリーム複数レンズ)
+      retention-buffer.ts        ← 鮮度ゾーン ring (IngestionBus.tap の上)
+      snapshot-curator.ts        ← $U。タイル選出と統計判定 (Šidák・連続性補正・isScorable)
+      calibration.ts             ← 誤警報率/検出力の測定器 (レンズを引数に取る)
+      q-collector-binding.ts     ← $Q[observe] → StCollector 動的 bind
+      q-retention-binding.ts     ← $Q[pipeline] → retention 窓
+    ── ドメイン適用 (Phase 1) ──
       mock-stream-generator.ts   ← MockStreamGenerator
       testor-adapter.ts          ← test_result:v1 への正規化
-      rule-brain.ts              ← BrainAdapter 実装 (rule-based)
       brain-adapter.ts           ← interface 定義
-      dashboard.ts               ← SSE bridge
+      rule-brain.ts              ← BrainAdapter 実装 (rule-based)。ClaudeBrain は未実装
       bitpos.ts                  ← 固定仮想 area space
+      dashboard.ts / index.ts    ← SSE bridge / 起動
+    ── §12 A/B 実験 (L3 前段) ──
+      ab-fixture.ts / ab-harness.ts / ab-strategy-b.ts / run-ab-strategy-b.ts / anthropic-ask.ts
   dashboard/             ← ブラウザ UI (HTML + JS)
     index.html
     app.js
@@ -201,7 +212,7 @@ Phase 0 + Phase 1 実装完了 (詳細・ファイル対応は [README.md](READM
 
 ## 次のステップ (工程 L1–L5)
 
-E2E 検証は完了済み (テスト 113 件、§10 基準を実測)。以後の工程は
+E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以後の工程は
 **`docs/devlog/ROADMAP_BRIEF.md` の「2026-07-03 — 本体ロードマップ再編」を正とする**。要約:
 
 - **L1 ✅ (2026-07-03)** 足場固め — field findings の core 還元 (ts≤now クロック方針 / count 窓・有効性 / baseline ゲート+床)。テスト 113→121 件
@@ -263,7 +274,15 @@ E2E 検証は完了済み (テスト 113 件、§10 基準を実測)。以後の
     `gateZ` の除数も `count` → `effectiveN` (無加重では厳密同値、加重では保守側)。
     **Kish はスケール不変なので窓自身の精度はほぼ落ちない** — decay が効くのは pool の
     取り分であって観測窓の SE ではない。無加重の数値・A/B fixture・fp シード集合は全て不変。
-    テスト 279→291件。詳細は ROADMAP_BRIEF.md 2026-08-17 (続々)
+    テスト 279→292件。詳細は ROADMAP_BRIEF.md 2026-08-17 (続々)
+  - **レビューで出た欠陥 (同日修正)**: 約 414τ より古い窓は**重みの二乗が underflow** して
+    `effectiveN` が 0 に潰れる (`ΣW² === 0` かつ `ΣW > 0`)。標準誤差が Infinity なので
+    **絶対発火しない**のに、scorability 判定が `count` だけだったため **Šidák family には
+    数えられ**、他の窓の閾値を 2.00σ→2.27σ に上げていた。`isScorable` を新設し、
+    family サイズ・採点ループ・到達不能裾の**3 箇所が同一述語を呼ぶ**ようにした
+    (コピーが 3 つあったのが温床)。述語は `count >= MIN_VALID_COUNT && effectiveN > 0` —
+    `effectiveN >= MIN_VALID_COUNT` にすると健全な 3 事象窓が n_eff 2.999998 で落ちる。
+    **標本サイズの判定は `count` の仕事、`effectiveN` に問うのは「標準誤差が存在するか」だけ**
   - 残るチェーン段: **`agg_func`** (下記の理由で本質的に重い)
   - **`agg_func` の本質的な難しさ (2026-08-17 に判明)**: z 検定のガウス仮定が変わることだけが
     問題なのではない。median/percentile は**十分統計量からプールできない** (2 窓の median を

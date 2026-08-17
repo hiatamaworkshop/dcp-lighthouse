@@ -2,7 +2,9 @@
 
 ## Status
 
-Specification for the mock stream that drives the lighthouse model pilot. Implementation has not started.
+Specification for the mock stream that drives the lighthouse model pilot.
+
+Implementation is complete and this document is the spec it was built to, not a plan. Phase 0 (observation core) and Phase 1 (the `test_result:v1` skin) both ship; the roadmap since then is L1–L5, tracked in [devlog/ROADMAP_BRIEF.md](devlog/ROADMAP_BRIEF.md) with the file-by-file status in [../README.md](../README.md). Where a section below has since been tested and the result differed, the section carries its own dated status note — §12 is the one that matters.
 
 Companion to `LIGHTHOUSE_MODEL.md`. That document defines the concept; this one defines the data the pilot will use to demonstrate the concept.
 
@@ -278,7 +280,7 @@ The pilot ships `RuleBrain implements BrainAdapter`. A later `ClaudeBrain implem
 
 ## 12. Presentation — shapes for two different observers
 
-A guiding note for how observation output is presented, kept here so it is not lost when implementation begins. The key finding is that **the human observer and the LLM observer want different things**, and conflating them leads to the wrong default (an animated dashboard for everyone).
+A guiding note for how observation output is presented, kept here so it is not lost when implementation begins. The guiding hypothesis is that **the human observer and the LLM observer want different things**, and conflating them leads to the wrong default (an animated dashboard for everyone). It is stated as a hypothesis deliberately — see the dated status note under "Validation hook" at the end of this section, which records what happened when it was tested.
 
 ### Two observers, two presentations
 
@@ -309,6 +311,8 @@ The snapshot package is the "present" step of the interactive observation loop (
 Because the LLM-facing presentation is itself a design claim ("shapes help Brain decide better than numbers"), Phase 1 should test it: run the same anomaly past Brain with (a) a number list only and (b) a snapshot package, and compare decision accuracy and latency. Keep only the presentation features that measurably help — do not add tile types on intuition. This mirrors the empirical stance taken on §10's RC threshold.
 
 Implementation is deferred until the data layer works. The note exists so that, when the time comes, the default for the LLM-facing side is a curated snapshot package, and the animated chart is recognized as the human-facing side — two artifacts, not one.
+
+**Status (2026-08-17): the hook was run, and it did NOT confirm the claim above.** The A/B experiment exists (`server/src/ab-harness.ts`, 66 haiku trials on seeded RC/AR fixtures plus a QUIET negative control) and was executed on 2026-07-28. Re-analysis found the curated arm's verdicts matching the curator's own threshold decision 9 out of 9 times — the model was transcribing the tile, not reading a shape. What the run measured is therefore "the curator's 2σ test beats an LLM eyeballing a number list", which is not the same claim as "presentation helps". **Treat the two-observers argument in this section as an untested design hypothesis, not a finding.** The experiment also surfaced something real that it was not looking for: the curator's package-level false-alarm rate was 29%, which took three rounds of correction to bring onto its design target. Full account in `devlog/ROADMAP_BRIEF.md` (2026-07-28 「再分析」 onward).
 
 ## 13. Open questions
 
