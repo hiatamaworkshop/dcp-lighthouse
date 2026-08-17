@@ -4,10 +4,14 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   applyLens,
+  effectiveN,
   floorToWindow,
+  kishEffectiveN,
   parseDecay,
   resolveAlign,
   resolveDecayAnchor,
+  weightSquaredTotal,
+  weightTotal,
   MIN_VALID_COUNT,
   UNKEYED_GROUP,
   type LensEvent,
@@ -396,5 +400,102 @@ describe("applyLens — decay (ROADMAP L4 chain stage)", () => {
 
   it("surfaces a malformed decay spec rather than observing unfiltered", () => {
     assert.throws(() => applyLens([ev(0, 1)], { window_ms: 1_000, decay: "nonsense" }), /invalid decay/);
+  });
+});
+
+describe("weighted sufficient statistics (groundwork for decay exp)", () => {
+  const w = (
+    count: number,
+    mean: number,
+    sumSq: number,
+    weights?: { sumW: number; sumW2: number },
+  ) => ({ windowStart: 0, windowEnd: 1000, count, mean, sumSq, valid: true, ...(weights ? { weights } : {}) });
+
+  it("an unweighted window's effective n IS its count — the equivalence the refactor rests on", () => {
+    for (const n of [1, 3, 10, 500]) {
+      const win = w(n, 0.9, n * 0.81);
+      assert.equal(weightTotal(win), n);
+      assert.equal(weightSquaredTotal(win), n);
+      assert.equal(effectiveN(win), n);
+    }
+  });
+
+  it("equal weights give effective n equal to the observation count", () => {
+    // 10 observations each weighing 0.5: ΣW=5, ΣW²=2.5, n_eff = 25/2.5 = 10.
+    // Down-weighting everything uniformly loses no precision — it is the
+    // SPREAD of weights that costs, which is exactly what Kish measures.
+    assert.equal(kishEffectiveN(5, 2.5), 10);
+    assert.equal(kishEffectiveN(10, 10), 10);
+  });
+
+  it("unequal weights cost precision, and one dominant weight costs nearly all of it", () => {
+    // Two observations, weights 1 and 1 → n_eff 2 (nothing lost).
+    assert.equal(kishEffectiveN(2, 2), 2);
+    // Weights 1 and 0.0001 → barely more than a single observation.
+    const lopsided = kishEffectiveN(1.0001, 1 + 1e-8);
+    assert.ok(lopsided > 1 && lopsided < 1.001, `expected ~1, got ${lopsided}`);
+    // Effective n never exceeds the observation count.
+    assert.ok(kishEffectiveN(1.5, 1.25) <= 2);
+  });
+
+  it("effective n is NOT additive — the reason sumW/sumW2 are what get carried", () => {
+    // Two windows of n_eff=2 each do not pool to n_eff=4 unless their weights
+    // match. Pooling per-window n_eff would therefore be wrong; pooling the
+    // moments is exact.
+    const a = { sumW: 2, sumW2: 2 };      // two weight-1 observations, n_eff 2
+    const b = { sumW: 0.2, sumW2: 0.02 }; // two weight-0.1 observations, n_eff 2
+    assert.equal(kishEffectiveN(a.sumW, a.sumW2), 2);
+    // 0.04/0.02 lands a few ulps off 2 — float, not a modelling error.
+    assert.ok(Math.abs(kishEffectiveN(b.sumW, b.sumW2) - 2) < 1e-9);
+    const pooled = kishEffectiveN(a.sumW + b.sumW, a.sumW2 + b.sumW2);
+    assert.ok(pooled < 4, `naive addition would say 4, correct pooling says ${pooled.toFixed(3)}`);
+    assert.ok(pooled > 2, "but pooling two populations must still beat either alone");
+  });
+
+  it("pooling weight moments across windows matches computing them from raw events", () => {
+    // The exactness property that lets downsample and the reference lens merge
+    // windows without revisiting events — now stated for weighted moments.
+    const events: Array<{ x: number; w: number }> = [
+      { x: 1, w: 1.0 }, { x: 0, w: 0.8 }, { x: 1, w: 0.6 },
+      { x: 1, w: 0.4 }, { x: 0, w: 0.2 },
+    ];
+    const moments = (evs: typeof events) => ({
+      sumW: evs.reduce((s, e) => s + e.w, 0),
+      sumW2: evs.reduce((s, e) => s + e.w * e.w, 0),
+      sumWX: evs.reduce((s, e) => s + e.w * e.x, 0),
+      sumWX2: evs.reduce((s, e) => s + e.w * e.x * e.x, 0),
+    });
+
+    const whole = moments(events);
+    const left = moments(events.slice(0, 3));
+    const right = moments(events.slice(3));
+
+    assert.ok(Math.abs(left.sumW + right.sumW - whole.sumW) < 1e-12);
+    assert.ok(Math.abs(left.sumW2 + right.sumW2 - whole.sumW2) < 1e-12);
+    assert.ok(Math.abs(left.sumWX + right.sumWX - whole.sumWX) < 1e-12);
+    assert.ok(Math.abs(left.sumWX2 + right.sumWX2 - whole.sumWX2) < 1e-12);
+    // And the derived effective n agrees with the whole-population figure.
+    assert.ok(
+      Math.abs(
+        kishEffectiveN(left.sumW + right.sumW, left.sumW2 + right.sumW2) -
+          kishEffectiveN(whole.sumW, whole.sumW2),
+      ) < 1e-12,
+    );
+  });
+
+  it("an unweighted lens still emits windows with no weights field at all", () => {
+    // Structural identity, not just numeric: a window built today must compare
+    // equal to one built before weighting existed, or every deepEqual in the
+    // suite would have needed updating and the equivalence claim would be
+    // untestable.
+    const plain = applyLens([ev(0, 1), ev(10, 3)], { window_ms: 1000 });
+    assert.equal("weights" in plain.windows[0], false);
+
+    const downsampled = applyLens([ev(0, 1), ev(1000, 3)], {
+      window_ms: 1000,
+      downsample_factor: 2,
+      align: "epoch",
+    });
+    assert.equal("weights" in downsampled.windows[0], false);
   });
 });

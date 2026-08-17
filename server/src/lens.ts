@@ -81,6 +81,77 @@ export interface WindowStat {
   sumSq: number;
   /** Whether this window has enough events (>= MIN_VALID_COUNT) to trust its mean. */
   valid: boolean;
+  /**
+   * Weight sums, present only under a weighting lens. Absent means every event
+   * weighed 1, which is what `count` already says — so an unweighted window
+   * carries no extra fields and compares equal to one built before weighting
+   * existed.
+   *
+   * Groundwork for `decay: exp(τ=...)` (ROADMAP_BRIEF.md 2026-08-17). Weighting
+   * splits a job `count` currently does twice:
+   *
+   *   - HOW MANY EVENTS there were — the MIN_VALID_COUNT gate and the "Count:"
+   *     a tile shows a human. Stays `count`.
+   *   - HOW MUCH STATISTICAL WEIGHT they carry — what the comparator's standard
+   *     error divides by, and what pooling accumulates. Becomes `sumW`, with
+   *     Kish's effective sample size `sumW²/sumW2` as the denominator.
+   *
+   * Those two are the same number only while all weights are 1, and conflating
+   * them under weighting would let a window of 100 events at weight 0.01 claim
+   * the precision of 100 full observations. Same shape of error as
+   * `spikeZThreshold` meaning both a per-window and a family-wise budget before
+   * 対策A.
+   *
+   * `sumW2` is carried rather than the effective n itself because effective n
+   * DOES NOT ADD: merging two windows gives (ΣW_a+ΣW_b)²/(ΣW2_a+ΣW2_b), which
+   * cannot be recovered from the two n_eff values. sumW and sumW2 are additive,
+   * so pooling stays exact — the same property that lets `downsample` merge
+   * count/sum/sumSq without revisiting raw events.
+   */
+  weights?: { sumW: number; sumW2: number };
+}
+
+/**
+ * The total weight a window carries — what its mean is an average over, and
+ * what pooling accumulates. `count` for an unweighted window.
+ */
+export function weightTotal(w: WindowStat): number {
+  return w.weights?.sumW ?? w.count;
+}
+
+/**
+ * Σw² for a window — the second weight moment. Additive across windows, and
+ * the reason effective n can be recovered after pooling.
+ *
+ * Has its own accessor because three call sites (downsample, poolStats, the
+ * step-run standard error) need it, and three copies of
+ * `w.weights?.sumW2 ?? w.count` is three chances for one of them to keep the
+ * old meaning through a change.
+ */
+export function weightSquaredTotal(w: WindowStat): number {
+  return w.weights?.sumW2 ?? w.count;
+}
+
+/**
+ * Kish's effective sample size: the number of equally-weighted observations
+ * that would carry the same precision as this window's weighted ones.
+ *
+ * This — not `count` — is what a standard error divides by. For an unweighted
+ * window it is exactly `count` (n²/n), which is why routing the comparator
+ * through here changes no number until a weighting lens exists.
+ */
+export function effectiveN(w: WindowStat): number {
+  return kishEffectiveN(weightTotal(w), weightSquaredTotal(w));
+}
+
+/**
+ * Effective sample size from summed weight moments. Separate from effectiveN
+ * because pooled populations (a reference, a step run) have moments but no
+ * WindowStat to read them off, and they must use the same formula — summing
+ * per-window effective n instead would be wrong, since it is not additive.
+ */
+export function kishEffectiveN(sumW: number, sumW2: number): number {
+  return sumW2 > 0 ? (sumW * sumW) / sumW2 : 0;
 }
 
 /** One group's slice of a grouped lens result. */
@@ -434,17 +505,30 @@ function downsample(
   if (factor <= 1 || windows.length === 0) return [...windows];
 
   const bucketMs = window_ms * factor;
-  const buckets = new Map<number, { count: number; sum: number; sumSq: number }>();
+  interface Bucket {
+    count: number;
+    sumW: number;
+    sumW2: number;
+    sum: number;
+    sumSq: number;
+    weighted: boolean;
+  }
+  const buckets = new Map<number, Bucket>();
   for (const w of windows) {
     const bucketStart = floorToWindow(w.windowStart, bucketMs, origin);
     let b = buckets.get(bucketStart);
     if (b === undefined) {
-      b = { count: 0, sum: 0, sumSq: 0 };
+      b = { count: 0, sumW: 0, sumW2: 0, sum: 0, sumSq: 0, weighted: false };
       buckets.set(bucketStart, b);
     }
     b.count += w.count;
-    b.sum += w.mean * w.count;
+    // sumW/sumW2 are additive; the effective n derived from them is not, which
+    // is why they are what gets carried (see WindowStat.weights).
+    b.sumW += weightTotal(w);
+    b.sumW2 += weightSquaredTotal(w);
+    b.sum += w.mean * weightTotal(w);
     b.sumSq += w.sumSq;
+    if (w.weights !== undefined) b.weighted = true;
   }
 
   return [...buckets.entries()]
@@ -453,9 +537,12 @@ function downsample(
       windowStart: bucketStart,
       windowEnd: bucketStart + bucketMs,
       count: b.count,
-      mean: b.sum / b.count,
+      mean: b.sum / b.sumW,
       sumSq: b.sumSq,
       valid: b.count >= MIN_VALID_COUNT,
+      // Emitted only when something upstream was actually weighted, so an
+      // unweighted downsample produces byte-identical windows to before.
+      ...(b.weighted ? { weights: { sumW: b.sumW, sumW2: b.sumW2 } } : {}),
     }));
 }
 

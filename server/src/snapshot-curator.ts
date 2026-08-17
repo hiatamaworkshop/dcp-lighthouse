@@ -23,7 +23,16 @@
  * requests a new replay — the curator does NOT regenerate; the caller re-runs.
  */
 
-import { MIN_VALID_COUNT, type LensGroup, type LensResult, type WindowStat } from "./lens.js";
+import {
+  MIN_VALID_COUNT,
+  effectiveN,
+  kishEffectiveN,
+  weightSquaredTotal,
+  weightTotal,
+  type LensGroup,
+  type LensResult,
+  type WindowStat,
+} from "./lens.js";
 
 // ── Shape tags ─────────────────────────────────────────────────────────────
 
@@ -326,7 +335,7 @@ export class SnapshotCurator {
     // is least trustworthy. The scoring loop already declined to score these
     // windows; only the flag disagreed.
     const referenceUsable =
-      refStats.count >= 2 && Number.isFinite(refStats.variance) && refStats.variance > 0;
+      refStats.effectiveN >= 2 && Number.isFinite(refStats.variance) && refStats.variance > 0;
     const globalStats = {
       mean: refStats.mean,
       stdDev: referenceUsable ? Math.sqrt(refStats.variance) : 0,
@@ -529,7 +538,7 @@ function buildScoringUnits(
     const ref = refGroup !== undefined ? poolStats(refGroup.windows) : undefined;
     // Same usability test the package applies: fewer than 2 pooled events means
     // there is no variance, so no comparison exists to make.
-    if (ref === undefined || ref.count < 2 || !Number.isFinite(ref.variance)) {
+    if (ref === undefined || ref.effectiveN < 2 || !Number.isFinite(ref.variance)) {
       unscoredGroups.push(g.label);
       continue;
     }
@@ -546,7 +555,10 @@ interface RefStats {
    * each window's own count — NaN when fewer than 2 events are pooled (spread
    * is unresolvable, not zero). */
   variance: number;
+  /** Raw events pooled — for reporting (globalStats.eventCount), not for denominators. */
   count: number;
+  /** Kish effective sample size of the pool — what standard errors divide by. */
+  effectiveN: number;
 }
 
 /**
@@ -556,16 +568,32 @@ interface RefStats {
  * the same as a count=500 window), this pools at the event level via each
  * window's own (count, mean, sumSq) so the population stat is honestly
  * count-weighted.
+ *
+ * Weight-aware since the `decay` groundwork (2026-08-17), and exactly
+ * equivalent to the previous form while nothing is weighted:
+ *
+ *   - the mean averages over ΣW rather than raw count (identical when W≡1);
+ *   - the variance denominator is `ΣW - ΣW²/ΣW`, the reliability-weight
+ *     analogue of Bessel's correction, which collapses to `n - 1` when W≡1
+ *     (ΣW²/ΣW = n/n = 1). Reliability weights, not frequency weights: a
+ *     half-decayed event is a less relevant observation, not half an
+ *     occurrence, and using the frequency form `ΣW - 1` there would understate
+ *     the variance of a heavily decayed pool.
  */
 function poolStats(windows: WindowStat[]): RefStats {
   const count = windows.reduce((s, w) => s + w.count, 0);
-  if (count === 0) return { mean: 0, variance: 0, count: 0 };
-  const sum = windows.reduce((s, w) => s + w.mean * w.count, 0);
-  const mean = sum / count;
-  if (count < 2) return { mean, variance: NaN, count };
+  if (count === 0) return { mean: 0, variance: 0, count: 0, effectiveN: 0 };
+
+  const sumW = windows.reduce((s, w) => s + weightTotal(w), 0);
+  const sumW2 = windows.reduce((s, w) => s + weightSquaredTotal(w), 0);
+  const nEff = kishEffectiveN(sumW, sumW2);
+  const mean = windows.reduce((s, w) => s + w.mean * weightTotal(w), 0) / sumW;
+
+  if (nEff < 2) return { mean, variance: NaN, count, effectiveN: nEff };
   const sumSq = windows.reduce((s, w) => s + w.sumSq, 0);
-  const variance = Math.max(0, (sumSq - count * mean * mean) / (count - 1));
-  return { mean, variance, count };
+  const denom = sumW - sumW2 / sumW;
+  const variance = Math.max(0, (sumSq - sumW * mean * mean) / denom);
+  return { mean, variance, count, effectiveN: nEff };
 }
 
 /**
@@ -585,12 +613,20 @@ function poolStats(windows: WindowStat[]): RefStats {
  * Judging the observation by its own dispersion is also residual self-reference:
  * the very thing the reference-lens design exists to remove.
  *
- * The `1/ref.count` term carries the reference's own estimation uncertainty, so
- * a short reference widens the error bar instead of being trusted absolutely.
- * NaN (reference too small to have a variance) propagates and silences firing.
+ * The `1/ref.effectiveN` term carries the reference's own estimation
+ * uncertainty, so a short reference widens the error bar instead of being
+ * trusted absolutely. NaN (reference too small to have a variance) propagates
+ * and silences firing.
+ *
+ * Both denominators are EFFECTIVE sample sizes, not raw event counts. They are
+ * the same number until a weighting lens exists (effectiveN of an unweighted
+ * window is exactly its count), and they stop being the same the moment one
+ * does: 100 events at weight 0.01 carry the precision of one observation, not
+ * a hundred, and dividing by the raw count there would shrink the error bar by
+ * 10x on evidence that does not support it.
  */
 function comparisonSE(w: WindowStat, ref: RefStats): number {
-  return Math.sqrt(ref.variance * (1 / w.count + 1 / ref.count));
+  return Math.sqrt(ref.variance * (1 / effectiveN(w) + 1 / ref.effectiveN));
 }
 
 /**
@@ -662,7 +698,7 @@ function detectSteps(
   // reference can't ground a z-score (buildScoringUnits applies the same
   // test), rather than reporting a step_up/step_down with a fabricated
   // magnitude:0. Blindness must not read as "measured, no shift".
-  if (!(ref.count >= 2 && Number.isFinite(ref.variance))) return [];
+  if (!(ref.effectiveN >= 2 && Number.isFinite(ref.variance))) return [];
   const tiles: SnapshotTile[] = [];
   const tag = group !== undefined ? `[${group}] ` : "";
   let runDir: 1 | -1 | null = null;
@@ -670,11 +706,18 @@ function detectSteps(
 
   const emit = (start: number, end: number, dir: 1 | -1): void => {
     const run = windows.slice(start, end + 1);
-    const runCount = run.reduce((s, w) => s + w.count, 0);
-    const runMean = run.reduce((s, w) => s + w.mean * w.count, 0) / runCount;
+    // Same split as comparisonSE: the mean averages over total weight, while
+    // the standard error divides by effective sample size. Both reduce to the
+    // raw event count while nothing is weighted. Effective n across a run is
+    // derived from the summed weight moments rather than summing each window's
+    // n_eff, because effective n is not additive (see WindowStat.weights).
+    const runSumW = run.reduce((s, w) => s + weightTotal(w), 0);
+    const runSumW2 = run.reduce((s, w) => s + weightSquaredTotal(w), 0);
+    const runEffectiveN = kishEffectiveN(runSumW, runSumW2);
+    const runMean = run.reduce((s, w) => s + w.mean * weightTotal(w), 0) / runSumW;
     const shift = Math.abs(runMean - ref.mean) / (ref.mean || 1);
     const shapeTag: ShapeTag = dir > 0 ? "step_up" : "step_down";
-    const se = Math.sqrt(ref.variance * (1 / runCount + 1 / ref.count));
+    const se = Math.sqrt(ref.variance * (1 / runEffectiveN + 1 / ref.effectiveN));
     const z = se > 0 ? Math.abs(runMean - ref.mean) / se : 0;
     tiles.push({
       label: `${tag}${shapeTag} t=${windows[start].windowStart}–${windows[end].windowEnd} (${(shift * 100).toFixed(1)}% shift)`,
