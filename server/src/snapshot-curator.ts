@@ -402,10 +402,7 @@ export class SnapshotCurator {
     // spikeZThreshold doc) so the package-wide false-positive budget stays
     // fixed as the number of scored windows N grows; the reported `magnitude`
     // stays the honest, uncorrected z so Brain sees the real effect size.
-    const scorableCount = units.reduce(
-      (n, u) => n + u.windows.filter((w) => w.count >= MIN_VALID_COUNT).length,
-      0,
-    );
+    const scorableCount = units.reduce((n, u) => n + u.windows.filter(isScorable).length, 0);
     const effectiveZThreshold = sidakCorrectedThreshold(this.opts.spikeZThreshold, scorableCount);
     const unreachableTails: UnreachableTail[] = [];
 
@@ -423,7 +420,7 @@ export class SnapshotCurator {
       collectUnreachableTails(unit, effectiveZThreshold, latticeStep, unreachableTails);
 
       for (const w of unit.windows) {
-        if (w.count < MIN_VALID_COUNT) continue;
+        if (!isScorable(w)) continue;
         const se = comparisonSE(w, unit.ref);
         if (!(se > 0)) continue;
         const z = (w.mean - unit.ref.mean) / se;
@@ -654,6 +651,46 @@ function poolStats(windows: WindowStat[]): RefStats {
 }
 
 /**
+ * Can this window be scored at all?
+ *
+ * ONE predicate, called by all three places that need the answer: the Šidák
+ * family size, the scoring loop, and the unreachable-tail bound. They were
+ * three copies of `w.count >= MIN_VALID_COUNT` that happened to agree, and a
+ * family sized differently from the set of windows actually tested is the exact
+ * failure this project has already recorded once — a degenerate window that
+ * cannot fire still raises the bar for every window that can.
+ *
+ * The two conditions do different jobs, and the second is deliberately NOT a
+ * second sample-size threshold:
+ *
+ *   - `count >= MIN_VALID_COUNT` — how many events there were. Below that the
+ *     mean is noise regardless of weighting. This is the sample-size test, and
+ *     it stays on the raw count.
+ *   - `effectiveN > 0` — that a standard error EXISTS at all. Not "is large
+ *     enough": a window carrying the evidence of one observation is scorable
+ *     and simply has a wide error bar, which is the honest outcome.
+ *
+ * Requiring `effectiveN >= MIN_VALID_COUNT` was tried and is wrong — under any
+ * weighting the events in a window differ slightly in age, so a healthy
+ * 3-event window lands at n_eff 2.999998 and would be discarded on a 2e-6
+ * shortfall. The sample-size job belongs to `count`; asking `effectiveN` to
+ * repeat it just adds a boundary artifact.
+ *
+ * The degenerate case this exists for is reachable rather than theoretical:
+ * past about 414τ of age every weight underflows its own square, so ΣW² is
+ * exactly 0 while ΣW is not, and effective n collapses to 0. `exp(tau=1s)` over
+ * a segment seven minutes deep is enough, and replaying historical spans is
+ * what the model is for. Such a window has an infinite standard error, so it
+ * could never fire — but it counted toward the family and made every other
+ * window harder to flag. Measured before this guard: a lone anomalous window's
+ * bar rose from 2.00σ to 2.27σ because of one companion that was structurally
+ * silent.
+ */
+function isScorable(w: WindowStat): boolean {
+  return w.count >= MIN_VALID_COUNT && effectiveN(w) > 0;
+}
+
+/**
  * Note the tails this unit's gate could not have fired in.
  *
  * A window mean is an average of values the stream actually produced, so it
@@ -679,7 +716,7 @@ function collectUnreachableTails(
   latticeStep: number | null,
   out: UnreachableTail[],
 ): void {
-  const scorable = unit.windows.filter((w) => w.count >= MIN_VALID_COUNT && w.range !== undefined);
+  const scorable = unit.windows.filter((w) => isScorable(w) && w.range !== undefined);
   if (scorable.length === 0 || !(unit.ref.variance > 0)) return;
 
   const best = scorable.reduce((a, b) => (effectiveN(b) > effectiveN(a) ? b : a));

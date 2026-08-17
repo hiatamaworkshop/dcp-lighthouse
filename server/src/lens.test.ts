@@ -438,11 +438,19 @@ describe("applyLens — decay exp(τ): the weight producer", () => {
   });
 
   it("is reproducible: segment_end anchoring keeps a replay answering the same", () => {
-    // Same reason as the step form — under a wall clock these epoch-era
-    // timestamps would decay past every float.
+    // Asserting that two calls to a pure function agree would prove nothing.
+    // The claim is about the ANCHOR, so the contrast is against the wall-clock
+    // one: these epoch-era timestamps are ~57 years old, which under any real τ
+    // decays past every float and leaves nothing to observe.
     const events = [ev(0, 1), ev(5_000, 0), ev(10_000, 1)];
     const lens = { window_ms: 1_000, decay: "exp(tau=3s)" };
-    assert.deepEqual(applyLens(events, lens), applyLens(events, lens));
+
+    const reproducible = applyLens(events, lens);
+    assert.equal(reproducible.windows.length, 3, "a historical segment must not decay to nothing");
+    assert.ok(Math.abs(reproducible.windows[2].weights!.sumW - 1) < 1e-12, "its newest event anchors at weight 1");
+
+    const wallClock = applyLens(events, { ...lens, decay_anchor: "now" });
+    assert.deepEqual(wallClock.windows, [], "the wall-clock anchor is what segment_end exists to avoid");
   });
 
   it("composes with downsample_factor EXACTLY — merged weights equal direct ones", () => {

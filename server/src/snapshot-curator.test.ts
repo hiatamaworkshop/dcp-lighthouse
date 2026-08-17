@@ -664,6 +664,32 @@ describe("SnapshotCurator — the gate corrects for lattice-valued data, and onl
     assert.ok(tile!.magnitude! > 2.15, `magnitude ${tile!.magnitude} should be the raw z, above the gate it passed`);
   });
 
+  it("does not let a window with no effective evidence inflate the Šidák family", () => {
+    // Found reviewing the exp(τ) commit. Past ~414τ of age every weight
+    // underflows its own square, so ΣW² is exactly 0 while ΣW is not, and the
+    // window's effective n collapses to 0 — an infinite standard error, so it
+    // can never fire. It still passed the count-based scorability test, so it
+    // counted toward the family and raised the bar for the window that COULD
+    // fire: measured at 2.27σ instead of 2.00σ for a family of one.
+    //
+    // τ=1s and a segment seven minutes deep is enough to reach this, and
+    // replaying historical spans is what the model is for.
+    const stale: LensEvent[] = [];
+    for (let i = 0; i < 100; i++) stale.push(ev(i, i % 20 === 0 ? 0 : 1));
+    for (let i = 0; i < 3; i++) stale.push(ev(415_000 + i, 1));
+    const obs = applyLens(stale, { window_ms: 1000, decay: "exp(tau=1s)", align: "epoch" });
+
+    const dead = obs.windows.find((w) => w.windowStart === 0)!;
+    assert.equal(dead.count, 100, "the window is not empty — it passes every count-based test");
+    assert.equal(dead.weights!.sumW2, 0, "but its second weight moment has underflowed");
+    assert.ok(dead.weights!.sumW > 0, "while its total weight has not");
+
+    const pkg = new SnapshotCurator({ includeBaseline: false }).curate(obs, REF);
+    assert.equal(pkg.selection.scoredWindowCount, 1, "only the live window is testable");
+    // Family of one ⇒ the base threshold, uncorrected.
+    assert.equal(pkg.selection.effectiveZThreshold, pkg.selection.baseZThreshold);
+  });
+
   it("survives a WEIGHTING lens — the correction is about the values, not about the counts", () => {
     // Regression for the first attempt at `decay: exp(τ)`, which had
     // detectLattice refuse to answer whenever a window carried weights. That
