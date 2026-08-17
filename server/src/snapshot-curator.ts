@@ -640,9 +640,23 @@ function comparisonSE(w: WindowStat, ref: RefStats): number {
  */
 function sidakCorrectedThreshold(baseZ: number, n: number): number {
   if (n <= 1) return baseZ;
-  const alpha = 2 * (1 - normalCdf(baseZ));
+  const alpha = familyWiseAlpha(baseZ);
   const alphaCorrected = 1 - Math.pow(1 - alpha, 1 / n);
   return normalQuantile(1 - alphaCorrected / 2);
+}
+
+/**
+ * The package-level false-alarm budget a given `spikeZThreshold` declares.
+ *
+ * Since 対策A the threshold means a FAMILY-wise rate, so this is the fraction
+ * of null packages that are expected to raise at least one spurious tile — the
+ * number a calibration measurement has to be compared against. Exported so
+ * that comparison is against the design, derived from the same formula the
+ * gate uses, rather than against a figure someone once measured and pasted
+ * into a test.
+ */
+export function familyWiseAlpha(baseZ: number): number {
+  return 2 * (1 - normalCdf(baseZ));
 }
 
 /** Standard normal CDF via the Abramowitz-Stegun 7.1.26 erf approximation (max error ~1.5e-7). */
