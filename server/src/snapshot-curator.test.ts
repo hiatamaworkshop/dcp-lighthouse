@@ -663,6 +663,33 @@ describe("SnapshotCurator — the gate corrects for lattice-valued data, and onl
       .tiles.find((t) => t.shapeTag === "dip");
     assert.ok(tile!.magnitude! > 2.15, `magnitude ${tile!.magnitude} should be the raw z, above the gate it passed`);
   });
+
+  it("survives a WEIGHTING lens — the correction is about the values, not about the counts", () => {
+    // Regression for the first attempt at `decay: exp(τ)`, which had
+    // detectLattice refuse to answer whenever a window carried weights. That
+    // reads plausibly (a weighted sum is not confined to a lattice) and is
+    // measurably wrong: it put the false-alarm rate under the weighted lens
+    // back at 7.1%, i.e. exactly the pre-correction figure. The two-valuedness
+    // identity holds for any weights with total weight in place of count.
+    //
+    // τ is far longer than the segment so the arithmetic is untouched to six
+    // decimals and only the SHAPE of the statistics differs — which is the one
+    // thing under test.
+    const lens = { window_ms: 1000, decay: "exp(tau=1000000s)" };
+    const weightedRef = applyLens(
+      Array.from({ length: 300 }, (_, i) => ev(i * 10, i % 25 === 0 ? 0 : 1)),
+      lens,
+    );
+    const weightedDips = (evts: LensEvent[]): number =>
+      curator.curate(applyLens(evts, lens), weightedRef).tiles.filter((t) => t.shapeTag === "dip").length;
+
+    assert.ok(
+      weightedRef.windows.every((w) => w.weights !== undefined),
+      "the lens must actually be producing weighted windows, or this test proves nothing",
+    );
+    assert.equal(weightedDips(window(null)), 0, "the lattice correction must still apply");
+    assert.equal(weightedDips(window(0.001)), 1, "and must still switch off when the lattice is broken");
+  });
 });
 
 describe("SnapshotCurator — comparator scores against the reference's spread, not the window's own", () => {

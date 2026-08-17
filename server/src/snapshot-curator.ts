@@ -763,47 +763,60 @@ function comparisonSE(w: WindowStat, ref: RefStats): number {
  * measurably declines on continuous data — a uniform[0,1] stream scores
  * bit-identically with and without this path.
  *
- * Returns null under a weighting lens: a weighted sum is not confined to a
- * lattice, so the premise fails even when the raw values are two-valued.
+ * WEIGHTED WINDOWS ARE INCLUDED, and the identity is unchanged apart from what
+ * "how many" means. Under weights w, Σw·v = min·W + (max-min)·W_max and
+ * Σw·v² = min²·W + (max²-min²)·W_max, so eliminating W_max gives exactly the
+ * same relation with total weight in place of count. Refusing to answer here
+ * was the first thing tried and it was measurably wrong: under `decay: exp(τ)`
+ * the false-alarm rate went straight back to 7.1% — the pre-correction figure —
+ * because switching the correction off is all that a weighting lens was doing
+ * to the gate (ROADMAP_BRIEF.md 2026-08-17).
  */
 function detectLattice(observation: readonly WindowStat[], reference: readonly WindowStat[]): number | null {
   let min = Infinity;
   let max = -Infinity;
   let sumSq = 0;
   let sum = 0;
-  let count = 0;
+  let weight = 0;
 
   for (const w of [...observation, ...reference]) {
     if (w.count === 0) continue;
-    if (w.range === undefined || w.weights !== undefined) return null;
+    if (w.range === undefined) return null;
     min = Math.min(min, w.range.min);
     max = Math.max(max, w.range.max);
     sumSq += w.sumSq;
-    sum += w.mean * w.count;
-    count += w.count;
+    sum += w.mean * weightTotal(w);
+    weight += weightTotal(w);
   }
-  if (count === 0 || !(max > min)) return null;
+  if (!(weight > 0) || !(max > min)) return null;
 
-  const q = (sum / count - min) / (max - min);
+  const q = (sum / weight - min) / (max - min);
   const predicted = min * min + (max * max - min * min) * q;
   const tolerance = 1e-9 * Math.max(1, Math.abs(predicted));
-  return Math.abs(sumSq / count - predicted) <= tolerance ? max - min : null;
+  return Math.abs(sumSq / weight - predicted) <= tolerance ? max - min : null;
 }
 
 /**
  * The window's deviation from the reference, in standard errors, with a
  * continuity correction applied when the data is lattice-valued.
  *
- * Half a step of the MEAN's lattice — `latticeStep / count`, since the sum moves
- * by `latticeStep` and the mean by that over n — is taken off the magnitude of
- * the deviation, never off its sign, and never past zero. This is the textbook
+ * Half a step of the MEAN's lattice — `latticeStep / n`, since the sum moves by
+ * `latticeStep` and the mean by that over n — is taken off the magnitude of the
+ * deviation, never off its sign, and never past zero. This is the textbook
  * correction for approximating a discrete tail by a continuous one, and it is
  * the direction that matters here: it makes the gate harder to clear, which is
  * what a rate measured ABOVE its design target needs.
  *
- * `count` and not `effectiveN`: the lattice argument is about how many discrete
- * events the sum is built from. `detectLattice` has already refused to answer
- * under weighting, so the two are the same number wherever this runs.
+ * The n is the EFFECTIVE sample size, which is exactly `count` for an
+ * unweighted window (so no published figure moves) and is the conservative
+ * choice under weights. Flipping event i moves a weighted mean by
+ * `w_i·latticeStep/ΣW`, so the achievable means are no longer evenly spaced;
+ * `latticeStep/n_eff` is the average step inflated by the spread of the
+ * weights, which errs toward correcting slightly too much rather than too
+ * little. Measured under `decay: exp(τ)` the difference from using raw count is
+ * negligible anyway — events inside one window are close in age, so their
+ * weights are nearly equal and n_eff lands within a fraction of a percent of
+ * count (lens.ts's scale-invariance note).
  *
  * Measured at the pilot's own shape (0.95 pass, ~100 events/window, 2000 null
  * trials): 6.85% package false-alarm rate against a 4.55% design target, down to
@@ -813,8 +826,9 @@ function detectLattice(observation: readonly WindowStat[], reference: readonly W
  */
 function gateZ(w: WindowStat, ref: RefStats, se: number, latticeStep: number | null): number {
   const deviation = w.mean - ref.mean;
-  if (latticeStep === null || w.count === 0) return deviation / se;
-  const shrunk = Math.max(0, Math.abs(deviation) - 0.5 * (latticeStep / w.count));
+  const n = effectiveN(w);
+  if (latticeStep === null || !(n > 0)) return deviation / se;
+  const shrunk = Math.max(0, Math.abs(deviation) - 0.5 * (latticeStep / n));
   return (Math.sign(deviation) * shrunk) / se;
 }
 

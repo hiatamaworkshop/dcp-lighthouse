@@ -101,8 +101,14 @@ export interface QObserveParams {
    * Recency weighting, in MODEL.md §228's syntax:
    *
    *   "step(cutoff=now-60s)"  — drop everything older than the cutoff
-   *   "exp(tau=300s)"         — exponential weighting (NOT YET IMPLEMENTED;
-   *                             applyLens throws rather than ignoring it)
+   *   "exp(tau=300s)"         — keep everything, weighted by exp(-age/τ)
+   *
+   * The exp form makes the windows WEIGHTED, so the comparator divides by a
+   * Kish effective sample size instead of a raw count and the curator's
+   * lattice correction switches itself off (a weighted mean of two-valued
+   * data no longer sits on an evenly spaced lattice). Calibration is a
+   * property of the lens, so this one is measured separately —
+   * calibration.test.ts, and ROADMAP_BRIEF.md 2026-08-17.
    *
    * `now` in the string is symbolic: it names the anchor, and `decay_anchor`
    * says what the anchor actually is. See DecayAnchor.
@@ -174,10 +180,11 @@ export class QRegistry {
    * here rather than at read time. The read-time alternative is not equivalent:
    * applyLens runs inside index.ts's tick loop and inside dashboard HTTP
    * handlers, so an unusable lens sitting in the registry threw on every
-   * subsequent tick — and MODEL.md §183's own example row (`decay:
-   * "exp(τ=300s)"`) is one such lens, meaning a $Q row copied from the design
-   * doc took the process down. Validating on write converts that into a single
-   * failed write whose caller can report it.
+   * subsequent tick — a malformed `decay` string or a non-integer
+   * `downsample_factor` is enough, and while the exp form was unimplemented,
+   * MODEL.md §183's own example row was too: a $Q row copied straight out of
+   * the design doc took the process down. Validating on write converts that
+   * into a single failed write whose caller can report it.
    *
    * A rejected write leaves NO trace: validation runs before the store, the
    * history append and the listener notification, so the swap history can

@@ -140,9 +140,10 @@ describe("QRegistry.set — observe-layer validation (write-time rejection)", ()
     ["unknown decay anchor", { decay_anchor: "yesterday" as never }],
     ["malformed decay", { decay: "nonsense" }],
     ["unitless decay duration", { decay: "step(cutoff=300)" }],
-    // MODEL.md §183's own example row. Accepting it here is what used to kill
-    // the process on the next tick.
-    ["exp decay (documented but unimplemented)", { decay: "exp(τ=300s)" }],
+    // Every event but the anchor's would weigh exp(-∞) = 0, so the segment
+    // would report the mean of one event — or, once that underflows a window
+    // away, nothing at all.
+    ["zero time constant", { decay: "exp(tau=0s)" }],
   ];
 
   for (const [name, params] of INVALID) {
@@ -160,7 +161,7 @@ describe("QRegistry.set — observe-layer validation (write-time rejection)", ()
     let notifications = 0;
     r.onChange(() => notifications++);
 
-    assert.throws(() => r.set("observe:test_result:v1", { decay: "exp(tau=300s)" }));
+    assert.throws(() => r.set("observe:test_result:v1", { decay: "exp(tau=nope)" }));
 
     assert.deepEqual(r.getObserve("test_result:v1"), { window_ms: 1000 }, "prior value must survive");
     assert.equal(r.rows().length, 1, "rejected write must not appear in swap history");
@@ -176,6 +177,9 @@ describe("QRegistry.set — observe-layer validation (write-time rejection)", ()
       { window_ms: 1000, downsample_factor: 3 },
       { window_ms: 1000, group_by: ["agentId", "domain"] },
       { window_ms: 1000, decay: "step(cutoff=now-60s)", decay_anchor: "now" },
+      // MODEL.md §183's own example row. It used to be rejected here, which
+      // meant a $Q row copied straight out of the design doc was unusable.
+      { window_ms: 1000, decay: "exp(τ=300s)" },
     ];
     for (const v of valid) r.set("observe:test_result:v1", v);
     assert.equal(r.rows().length, valid.length);

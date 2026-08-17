@@ -389,21 +389,140 @@ describe("applyLens — decay (ROADMAP L4 chain stage)", () => {
     assert.equal(r.windows[1].mean, 6);
   });
 
-  it("throws on the unimplemented exp form instead of silently ignoring it", () => {
-    // A lens that quietly skips a stage it was told to apply reports numbers
-    // under a lens that was never used.
-    assert.throws(
-      () => applyLens([ev(0, 1)], { window_ms: 1_000, decay: "exp(tau=300s)" }),
-      /not implemented/,
-    );
-  });
-
   it("surfaces a malformed decay spec rather than observing unfiltered", () => {
     assert.throws(() => applyLens([ev(0, 1)], { window_ms: 1_000, decay: "nonsense" }), /invalid decay/);
   });
 });
 
-describe("weighted sufficient statistics (groundwork for decay exp)", () => {
+describe("applyLens — decay exp(τ): the weight producer", () => {
+  it("drops nothing and weights everything, newest at 1", () => {
+    // The difference from the step form stated as an assertion: a 10s-old event
+    // under τ=5s survives at exp(-2), it does not disappear.
+    const events = [ev(0, 1), ev(5_000, 1), ev(10_000, 1)];
+    const r = applyLens(events, { window_ms: 1_000, decay: "exp(tau=5s)" });
+    assert.equal(r.windows.reduce((n, w) => n + w.count, 0), 3, "exp must not filter");
+
+    const weights = r.windows.map((w) => w.weights!.sumW);
+    assert.ok(Math.abs(weights[2] - 1) < 1e-12, "the anchor event weighs exactly 1");
+    assert.ok(Math.abs(weights[1] - Math.exp(-1)) < 1e-12);
+    assert.ok(Math.abs(weights[0] - Math.exp(-2)) < 1e-12);
+  });
+
+  it("pulls the mean toward the fresh events inside a window", () => {
+    // Same three events, same window: unweighted this reads 2/3; under decay
+    // the stale 0s are worth less than the fresh 1.
+    const events = [ev(0, 0), ev(400, 0), ev(800, 1)];
+    const lens = { window_ms: 1_000, align: "epoch" as const };
+    assert.ok(Math.abs(applyLens(events, lens).windows[0].mean - 1 / 3) < 1e-12);
+
+    const decayed = applyLens(events, { ...lens, decay: "exp(tau=400ms)" }).windows[0];
+    assert.ok(decayed.mean > 1 / 3, `expected the fresh 1 to weigh more, got ${decayed.mean}`);
+    assert.equal(decayed.count, 3, "count still reports how many events there were");
+  });
+
+  it("costs a window almost no precision of its own — Kish is scale-invariant", () => {
+    // The consequence a reader must know before interpreting any σ measured
+    // under this lens. Events inside one window are nearly the same age, so
+    // their weights are nearly equal, and equal weights lose nothing however
+    // small they are. Decay acts on a window's SHARE of a pool, not on its own
+    // standard error.
+    // 50 events packed into one window, plus a lone anchor event two minutes
+    // later so the window is genuinely stale (τ=60s ⇒ everything in it weighs
+    // about exp(-2)).
+    const events = [...Array.from({ length: 50 }, (_, i) => ev(i * 10, i % 2)), ev(120_000, 1)];
+    const r = applyLens(events, { window_ms: 1_000, decay: "exp(tau=60s)", align: "epoch" });
+    const win = r.windows[0];
+    assert.equal(win.count, 50);
+    assert.ok(win.weights!.sumW < 10, `the window as a whole is discounted, got ${win.weights!.sumW}`);
+    assert.ok(effectiveN(win) > 49.9, `n_eff should stay ~50, got ${effectiveN(win)}`);
+  });
+
+  it("is reproducible: segment_end anchoring keeps a replay answering the same", () => {
+    // Same reason as the step form — under a wall clock these epoch-era
+    // timestamps would decay past every float.
+    const events = [ev(0, 1), ev(5_000, 0), ev(10_000, 1)];
+    const lens = { window_ms: 1_000, decay: "exp(tau=3s)" };
+    assert.deepEqual(applyLens(events, lens), applyLens(events, lens));
+  });
+
+  it("composes with downsample_factor EXACTLY — merged weights equal direct ones", () => {
+    // The pooling-is-exact property, now for weighted moments: aggregating at
+    // 1s and merging three of them must equal aggregating at 3s outright. If it
+    // did not, `downsample` would be silently approximating under this lens.
+    const events = Array.from({ length: 30 }, (_, i) => ev(i * 100, (i * 7) % 3));
+    const base = { align: "epoch" as const, decay: "exp(tau=1200ms)" };
+    const merged = applyLens(events, { ...base, window_ms: 1_000, downsample_factor: 3 });
+    const direct = applyLens(events, { ...base, window_ms: 3_000 });
+
+    assert.equal(merged.window_ms, direct.window_ms);
+    assert.equal(merged.windows.length, direct.windows.length);
+    for (const [i, m] of merged.windows.entries()) {
+      const d = direct.windows[i];
+      assert.equal(m.windowStart, d.windowStart);
+      assert.equal(m.count, d.count);
+      assert.ok(Math.abs(m.mean - d.mean) < 1e-12, `mean ${m.mean} vs ${d.mean}`);
+      assert.ok(Math.abs(m.sumSq - d.sumSq) < 1e-12);
+      assert.ok(Math.abs(m.weights!.sumW - d.weights!.sumW) < 1e-12);
+      assert.ok(Math.abs(m.weights!.sumW2 - d.weights!.sumW2) < 1e-12);
+    }
+  });
+
+  it("groups decay against the SEGMENT's anchor, not their own newest event", () => {
+    // The group-level anchor-slide trap. agent-old's events are stale relative
+    // to the segment; if each group anchored to its own last event, both groups
+    // would come out weighing 1 and the lens would report that the stale group
+    // is as current as the fresh one.
+    const events = [
+      kev(0, 1, { agentId: "old" }),
+      kev(100, 1, { agentId: "old" }),
+      kev(9_000, 1, { agentId: "new" }),
+      kev(10_000, 1, { agentId: "new" }),
+    ];
+    const r = applyLens(events, {
+      window_ms: 1_000,
+      decay: "exp(tau=2s)",
+      group_by: ["agentId"],
+      align: "epoch",
+    });
+    const sumW = (label: string) =>
+      r.groups!.find((g) => g.label === label)!.windows.reduce((s, w) => s + w.weights!.sumW, 0);
+    // Under a per-group anchor "old" would come out at ~1.95 — its two events
+    // are 100ms apart. Against the segment's anchor they are 10s stale.
+    assert.ok(sumW("old") < 0.02, `stale group must be discounted, got ${sumW("old")}`);
+    assert.ok(sumW("new") > 1.5, `fresh group must keep its weight, got ${sumW("new")}`);
+  });
+
+  it("drops a window whose weights all underflow rather than reporting NaN", () => {
+    // Reachable only past ~745τ, but a NaN mean would poison every pool the
+    // window enters, so it is handled the way the step form handles a cutoff.
+    const events = [ev(0, 1), ev(1, 1), ev(10_000_000, 0)];
+    const r = applyLens(events, { window_ms: 1_000, decay: "exp(tau=1ms)", align: "epoch" });
+    assert.equal(r.windows.length, 1, "only the anchor's window can survive");
+    assert.ok(Number.isFinite(r.windows[0].mean));
+    assert.equal(r.windows[0].mean, 0);
+  });
+
+  it("with a τ far longer than the segment, reads as an unweighted lens does", () => {
+    // Not a tautology: it says the weighting is applied through the same sums
+    // rather than through a separate path that could disagree at the limit.
+    const events = [ev(0, 1), ev(500, 0), ev(900, 1), ev(1_500, 1)];
+    const plain = applyLens(events, { window_ms: 1_000, align: "epoch" });
+    const gentle = applyLens(events, { window_ms: 1_000, align: "epoch", decay: "exp(tau=1000000s)" });
+    for (const [i, p] of plain.windows.entries()) {
+      assert.ok(Math.abs(p.mean - gentle.windows[i].mean) < 1e-6);
+      assert.equal(p.count, gentle.windows[i].count);
+    }
+  });
+
+  it("rejects τ=0 instead of collapsing the segment to one event", () => {
+    assert.throws(
+      () => applyLens([ev(0, 1), ev(1, 1)], { window_ms: 1_000, decay: "exp(tau=0s)" }),
+      /tau must be greater than zero/,
+    );
+  });
+});
+
+describe("weighted sufficient statistics (what decay exp produces)", () => {
   const w = (
     count: number,
     mean: number,

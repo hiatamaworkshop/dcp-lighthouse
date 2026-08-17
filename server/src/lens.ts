@@ -10,21 +10,27 @@
  * precision gain from repetition.
  *
  * Implemented stages: group_by → window_ms (with the `origin`/`align` grid) →
- * downsample_factor → decay (step form only; see applyDecay). agg_func still
+ * downsample_factor → decay (both forms; see applyDecay). agg_func still
  * passes through — callers (replay) keep handing over the same observeParams
  * object unchanged, so filling it later needs no change at any call site.
  *
- * What `decay: "exp(tau=...)"` would take, recorded so the deferral is a
- * decision rather than an omission: exponential weighting gives each event a
- * weight, which turns count/mean/sumSq — the unweighted sufficient statistics
- * this module and snapshot-curator.ts both pool with — into weighted ones, and
- * replaces the sample size in the comparator's standard error with an
- * effective sample size (Kish: (Σw)²/Σw²). That means new fields on WindowStat,
- * matching changes in `downsample`'s pooling, and rewrites of poolStats and
- * comparisonSE in snapshot-curator.ts. It is a change to the comparator's
- * statistical model, on the same footing as the Šidák correction (対策A), and
- * it would move numbers the devlog has already published — so it needs its own
- * verification pass rather than riding along with the step form.
+ * `decay: "exp(tau=...)"` is what made the weighted statistics real. It gives
+ * each event a weight, which turns count/mean/sumSq — the unweighted sufficient
+ * statistics this module and snapshot-curator.ts both pool with — into weighted
+ * ones, and replaces the sample size in the comparator's standard error with an
+ * effective sample size (Kish: (Σw)²/Σw²). The plumbing for that landed first
+ * (WindowStat.weights, weightTotal/effectiveN, weight-aware downsample/poolStats/
+ * comparisonSE); this stage is the producer that finally emits a weight other
+ * than 1. Because it changes the comparator's statistical model — the same
+ * footing as the Šidák correction (対策A) — the lens carries its own calibration
+ * measurement (calibration.test.ts) rather than inheriting the unweighted one.
+ *
+ * ONE CONSEQUENCE WORTH KNOWING BEFORE READING ANY NUMBER PRODUCED UNDER IT:
+ * Kish's effective n is scale-invariant, so decaying a whole window uniformly
+ * does not reduce that window's own precision — only its SHARE of a pooled
+ * population, where weights differ across windows. Exponential decay therefore
+ * acts almost entirely on the reference, not on the observation window's
+ * standard error.
  *
  * Domain note: Phase 0 runs on a known-truth numeric stream (Minecraft + injected
  * anomalies), so the lens aggregates a numeric field into per-window {mean, count}.
@@ -221,7 +227,7 @@ export function resolveAlign(lens: QObserveParams): WindowAlign {
 export type DecaySpec =
   /** Drop events older than `anchor - cutoffMs`. */
   | { kind: "step"; cutoffMs: number }
-  /** Weight events by exp(-age/tauMs). Parsed but not yet applied. */
+  /** Weight events by exp(-age/tauMs). */
   | { kind: "exp"; tauMs: number };
 
 /** What the decay stage measures age against. Defaults to the reproducible anchor. */
@@ -283,6 +289,23 @@ export function parseDecay(spec: string): DecaySpec {
 }
 
 /**
+ * What the decay stage hands downstream.
+ *
+ * Two forms of the same stage that act at different points: `step` removes
+ * events, `exp` keeps them all and says how much each one counts. Both are
+ * expressed here rather than the exp form being pushed into aggregate(),
+ * because the anchor is a property of the SEGMENT — computing it once, before
+ * grouping, is what makes every group decay against the same instant. Letting
+ * each group anchor to its own newest event would be the group-level version
+ * of the anchor-slide failure (ROADMAP_BRIEF.md 2026-07-29).
+ */
+interface DecayStage {
+  kept: readonly LensEvent[];
+  /** Per-event weight from its timestamp; null when every event weighs exactly 1. */
+  weightOf: ((ts: number) => number) | null;
+}
+
+/**
  * Apply the decay stage to an already-ts-sorted event list.
  *
  * Operates on EVENTS, not on the windows produced downstream, even though
@@ -293,11 +316,12 @@ export function parseDecay(spec: string): DecaySpec {
  * keep or discard a window straddling the boundary, and neither is what the
  * lens was asked for.
  *
- * `exp` throws instead of falling through as a no-op. A lens that silently
- * ignores a stage it was told to apply reports numbers under a lens that was
- * never used — for an observation layer that is a worse outcome than failing,
- * because every downstream figure is then misattributed. See applyLens's doc
- * for what implementing it actually requires.
+ * `exp` drops nothing. An event of any age keeps contributing, at weight
+ * exp(-age/τ) — that is the difference between the two forms, and it is why exp
+ * cannot be expressed as a filter. Ages are clamped at 0 so an event at or
+ * after the anchor weighs 1 rather than more than a fresh one; under
+ * `decay_anchor: "now"` a clock skew would otherwise let one event outweigh the
+ * whole segment.
  *
  * TWO CONSEQUENCES A CALLER MUST KNOW (measured 2026-08-17, ROADMAP_BRIEF.md):
  *
@@ -319,21 +343,28 @@ export function parseDecay(spec: string): DecaySpec {
  *    That is exactly the silence-vs-blindness failure the referenceUsable flag
  *    exists to prevent, reached by a route the flag does not cover. Nothing
  *    guards this yet.
+ *
+ * Both consequences carry over to the exp form in weakened form: it downweights
+ * the reference rather than truncating it, so the reference keeps its event
+ * count and loses effective n instead.
  */
-function applyDecay(sorted: readonly LensEvent[], lens: QObserveParams): readonly LensEvent[] {
-  if (lens.decay === undefined) return sorted;
+function applyDecay(sorted: readonly LensEvent[], lens: QObserveParams): DecayStage {
+  if (lens.decay === undefined || sorted.length === 0) return { kept: sorted, weightOf: null };
   const spec = parseDecay(lens.decay);
-
-  // Unreachable via applyLens (validateObserveParams rejects exp first) and
-  // kept anyway: "never silently skip a stage you were told to apply" is the
-  // rule this function must not be able to break, whoever calls it.
-  if (spec.kind === "exp") throw new RangeError(expNotImplemented(lens.decay));
-  if (sorted.length === 0) return sorted;
 
   const anchor =
     resolveDecayAnchor(lens) === "now" ? Date.now() : sorted[sorted.length - 1].ts;
-  const floorTs = anchor - spec.cutoffMs;
-  return sorted.filter((e) => e.ts >= floorTs);
+
+  if (spec.kind === "step") {
+    const floorTs = anchor - spec.cutoffMs;
+    return { kept: sorted.filter((e) => e.ts >= floorTs), weightOf: null };
+  }
+
+  const { tauMs } = spec;
+  return {
+    kept: sorted,
+    weightOf: (ts) => Math.exp(-Math.max(0, anchor - ts) / tauMs),
+  };
 }
 
 /**
@@ -346,16 +377,6 @@ function applyDecay(sorted: readonly LensEvent[], lens: QObserveParams): readonl
  */
 export function floorToWindow(ts: number, window_ms: number, origin = 0): number {
   return origin + Math.floor((ts - origin) / window_ms) * window_ms;
-}
-
-/** Shared so applyDecay and validateObserveParams cannot describe the deferral differently. */
-function expNotImplemented(spec: string): string {
-  return (
-    `decay "${spec}" is parsed but not implemented: exponential weighting needs ` +
-    `weighted sufficient statistics (effective sample size) throughout WindowStat, ` +
-    `poolStats and comparisonSE, which changes the comparator's statistical model. ` +
-    `Only step(cutoff=...) is applied today.`
-  );
 }
 
 /**
@@ -417,8 +438,12 @@ export function validateObserveParams(lens: QObserveParams): void {
     );
   }
   if (lens.decay !== undefined) {
-    // parseDecay throws on malformed syntax; exp parses but has no implementation.
-    if (parseDecay(lens.decay).kind === "exp") throw new RangeError(expNotImplemented(lens.decay));
+    const spec = parseDecay(lens.decay); // throws on malformed syntax
+    if (spec.kind === "exp" && !(spec.tauMs > 0)) {
+      // τ=0 would make every event's weight exp(-∞)=0 except the anchor's, so
+      // the whole segment would report a mean of one event or none at all.
+      throw new RangeError(`decay "${lens.decay}" — tau must be greater than zero`);
+    }
   }
 }
 
@@ -445,12 +470,14 @@ export function validateObserveParams(lens: QObserveParams): void {
  * window a caller sees. Applied per group as well as to the mixed view, so a
  * grouped and downsampled lens still shares one grid across every slice.
  *
- * When the lens declares `decay`, events are filtered before any of the above:
- * the step form drops everything older than its cutoff, measured back from the
- * anchor `decay_anchor` names (segment end by default, so a replay is
- * reproducible). Every later stage — the grid origin included — sees only the
- * survivors. The exp form parses but throws; see applyDecay and this module's
- * header for why it is deferred rather than silently ignored.
+ * When the lens declares `decay`, it runs before any of the above, measured
+ * back from the anchor `decay_anchor` names (segment end by default, so a
+ * replay is reproducible). The step form drops everything older than its
+ * cutoff, and every later stage — the grid origin included — sees only the
+ * survivors. The exp form drops nothing and instead attaches a weight
+ * exp(-age/τ) to each event, so the windows it produces carry weighted
+ * sufficient statistics (WindowStat.weights) and the comparator divides by an
+ * effective sample size rather than a raw count.
  *
  * Events need not be sorted; they are sorted by ts internally so that ts-driven
  * aggregation matches in-order aggregation (the late-arrival guarantee).
@@ -473,13 +500,20 @@ export function applyLens(events: readonly LensEvent[], lens: QObserveParams = {
   // Decay runs before anything downstream reads the events, so every later
   // stage sees only what survived: the grid anchors to the first SURVIVING
   // event, and groups are built from survivors. Anchoring to a dropped event
-  // would put the grid outside the data the lens actually observed.
-  const kept = applyDecay(sorted, lens);
+  // would put the grid outside the data the lens actually observed. `weightOf`
+  // is resolved here, once, for the same reason the origin is — every group
+  // must decay against the same anchor to stay comparable.
+  const { kept, weightOf } = applyDecay(sorted, lens);
   if (kept.length === 0) return { window_ms: outputWindowMs, windows: [] };
 
   const origin = resolveAlign(lens) === "epoch" ? (lens.origin ?? 0) : kept[0].ts;
 
-  const windows = downsample(aggregate(kept, window_ms, origin), window_ms, downsampleFactor, origin);
+  const windows = downsample(
+    aggregate(kept, window_ms, origin, weightOf),
+    window_ms,
+    downsampleFactor,
+    origin,
+  );
 
   const groupBy = lens.group_by;
   if (!groupBy || groupBy.length === 0) return { window_ms: outputWindowMs, windows };
@@ -500,7 +534,12 @@ export function applyLens(events: readonly LensEvent[], lens: QObserveParams = {
     .map(([label, b]) => ({
       key: b.key,
       label,
-      windows: downsample(aggregate(b.events, window_ms, origin), window_ms, downsampleFactor, origin),
+      windows: downsample(
+        aggregate(b.events, window_ms, origin, weightOf),
+        window_ms,
+        downsampleFactor,
+        origin,
+      ),
     }))
     .sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
 
@@ -579,31 +618,58 @@ function downsample(
 /**
  * Window one already-ts-sorted event list onto the grid anchored at `origin`.
  * Shared by the ungrouped pass and every group so all of them land on one grid.
+ *
+ * `weightOf` is the decay stage's output. When it is null every event weighs 1,
+ * every weighted sum collapses to its unweighted form, and no `weights` field
+ * is emitted at all — an unweighted lens produces windows byte-identical to the
+ * ones it produced before weighting existed, which is what keeps every figure
+ * the devlog has published still true.
+ *
+ * The sums are the WEIGHTED sufficient statistics, because that is what the
+ * consumers expect: poolStats builds its mean over ΣW and its variance from
+ * Σw·v², and downsample re-derives a merged mean as Σ(mean·W)/ΣW. Carrying an
+ * unweighted sumSq next to a weighted mean would give a variance computed
+ * against a mean it does not belong to.
  */
-function aggregate(sorted: readonly LensEvent[], window_ms: number, origin: number): WindowStat[] {
+function aggregate(
+  sorted: readonly LensEvent[],
+  window_ms: number,
+  origin: number,
+  weightOf: ((ts: number) => number) | null,
+): WindowStat[] {
   const windows: WindowStat[] = [];
   let curIdx = -1;
   let sum = 0;
   let sumSq = 0;
+  let sumW = 0;
+  let sumW2 = 0;
   let count = 0;
   let min = Infinity;
   let max = -Infinity;
 
   const flush = (): void => {
-    if (count === 0) return;
+    // A window whose weights all underflowed to zero has no weighted mean to
+    // report — it decayed out of the lens exactly as the step form would have
+    // dropped it. Reachable only past ~745τ of age, and emitting NaN there
+    // would poison every pool the window enters.
+    if (count === 0 || sumW <= 0) {
+      sum = sumSq = sumW = sumW2 = count = 0;
+      min = Infinity;
+      max = -Infinity;
+      return;
+    }
     const windowStart = origin + curIdx * window_ms;
     windows.push({
       windowStart,
       windowEnd: windowStart + window_ms,
       count,
-      mean: sum / count,
+      mean: sum / sumW,
       sumSq,
       valid: count >= MIN_VALID_COUNT,
+      ...(weightOf !== null ? { weights: { sumW, sumW2 } } : {}),
       range: { min, max },
     });
-    sum = 0;
-    sumSq = 0;
-    count = 0;
+    sum = sumSq = sumW = sumW2 = count = 0;
     min = Infinity;
     max = -Infinity;
   };
@@ -614,9 +680,15 @@ function aggregate(sorted: readonly LensEvent[], window_ms: number, origin: numb
       flush();
       curIdx = idx;
     }
-    sum += ev.value;
-    sumSq += ev.value * ev.value;
+    const w = weightOf === null ? 1 : weightOf(ev.ts);
+    sum += w * ev.value;
+    sumSq += w * ev.value * ev.value;
+    sumW += w;
+    sumW2 += w * w;
     count++;
+    // The range bounds the RAW values, not the weighted ones: a weighted mean
+    // is still a convex combination of the values, so min/max bound it exactly
+    // as they do unweighted (collectUnreachableTails depends on that).
     if (ev.value < min) min = ev.value;
     if (ev.value > max) max = ev.value;
   }

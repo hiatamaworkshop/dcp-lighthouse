@@ -80,6 +80,54 @@ describe("curator calibration — false alarms on a null stream", () => {
   });
 });
 
+describe("curator calibration — under a weighting lens", () => {
+  // The reason calibration takes a lens at all. `decay: exp(τ)` replaces every
+  // raw count in the comparator with an effective sample size, so its
+  // false-alarm rate is a different measurement, not an inherited one.
+  //
+  // It was measured wrong first, which is why these are here: refusing to
+  // apply the continuity correction to weighted windows — on the reasoning
+  // that a weighted sum is not confined to a lattice — took the rate straight
+  // back to 7.1%, the pre-correction figure. Switching the correction off was
+  // the only thing the weighting was doing to the gate.
+  const design = familyWiseAlpha(2.0);
+  const lens = { window_ms: 1_000, decay: "exp(tau=30s)" };
+
+  it("stays on the design target when τ is long relative to the span", () => {
+    const r = measureFalseAlarmRate({ seeds: SEEDS, lens });
+    const summary = formatCalibration("exp(tau=30s)", r);
+    assert.ok(Math.abs(r.rate - design) < 0.015, `weighted lens should sit near design — ${summary}`);
+    assert.ok(r.rate > 0.02, `weighted lens suspiciously quiet — ${summary}`);
+  });
+
+  it("keeps its power — the weighting must not buy calibration by going blind", () => {
+    const weak = measureDetectionRate(0.9, { seeds: SEEDS, lens });
+    const unweighted = measureDetectionRate(0.9, { seeds: SEEDS });
+    assert.ok(
+      Math.abs(weak.rate - unweighted.rate) < 0.05,
+      `a τ three times the span should barely move power — ${formatCalibration("exp", weak)} vs ${formatCalibration("plain", unweighted)}`,
+    );
+    assert.ok(measureDetectionRate(0.6, { seeds: SEEDS, lens }).rate > 0.95, "a strong burst must still fire");
+  });
+
+  it("overshoots as τ approaches the span, and it is the thin-sample regime doing it", () => {
+    // MEASURED, NOT DESIRED. τ=2s over a 10s span leaves the reference all
+    // 1000 of its events but only ~387 effective ones, and the rate reads
+    // 6.6%. Quadrupling the event density takes it to 4.0% — the same move the
+    // UNWEIGHTED lens makes at that density (4.4% → 3.4%), which is what says
+    // this is the already-documented thin-effective-sample residual rather
+    // than something weighting introduced.
+    const short = measureFalseAlarmRate({ seeds: SEEDS, lens: { window_ms: 1_000, decay: "exp(tau=2s)" } });
+    assert.ok(short.rate > design, `short τ should still overshoot — ${formatCalibration("exp(tau=2s)", short)}`);
+    const dense = measureFalseAlarmRate({
+      seeds: SEEDS,
+      lens: { window_ms: 1_000, decay: "exp(tau=2s)" },
+      shape: { eventsPerSpan: 4_000 },
+    });
+    assert.ok(dense.rate < short.rate, `density must relieve it — ${formatCalibration("dense", dense)}`);
+  });
+});
+
 describe("curator calibration — power", () => {
   it("still detects a strong burst", () => {
     // The cheapest way to pass a false-alarm bound is to stop detecting
