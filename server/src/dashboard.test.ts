@@ -321,3 +321,83 @@ test("live coarse view: a strong burst is reported at a stable magnitude", () =>
     `magnitude for an unchanging burst spanned ${min.toFixed(2)}σ–${max.toFixed(2)}σ across ticks`,
   );
 });
+
+// ── request-path fault isolation ────────────────────────────────────────────
+
+import { DashboardServer } from "./dashboard.js";
+import { QRegistry } from "./q-registry.js";
+import { ObservationOverlay } from "./lens-view.js";
+
+/**
+ * Start a DashboardServer on an OS-assigned port with the collaborators these
+ * tests need. Everything not exercised is a null stub: the point is the
+ * request path, not the pipeline behind it.
+ */
+async function startTestServer(
+  generator: unknown,
+): Promise<{ base: string; close: () => Promise<void> }> {
+  const registry = new QRegistry();
+  const server = new DashboardServer(
+    generator as never,
+    null as never,
+    null as never,
+    registry,
+    null as never,
+    new ObservationOverlay(registry),
+    { replay: () => ({ window_ms: 1000, windows: [] }), getRetentionWindowMs: () => 120_000 },
+  ).start({ port: 0 });
+
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const addr = server.address();
+  const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+  return {
+    base: `http://127.0.0.1:${port}`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+test("a throwing handler answers the request instead of killing the process", async () => {
+  // Node routes a synchronous throw inside a request handler to
+  // uncaughtException, which with no listener terminates the server — so
+  // before the catch in handle(), one bad request took the observation layer
+  // down. /status is the shortest route to a throwing collaborator.
+  const boom = { getCurrentLoad: () => { throw new Error("collaborator exploded"); } };
+  const { base, close } = await startTestServer(boom);
+  try {
+    const res = await fetch(`${base}/status`);
+    assert.equal(res.status, 500, "an internal defect is a 500, not a silent death");
+    assert.match((await res.json()).error, /collaborator exploded/);
+
+    // The point of the whole exercise: still serving afterwards.
+    const after = await fetch(`${base}/demo/stop`).catch(() => null);
+    assert.ok(after, "server must still accept requests after a handler threw");
+  } finally {
+    await close();
+  }
+});
+
+test("a rejected lens is a 400 carrying the rulebook's own message", async () => {
+  // The endpoint no longer restates the positive-integer rule; it hands the
+  // value to registry.set, whose validateObserveParams throws RangeError, and
+  // handle() maps that to 400. So this also pins that the caller sees the
+  // rulebook's wording rather than a duplicate maintained next to it.
+  const { base, close } = await startTestServer({ getCurrentLoad: () => ({}) });
+  try {
+    for (const bad of ["0", "-2", "1.5"]) {
+      const res = await fetch(`${base}/control/coarse-downsample?factor=${bad}`);
+      assert.equal(res.status, 400, `factor=${bad} must be refused`);
+      assert.match((await res.json()).error, /downsample_factor/, `factor=${bad}`);
+    }
+    // Not a number at all is a transport error, refused before the rulebook.
+    const nan = await fetch(`${base}/control/coarse-downsample?factor=abc`);
+    assert.equal(nan.status, 400);
+    assert.match((await nan.json()).error, /must be a number/);
+
+    // And a valid one still lands.
+    const ok = await fetch(`${base}/control/coarse-downsample?factor=3`);
+    assert.equal(ok.status, 200);
+    assert.equal((await ok.json()).downsample_factor, 3);
+  } finally {
+    await close();
+  }
+});

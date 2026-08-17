@@ -16,7 +16,7 @@
  * Mirrors the Minecraft dashboard SSE pattern.
  */
 
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { MockStreamGenerator } from "./mock-stream-generator.js";
@@ -218,13 +218,23 @@ export class DashboardServer {
     private readonly buffer: ReplaySource,
   ) {}
 
-  /** Start HTTP server and wire up SSE broadcast on each adapter tick. */
-  start(opts: DashboardOptions = {}): void {
+  /**
+   * Start HTTP server and wire up SSE broadcast on each adapter tick.
+   *
+   * Returns the server so a caller can close it and — the reason it stopped
+   * returning void — so a test can listen on port 0 and read back the port the
+   * OS assigned. Without that, verifying the request path means binding a
+   * fixed port, which collides with a dev server or with a parallel test file.
+   */
+  start(opts: DashboardOptions = {}): Server {
     const port = opts.port ?? 3001;
     const server = createServer((req, res) => this.handle(req, res));
     server.listen(port, () => {
-      console.log(`[dashboard] listening on http://localhost:${port}`);
+      const bound = server.address();
+      const actual = typeof bound === "object" && bound !== null ? bound.port : port;
+      console.log(`[dashboard] listening on http://localhost:${actual}`);
     });
+    return server;
   }
 
   /**
@@ -405,7 +415,40 @@ export class DashboardServer {
     );
   }
 
+  /**
+   * Turn a throwing handler into a response instead of a dead process.
+   *
+   * Node routes an exception thrown synchronously inside a request handler to
+   * `uncaughtException`, which with no listener terminates the process — so
+   * before this, a single bad `/control/...` request could take the whole
+   * observation layer down. A RangeError here is the lens rulebook rejecting
+   * the caller's input (see validateObserveParams), which is a 400; anything
+   * else is a defect on our side, which is a 500 and stays on the console.
+   *
+   * `headersSent` is checked because the SSE routes write their headers and
+   * then keep the socket open: once the stream has begun there is no status
+   * left to send, and calling writeHead again would throw from inside the
+   * catch. Destroying the socket is the only honest signal left there.
+   */
   private handle(req: IncomingMessage, res: ServerResponse): void {
+    try {
+      this.route(req, res);
+    } catch (err) {
+      const validation = err instanceof RangeError;
+      console[validation ? "warn" : "error"](
+        `[dashboard] ${req.method ?? "GET"} ${req.url ?? "/"} failed:`,
+        err,
+      );
+      if (res.headersSent) {
+        res.destroy();
+        return;
+      }
+      jsonHeaders(res, validation ? 400 : 500);
+      res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+    }
+  }
+
+  private route(req: IncomingMessage, res: ServerResponse): void {
     const url = req.url ?? "/";
 
     if (url.startsWith("/events/snapshot")) {
@@ -469,11 +512,17 @@ export class DashboardServer {
       // expose on the live path because broadcast() sizes its spans via
       // effectiveWindowMs(), which folds this factor in; see that function's
       // doc for the mismatch this would otherwise silently introduce.
+      // Transport-level check only: was a number supplied at all. Whether that
+      // number is an acceptable downsample_factor is the lens rulebook's call
+      // (validateObserveParams, enforced by registry.set), and re-stating the
+      // positive-integer rule here would put a second copy of it in a place
+      // that goes stale the moment the rule moves. handle() turns the
+      // resulting RangeError into a 400 carrying the rulebook's own message.
       const raw = parseQuery(url).get("factor");
       const factor = raw === null ? NaN : Number(raw);
-      if (!Number.isInteger(factor) || factor < 1) {
+      if (!Number.isFinite(factor)) {
         jsonHeaders(res, 400);
-        res.end(JSON.stringify({ error: "factor must be a positive integer" }));
+        res.end(JSON.stringify({ error: `factor must be a number, got ${JSON.stringify(raw)}` }));
         return;
       }
       const current = this.registry.getObserve("test_result:v1", "coarse") ?? {};
@@ -484,8 +533,14 @@ export class DashboardServer {
     }
 
     if (url.startsWith("/status")) {
+      // Body first, headers second. The reverse order commits a 200 before the
+      // work that can fail has run, and handle()'s catch is then left with a
+      // response it can no longer set a status on — its only remaining move is
+      // to destroy the socket, which reaches the caller as a connection error
+      // rather than a 500.
+      const body = JSON.stringify(this.generator.getCurrentLoad());
       jsonHeaders(res);
-      res.end(JSON.stringify(this.generator.getCurrentLoad()));
+      res.end(body);
       return;
     }
 

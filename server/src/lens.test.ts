@@ -5,7 +5,9 @@ import assert from "node:assert/strict";
 import {
   applyLens,
   floorToWindow,
+  parseDecay,
   resolveAlign,
+  resolveDecayAnchor,
   MIN_VALID_COUNT,
   UNKEYED_GROUP,
   type LensEvent,
@@ -264,5 +266,135 @@ describe("applyLens — downsample_factor (ROADMAP L4 residual chain stage)", ()
     assert.throws(() => applyLens([ev(0, 1)], { window_ms: 1000, downsample_factor: 0 }), /downsample_factor/);
     assert.throws(() => applyLens([ev(0, 1)], { window_ms: 1000, downsample_factor: -2 }), /downsample_factor/);
     assert.throws(() => applyLens([ev(0, 1)], { window_ms: 1000, downsample_factor: 1.5 }), /downsample_factor/);
+  });
+});
+
+describe("parseDecay — MODEL.md §228 syntax", () => {
+  it("parses the step form, with or without the symbolic `now-` prefix", () => {
+    assert.deepEqual(parseDecay("step(cutoff=now-60s)"), { kind: "step", cutoffMs: 60_000 });
+    // `now` names the anchor, not a literal clock read, so an age on its own
+    // means the same thing.
+    assert.deepEqual(parseDecay("step(cutoff=60s)"), { kind: "step", cutoffMs: 60_000 });
+    assert.deepEqual(parseDecay("step(cutoff=1500ms)"), { kind: "step", cutoffMs: 1_500 });
+  });
+
+  it("parses the exp form under either spelling of tau", () => {
+    assert.deepEqual(parseDecay("exp(tau=300s)"), { kind: "exp", tauMs: 300_000 });
+    assert.deepEqual(parseDecay("exp(τ=300s)"), { kind: "exp", tauMs: 300_000 });
+  });
+
+  it("tolerates incidental whitespace", () => {
+    assert.deepEqual(parseDecay("  step( cutoff = now-60s )  "), { kind: "step", cutoffMs: 60_000 });
+  });
+
+  it("rejects an unlabeled duration rather than guessing the unit", () => {
+    // "300" could be 300ms or 300s and the difference is three orders of
+    // magnitude — a $Q row must not carry that ambiguity.
+    assert.throws(() => parseDecay("step(cutoff=300)"), /expected a number with a unit/);
+    assert.throws(() => parseDecay("exp(tau=5m)"), /expected a number with a unit/);
+  });
+
+  it("rejects malformed specs and mismatched parameter names", () => {
+    assert.throws(() => parseDecay("step"), /invalid decay/);
+    assert.throws(() => parseDecay("linear(cutoff=60s)"), /invalid decay/);
+    assert.throws(() => parseDecay("step(tau=60s)"), /step takes "cutoff"/);
+    assert.throws(() => parseDecay("exp(cutoff=60s)"), /exp takes "tau"/);
+  });
+});
+
+describe("applyLens — decay (ROADMAP L4 chain stage)", () => {
+  it("drops events older than the cutoff, measured back from the segment end", () => {
+    // Segment spans 0..10000; cutoff 3s keeps only ts >= 7000.
+    const events = [ev(0, 1), ev(5_000, 1), ev(7_000, 9), ev(10_000, 9)];
+    const r = applyLens(events, { window_ms: 1_000, decay: "step(cutoff=now-3s)" });
+    const total = r.windows.reduce((n, w) => n + w.count, 0);
+    assert.equal(total, 2, "only the two events inside the cutoff may survive");
+    assert.equal(r.windows[0].windowStart, 7_000, "the grid must anchor to the first SURVIVING event");
+  });
+
+  it("is reproducible: the same segment gives the same answer regardless of wall clock", () => {
+    // The reason segment_end is the default. Under a wall-clock anchor this
+    // fixture — timestamps near the Unix epoch — would decay to nothing, and
+    // a replay of old data is the model's whole point (MODEL.md §5).
+    const events = [ev(0, 1), ev(5_000, 1), ev(9_000, 7), ev(10_000, 7)];
+    const lens = { window_ms: 1_000, decay: "step(cutoff=now-2s)" };
+    const a = applyLens(events, lens);
+    const b = applyLens(events, lens);
+    assert.deepEqual(a, b);
+    assert.ok(a.windows.length > 0, "a historical segment must not decay to nothing");
+  });
+
+  it("anchors to the wall clock only when asked to", () => {
+    assert.equal(resolveDecayAnchor({}), "segment_end");
+    assert.equal(resolveDecayAnchor({ decay_anchor: "now" }), "now");
+
+    // Epoch-era timestamps are far older than any real cutoff from now, so a
+    // wall-clock anchor drops everything — the behavior segment_end exists to
+    // avoid, pinned here so the two anchors cannot quietly become the same.
+    const events = [ev(0, 1), ev(10_000, 1)];
+    const r = applyLens(events, {
+      window_ms: 1_000,
+      decay: "step(cutoff=now-60s)",
+      decay_anchor: "now",
+    });
+    assert.deepEqual(r.windows, []);
+  });
+
+  it("keeps everything when the cutoff spans the whole segment", () => {
+    const events = [ev(0, 1), ev(5_000, 3), ev(10_000, 5)];
+    const r = applyLens(events, { window_ms: 1_000, decay: "step(cutoff=now-999s)" });
+    assert.equal(r.windows.reduce((n, w) => n + w.count, 0), 3);
+  });
+
+  it("builds groups from the survivors only", () => {
+    // A group whose events all fall outside the cutoff must disappear, not
+    // linger as an empty slice — otherwise the curator would see a group that
+    // the lens did not actually observe.
+    const events = [
+      kev(0, 1, { agentId: "old" }),
+      kev(9_000, 5, { agentId: "new" }),
+      kev(10_000, 5, { agentId: "new" }),
+    ];
+    const r = applyLens(events, {
+      window_ms: 1_000,
+      decay: "step(cutoff=now-2s)",
+      group_by: ["agentId"],
+    });
+    assert.deepEqual(r.groups!.map((g) => g.label), ["new"]);
+  });
+
+  it("composes with downsample_factor, and the GRID still decides bucket edges", () => {
+    // 7000/8000/9000 survive the 2s cutoff. On the epoch grid with
+    // bucketMs = 1000*3, the boundary at 9000 falls between them, so they land
+    // in two buckets rather than one. That is the point worth pinning: decay
+    // changes which events exist, never where the grid sits — a survivor set
+    // that re-anchored the grid would reintroduce the anchor-slide failure the
+    // origin/align work removed.
+    const events = [ev(0, 1), ev(7_000, 2), ev(8_000, 4), ev(9_000, 6)];
+    const r = applyLens(events, {
+      window_ms: 1_000,
+      decay: "step(cutoff=now-2s)",
+      downsample_factor: 3,
+      align: "epoch",
+    });
+    assert.equal(r.window_ms, 3_000);
+    assert.deepEqual(r.windows.map((w) => w.windowStart), [6_000, 9_000]);
+    assert.equal(r.windows[0].count, 2);
+    assert.equal(r.windows[0].mean, 3); // (2+4)/2
+    assert.equal(r.windows[1].count, 1);
+    assert.equal(r.windows[1].mean, 6);
+  });
+
+  it("throws on the unimplemented exp form instead of silently ignoring it", () => {
+    // A lens that quietly skips a stage it was told to apply reports numbers
+    // under a lens that was never used.
+    assert.throws(
+      () => applyLens([ev(0, 1)], { window_ms: 1_000, decay: "exp(tau=300s)" }),
+      /not implemented/,
+    );
+  });
+
+  it("surfaces a malformed decay spec rather than observing unfiltered", () => {
+    assert.throws(() => applyLens([ev(0, 1)], { window_ms: 1_000, decay: "nonsense" }), /invalid decay/);
   });
 });

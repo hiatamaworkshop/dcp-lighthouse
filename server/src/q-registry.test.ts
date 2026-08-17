@@ -120,3 +120,133 @@ describe("QRegistry — swap history", () => {
     assert.equal(q.getObserve("test_result:v1", "fine")?.window_ms, 100);
   });
 });
+
+describe("QRegistry.set — observe-layer validation (write-time rejection)", () => {
+  /**
+   * Every lens the rulebook must refuse. Reused below to pin that the registry
+   * and applyLens refuse exactly the same set — see the drift test.
+   */
+  const INVALID: Array<[string, QObserveParams]> = [
+    ["zero window", { window_ms: 0 }],
+    ["negative window", { window_ms: -1 }],
+    ["NaN window", { window_ms: NaN }],
+    ["infinite window", { window_ms: Infinity }],
+    ["NaN origin", { origin: NaN }],
+    ["unknown align", { align: "middle" as never }],
+    ["zero downsample", { downsample_factor: 0 }],
+    ["fractional downsample", { downsample_factor: 1.5 }],
+    ["group_by not an array", { group_by: "agentId" as never }],
+    ["group_by of non-strings", { group_by: [1 as never] }],
+    ["unknown decay anchor", { decay_anchor: "yesterday" as never }],
+    ["malformed decay", { decay: "nonsense" }],
+    ["unitless decay duration", { decay: "step(cutoff=300)" }],
+    // MODEL.md §183's own example row. Accepting it here is what used to kill
+    // the process on the next tick.
+    ["exp decay (documented but unimplemented)", { decay: "exp(τ=300s)" }],
+  ];
+
+  for (const [name, params] of INVALID) {
+    it(`rejects ${name}`, () => {
+      const r = new QRegistry();
+      assert.throws(() => r.set("observe:test_result:v1", params));
+    });
+  }
+
+  it("leaves no trace of a rejected write — no store entry, no history, no listener call", () => {
+    // A swap history listing rows the registry refused would misdescribe what
+    // the observation layer was actually configured with.
+    const r = new QRegistry();
+    r.set("observe:test_result:v1", { window_ms: 1000 });
+    let notifications = 0;
+    r.onChange(() => notifications++);
+
+    assert.throws(() => r.set("observe:test_result:v1", { decay: "exp(tau=300s)" }));
+
+    assert.deepEqual(r.getObserve("test_result:v1"), { window_ms: 1000 }, "prior value must survive");
+    assert.equal(r.rows().length, 1, "rejected write must not appear in swap history");
+    assert.equal(notifications, 0, "rejected write must not notify listeners");
+  });
+
+  it("still accepts every valid lens shape", () => {
+    const r = new QRegistry();
+    const valid: QObserveParams[] = [
+      {},
+      { window_ms: 1000 },
+      { window_ms: 1000, align: "epoch", origin: 250 },
+      { window_ms: 1000, downsample_factor: 3 },
+      { window_ms: 1000, group_by: ["agentId", "domain"] },
+      { window_ms: 1000, decay: "step(cutoff=now-60s)", decay_anchor: "now" },
+    ];
+    for (const v of valid) r.set("observe:test_result:v1", v);
+    assert.equal(r.rows().length, valid.length);
+  });
+
+  it("tolerates the extra fields RuleBrain writes alongside the lens", () => {
+    // index.ts stores fromTs/toTs in the same row as the lens; applyLens
+    // ignores unknown fields, so rejecting them here would break a shipped flow.
+    const r = new QRegistry();
+    r.set("observe:test_result:v1#fine", {
+      window_ms: 1000,
+      group_by: ["agentId"],
+      fromTs: 1_000,
+      toTs: 2_000,
+    } as QObserveParams);
+    assert.equal(r.rows().length, 1);
+  });
+
+  it("does not apply lens rules to the other layers", () => {
+    // pipeline/schema rows have their own shapes; window_ms means nothing there.
+    const r = new QRegistry();
+    r.set("pipeline:*", { retention_window_ms: 120_000 });
+    r.set("schema:test_result:v1", { baseline_delta: 0.1 });
+    assert.equal(r.rows().length, 2);
+  });
+});
+
+describe("QRegistry / applyLens — one rulebook, no drift", () => {
+  it("the registry rejects exactly what applyLens rejects", async () => {
+    // The property that makes write-time validation sound: if the registry
+    // accepted a lens applyLens later refused, the crash path would be open
+    // again; if it refused one applyLens accepts, a usable lens would be
+    // unwritable. Two hand-maintained rule lists is how that gap appears, so
+    // pin the equivalence rather than the lists.
+    const { applyLens } = await import("./lens.js");
+    const events = [{ ts: 0, value: 1 }, { ts: 5, value: 3 }];
+
+    const candidates: QObserveParams[] = [
+      {},
+      { window_ms: 1000 },
+      { window_ms: 0 },
+      { window_ms: -1 },
+      { window_ms: NaN },
+      { window_ms: Infinity },
+      { origin: NaN },
+      { align: "middle" as never },
+      { downsample_factor: 0 },
+      { downsample_factor: 1.5 },
+      { downsample_factor: 2 },
+      { group_by: "agentId" as never },
+      { group_by: ["agentId"] },
+      { decay_anchor: "yesterday" as never },
+      { decay: "nonsense" },
+      { decay: "step(cutoff=300)" },
+      { decay: "step(cutoff=now-60s)" },
+      { decay: "exp(τ=300s)" },
+    ];
+
+    for (const lens of candidates) {
+      const label = JSON.stringify(lens);
+      const registryRejected = (() => {
+        try { new QRegistry().set("observe:t:v1", lens); return false; } catch { return true; }
+      })();
+      const applyRejected = (() => {
+        try { applyLens(events, lens); return false; } catch { return true; }
+      })();
+      assert.equal(
+        registryRejected,
+        applyRejected,
+        `disagreement on ${label}: registry rejected=${registryRejected}, applyLens rejected=${applyRejected}`,
+      );
+    }
+  });
+});

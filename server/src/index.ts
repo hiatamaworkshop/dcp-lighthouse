@@ -105,7 +105,26 @@ setInterval(() => {
           fromTs?: number;
           toTs?: number;
         };
-        registry.set(d.qProposal.scope, proposedParams);
+        // A Brain proposing an unusable lens must cost that Brain its proposal,
+        // not cost everyone the process. registry.set validates observe-layer
+        // writes (lens.ts's rulebook) and throws, and this call sits inside the
+        // tick's setInterval callback, where an escaping exception reaches
+        // uncaughtException and terminates the server. Rejecting the one
+        // decision keeps every other failure loud: this catch is scoped to
+        // applying a proposal, not wrapped around the tick.
+        //
+        // This matters more once BRAIN_MODE=claude lands (ROADMAP L3): an LLM
+        // Brain writing $Q is exactly the caller most likely to propose a lens
+        // the rulebook refuses.
+        try {
+          registry.set(d.qProposal.scope, proposedParams);
+        } catch (err) {
+          console.warn(
+            `[brain] proposal REJECTED for ${d.qProposal.scope}: ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+          continue;
+        }
         // Interval-specified replay (ROADMAP L2-2): re-observe only the segment
         // RuleBrain flagged, not the whole retention buffer. fromTs/toTs select
         // the segment; everything else in the proposal is the lens and is handed

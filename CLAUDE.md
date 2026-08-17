@@ -234,7 +234,26 @@ E2E 検証は完了済み (テスト 113 件、§10 基準を実測)。以後の
   - **実測**: 混合 1.77σ (出ない) → grouped 3.51σ (出る)。実走 replay は 2.48σ → 6.5σ
   - **代償** (仕様として記録): grouping は family を N→N×G にするので感度が下がる。
     細窓×grouping は 1 窓の n を薄くする。詳細は ROADMAP_BRIEF.md 2026-08-12
-  - 残るチェーン段は `downsample_factor` / `decay` / `agg_func`
+  - **`downsample_factor` 実装済 (2026-08-16)** — 十分統計量 (count/sum/sumSq) の厳密プーリングで
+    N 窓を 1 窓にマージ。curator の統計モデルは無変更で済む。`LensResult.window_ms` を
+    `window_ms * factor` にスケールして `windowEnd - windowStart === window_ms` を維持。
+    dashboard の `/control/coarse-downsample?factor=N` から live coarse view に書ける (2026-08-17)
+  - **`decay` 実装済 (2026-08-17、step 形のみ)** — `step(cutoff=now-60s)` は純粋なイベント
+    フィルタなので統計モデルに触れない。**`decay_anchor`** (`"segment_end"` 既定 / `"now"`) を
+    `align` と同じ思想で新設 — 壁時計アンカーだと過去セグメントの再観測 (MODEL.md §5) が
+    毎回違う答えになる (anchor-slide の decay 版)。decay は**イベント段**で効かせる
+    (MODEL.md §137 の並びは window の後だが、§229 の「1分より古いものを捨てる」自体が
+    イベントの操作であり、窓単位で落とすと境界窓の扱いが不定になる)。
+    `exp(τ=...)` は**パースするが throw** — 黙って無視すると「適用していないレンズ」の数値を
+    報告することになるため
+  - 残るチェーン段: **`decay` の exp 形** (加重十分統計量 + 有効標本サイズが
+    `WindowStat`/`poolStats`/`comparisonSE` 全体に要る = 対策A と同格の統計モデル変更)、
+    **`agg_func`** (下記の理由でより重い)
+  - **`agg_func` の本質的な難しさ (2026-08-17 に判明)**: z 検定のガウス仮定が変わることだけが
+    問題なのではない。median/percentile は**十分統計量からプールできない** (2 窓の median を
+    マージしても merged median にならない)。`downsample` と参照レンズのプーリングは
+    どちらもこの分解可能性に依存しているので、`agg_func: median` と `downsample_factor` の
+    組み合わせは現設計では**数学的に整合しない**。実装するなら生値保持か sketch (t-digest 等) が要る
 - **L5** retention 参照ゾーン (疎化)
 - 常設: 実データ派生 (非公開の姉妹プロジェクト) からの還元フィルタ — 「機構を行使/変更する or ドメイン非依存知見を生む」もののみ灯台の実証に数える
 

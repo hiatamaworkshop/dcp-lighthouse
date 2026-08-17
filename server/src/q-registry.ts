@@ -14,7 +14,13 @@
  *     <target> ::= "*" | "<schema-id>" | "<schema-id>#<view-tag>"
  *
  * It does NOT ride on FieldMapping (path resolution only) — see MODEL.md §148.
+ *
+ * Importing lens.ts for its validator introduces no cycle: lens.ts's reference
+ * back to this module is `import type` only, which the compiler erases, so the
+ * emitted lens.js has no runtime dependency on q-registry.js.
  */
+
+import { validateObserveParams } from "./lens.js";
 
 // ── Layer + scope ──────────────────────────────────────────────
 
@@ -54,6 +60,28 @@ export interface QScope {
  */
 export type WindowAlign = "first_event" | "epoch";
 
+/**
+ * What the decay stage measures age against (ROADMAP L4, lens-chain `decay`).
+ *
+ *   "segment_end" — the newest event in the segment handed to the lens. The
+ *                   default, and the only anchor under which re-observing a
+ *                   past segment is reproducible: the same events through the
+ *                   same lens give the same windows whenever it is run.
+ *   "now"         — wall-clock time at the moment applyLens is called. For a
+ *                   live view whose segment ends at roughly now, this is what
+ *                   MODEL.md §229's "drop everything older than 1 min" means
+ *                   literally.
+ *
+ * The distinction is the same one `align` draws, and it exists for the same
+ * reason. Retroactive re-observation is the model's whole point (MODEL.md §5),
+ * and under a wall-clock anchor a segment from an hour ago decays to nothing —
+ * the lens would answer differently every time it ran, which is the
+ * anchor-slide failure (ROADMAP_BRIEF.md 2026-07-29) reappearing on the decay
+ * stage instead of the window stage. So the reproducible anchor is the default
+ * and the clock-dependent one has to be asked for.
+ */
+export type DecayAnchor = "segment_end" | "now";
+
 /** $Q[observe] — how one schema's statistics are aggregated. */
 export interface QObserveParams {
   window_ms?: number;
@@ -69,7 +97,23 @@ export interface QObserveParams {
    * plain `floor(ts / window_ms) * window_ms` grid.
    */
   origin?: number;
-  decay?: string;            // e.g. "exp(τ=300s)" | "step(cutoff=now-60s)"
+  /**
+   * Recency weighting, in MODEL.md §228's syntax:
+   *
+   *   "step(cutoff=now-60s)"  — drop everything older than the cutoff
+   *   "exp(tau=300s)"         — exponential weighting (NOT YET IMPLEMENTED;
+   *                             applyLens throws rather than ignoring it)
+   *
+   * `now` in the string is symbolic: it names the anchor, and `decay_anchor`
+   * says what the anchor actually is. See DecayAnchor.
+   */
+  decay?: string;
+  /**
+   * What "now" means for the decay stage. Defaults to "segment_end" — the
+   * newest event in the segment being observed — so that re-observing a past
+   * segment yields the same answer whenever it is run.
+   */
+  decay_anchor?: DecayAnchor;
   group_by?: string[];       // e.g. ["agentId", "area"]
   /**
    * Merge every N consecutive window_ms grid slots into one output window
@@ -125,9 +169,25 @@ export class QRegistry {
    * Accepts either a parsed QScope or a raw "<layer>:<target>" string.
    * Each set is recorded in the swap history, even when it replaces a prior value,
    * then change listeners are notified.
+   *
+   * Observe-layer writes are validated against lens.ts's rulebook and REJECTED
+   * here rather than at read time. The read-time alternative is not equivalent:
+   * applyLens runs inside index.ts's tick loop and inside dashboard HTTP
+   * handlers, so an unusable lens sitting in the registry threw on every
+   * subsequent tick — and MODEL.md §183's own example row (`decay:
+   * "exp(τ=300s)"`) is one such lens, meaning a $Q row copied from the design
+   * doc took the process down. Validating on write converts that into a single
+   * failed write whose caller can report it.
+   *
+   * A rejected write leaves NO trace: validation runs before the store, the
+   * history append and the listener notification, so the swap history can
+   * never show a row that was not actually adopted. A history that lists
+   * writes the registry refused would misdescribe what the observation layer
+   * was configured with, which is the one thing that history exists to answer.
    */
   set(scope: QScope | string, params: QParams): void {
     const parsed = typeof scope === "string" ? parseScope(scope) : scope;
+    if (parsed.layer === "observe") validateObserveParams(params as QObserveParams);
     const key = formatScope(parsed);
     this.store.set(key, params);
     this.history.push(["$Q", key, params]);

@@ -116,7 +116,10 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       を実装。混合ストリームで 1.77σ にしか見えない単一エージェントの dip が、グループ内では 3.51σ になる。
       `downsample_factor` は dashboard の `/control/coarse-downsample?factor=N` から live coarse view に
       書き込めるよう配線済み (ライブ配信側のスパン計算に潜んでいた乗算漏れも合わせて修正)。
-      残るチェーン段は `decay` / `agg_func` (curator の統計モデルに触れるため未着手)
+      `decay` は step 形を実装済 (2026-08-17) — `decay_anchor` を `align` と同じ思想で新設し、
+      再現可能な `segment_end` を既定にした (壁時計アンカーだと過去セグメントの再観測が壊れる)。
+      残るのは `decay` の exp 形 (加重統計が要る) と `agg_func` (median/percentile は
+      十分統計量からプールできず、downsample・参照レンズが依存する分解可能性と噛み合わない)
 - [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)
 
-現在テスト計 225 件、全 green。
+現在テスト計 259 件、全 green。
