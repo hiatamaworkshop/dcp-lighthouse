@@ -7,7 +7,9 @@
  * timestamps to verify that replay arithmetic matches injection truth.
  *
  * Criteria (§10):
- *   AR  — rerouteSchema for agent-C fires within 5s of regression start
+ *   AR  — rerouteSchema for agent-C fires within 5s of regression start.
+ *          Asserted by the VIRTUAL-CLOCK test (production windowMs=5000/tick=1000ms);
+ *          the real-timer test beside it covers live wiring only, not latency.
  *   CG  — schemaUpdate for auth fires within 10s of gap start
  *   RC  — fine-window replay (1s) reveals burst that coarse (10s) averages away;
  *          burst window mean matches injection truth (≈0.10)
@@ -119,11 +121,42 @@ describe("E2E AR — production-config (virtual clock, 異議 1 fix)", () => {
   });
 });
 
-// ── AR: agent regression ─────────────────────────────────────────────────────
+// ── AR: agent regression, live real-timer wiring ─────────────────────────────
+//
+// This test's job is WIRING, not latency: it is the only AR test that drives
+// the real stack on real timers (generator scenario → adapter → brain tick
+// loop), so it proves the regression actually travels that path. The §10 "≤5s"
+// criterion is asserted by the virtual-clock test above, which is deterministic
+// AND uses production parameters (windowMs=5000, tick=1000ms). This test runs
+// windowMs=3000 / tick=200ms under timingScale=0.2, so its wall-clock latency
+// was never the production figure — asserting it here measured host load, not
+// the brain (measured 2026-08-18: 12.5% failure over 40 runs).
+//
+// The brain must be given a REAL baseline before the scenario starts. Its
+// baseline EWMA has α=0.05 (half-life ≈13.5 ticks) and is seeded from the first
+// window with ≥MIN_OBS_COUNT events. Ticking from t=0 seeds it off a nearly
+// empty 3s window, and the scenario's own baseline phase (10s × 0.2 = 2s) is far
+// too short to recover. Two independent fixes were needed, both measured:
+//
+//  1. Fill the window before the first observation. Without it the learned
+//     baseline reached 1.000, putting the threshold at 0.900 — only ~1σ under
+//     agent-C's true 0.95 — so it fired spuriously during warmup (where decide()
+//     is discarded), latched `rerouted`, and never saw a recovery tick to clear
+//     it. The test threw away the very decision it then asserted must appear.
+//     Spurious warmup fires: 6/40 → 0/40.
+//  2. Seed the generator. This was the only test in the file running an unseeded
+//     stream (flagged 2026-08-05, deferred as "needs a policy call"). Unseeded,
+//     the learned baseline landed anywhere in 0.794–1.000 — a threshold of
+//     0.69–0.90 straddling the 0.70 it must detect, so decisions fired on
+//     margins as thin as 0.001. Seeded, it converges to 0.955–0.960 (agent-C's
+//     true rate), giving threshold ≈0.82 against a regression window of ≈0.70:
+//     a ~3σ margin. Real timers still vary WHICH events land in which window,
+//     so the wiring is still exercised live — only the pass/fail content is
+//     pinned. Failures 5/40 → 0/30.
 
-describe("E2E AR — agent regression", { timeout: 15_000 }, () => {
-  test("rerouteSchema fires within 5s of regression start", async () => {
-    const gen = new MockStreamGenerator();
+describe("E2E AR — agent regression (live stack, real timers)", { timeout: 30_000 }, () => {
+  test("a real regression reaches a rerouteSchema decision for agent-C", async () => {
+    const gen = new MockStreamGenerator({ rng: seededRng(42) });
     // windowMs=3000: fills quickly enough but has lower passRate variance than 1s
     const adapter = new TestorAdapter({ windowMs: 3_000 });
     const brain = new RuleBrain();
@@ -132,17 +165,21 @@ describe("E2E AR — agent regression", { timeout: 15_000 }, () => {
     // timingScale=0.2: AR baseline=2s, regression window=6s (total scenario 8s)
     gen.start({ rate: 50, timingScale: 0.2 });
 
+    // Let the 3s adapter window fill with pure baseline BEFORE the brain's first
+    // observation, so the EWMA is seeded from a full ~37-event window (≈0.95)
+    // rather than from whatever a nearly empty one happened to show.
+    await sleep(3_200);
+
     // Kick off scenario in background (don't await — baseline sleep is 2s)
     void gen.runScenario("AR");
 
-    // Warm up the brain on healthy baseline (WARMUP_TICKS=10) by ticking at fine
-    // granularity until the scenario log confirms regression has actually started,
-    // instead of assuming a fixed sleep offset lines up with runAR's internal
-    // timer. The two were independent real-timer chains, and under CPU contention
-    // the assumed offset could land after regression already began, silently
-    // contaminating the learned baseline and producing a flaky latency reading
-    // (§10 measurement, not scenario logic — see ROADMAP_BRIEF.md 2026-08-05).
-    // This mirrors the real server, whose tick loop runs from boot.
+    // Tick until the scenario log confirms regression has actually started,
+    // rather than assuming a fixed sleep offset lines up with runAR's internal
+    // timer. The two are independent real-timer chains, and under CPU contention
+    // an assumed offset could land after regression already began, silently
+    // contaminating the learned baseline (ROADMAP_BRIEF.md 2026-08-05). The
+    // scenario's own 2s baseline phase doubles as EWMA settling time — ~20 ticks
+    // on full windows, comfortably past WARMUP_TICKS=10.
     let regressionStartMs: number | null = null;
     const warmupDeadline = Date.now() + 8_000;
     while (Date.now() < warmupDeadline) {
@@ -150,30 +187,34 @@ describe("E2E AR — agent regression", { timeout: 15_000 }, () => {
       brain.decide();
       const entry = gen.getScenarioLog().find((e) => e.phase === "regression_start");
       if (entry) { regressionStartMs = entry.ts; break; }
-      await sleep(50);
+      await sleep(100);
     }
     assert.ok(regressionStartMs !== null, "AR: scenario should log regression_start within 8s");
 
-    // Brain ticks every 200ms. With 3s window: passRate drops below the per-agent
-    // threshold (~0.85) after ~1.5s of regression events fill the window, then
-    // REGRESSION_TICKS=2 more ticks. Total from regressionStartMs ≈ 2s, within 5s.
     // Filter specifically for agent-C to ignore other agents' natural variance.
+    // The budget is generous on purpose: this asserts the decision arrives, not
+    // when. A tight budget here would only re-import host load as a failure.
     const decision = await waitForDecision(
       adapter,
       brain,
       (d) =>
         d.type === "rerouteSchema" &&
         (d.meta as { agentId?: string })?.agentId === "agent-C",
-      5_000,
+      8_000,
     );
 
     gen.stop();
 
-    assert.ok(decision !== null, "AR: rerouteSchema should fire within 5s of regression start");
-    const latencyMs = Date.now() - regressionStartMs!;
     assert.ok(
-      latencyMs <= 5_000,
-      `AR decision latency ${latencyMs}ms exceeds 5 000ms (§10 criterion)`,
+      decision !== null,
+      "AR: rerouteSchema for agent-C should reach the brain through the live stack",
+    );
+    assert.equal((decision.meta as { agentId?: string }).agentId, "agent-C");
+    const observed = (decision.meta as { passRate?: number }).passRate!;
+    const threshold = (decision.meta as { threshold?: number }).threshold!;
+    assert.ok(
+      observed < threshold,
+      `AR: decision should carry the evidence it fired on (passRate ${observed} < threshold ${threshold})`,
     );
   });
 });
