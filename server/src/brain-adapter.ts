@@ -39,3 +39,14 @@ export interface BrainAdapter {
   /** Human-readable description (for logging). */
   describe(): string;
 }
+
+/**
+ * A Brain the server can restart between scenario runs.
+ *
+ * reset() is deliberately NOT on BrainAdapter: it is the host's requirement
+ * (DashboardServer clears state on /demo/start), not part of what makes
+ * something a Brain, and a Brain with no per-scenario state has nothing to
+ * implement. Kept as a separate constraint so the dashboard can demand it
+ * without every adapter having to satisfy it.
+ */
+export type ResettableBrain = BrainAdapter & { reset(): void };

@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1/L2/L4 完了 (agg_func のみ保留)・L3 は A/B 実験と較正修正まで (ClaudeBrain 本体は未着手)・L5 未着手 (テスト292件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1/L2/L3/L4 完了 (agg_func のみ保留)・L5 未着手 (テスト328件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -145,8 +145,10 @@ dcp-lighthouse/
     ── ドメイン適用 (Phase 1) ──
       mock-stream-generator.ts   ← MockStreamGenerator
       testor-adapter.ts          ← test_result:v1 への正規化
-      brain-adapter.ts           ← interface 定義
-      rule-brain.ts              ← BrainAdapter 実装 (rule-based)。ClaudeBrain は未実装
+      brain-adapter.ts           ← interface 定義 (BrainAdapter / ResettableBrain)
+      rule-brain.ts              ← BrainAdapter 実装 (rule-based)。既定の primary
+      claude-brain.ts            ← BrainAdapter 実装 (LLM)。審議を tick から切り離す・提案の関所
+      shadow-brain.ts            ← primary/shadow 併走。shadow の決定は decide() から返さない
       bitpos.ts                  ← 固定仮想 area space
       dashboard.ts / index.ts    ← SSE bridge / 起動
     ── §12 A/B 実験 (L3 前段) ──
@@ -217,7 +219,26 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
 
 - **L1 ✅ (2026-07-03)** 足場固め — field findings の core 還元 (ts≤now クロック方針 / count 窓・有効性 / baseline ゲート+床)。テスト 113→121 件
 - **L2 ✅ (2026-07-03)** Brain write surface + replay 表面化 — $Q[schema] baseline_delta 昇格・区間指定 replay (fromTs/toTs)・dashboard 粗/細対比 UI。テスト 121→124 件。ブラウザ実地確認も完了 (2026-07-25)
-- **L3** **ClaudeBrain (本丸)** — §12 A/B 実験 → `BRAIN_MODE=claude` shadow 併走。LLM 起点の $Q 操作が核心。
+- **L3 ✅ (2026-08-18)** **ClaudeBrain (本丸)** — `claude-brain.ts` + `shadow-brain.ts`。
+  `BRAIN_MODE=claude` で RuleBrain と shadow 併走。テスト 292→328 件。設計判断 4 つ:
+  - **審議を tick から切り離した** — `BrainAdapter.decide()` は同期、tick は 1s、モデルはどちらでもない。
+    インターフェースを非同期化すると RuleBrain/dashboard/E2E が巻き添えなので、`observe()` が
+    審議を開始しうる (in-flight ラッチ + `minIntervalMs` の床 = 支出ガード 2 枚)、`decide()` は
+    到着済みを drain する。決定は誘発した snapshot の数 tick 後に出るので **`meta.snapshotTs` が
+    「何時のデータを考えていたか」を名乗る** (drain した tick ではない)
+  - **提案の関所を Brain 側に置いた** — `validateObserveParams` を通らないレンズは
+    BrainDecision に**ならない**。index.ts の `registry.set` catch は最後の砦であって関門ではなく、
+    決定ログには実際に取れる行動だけが並ぶべき。棄却は `stats.rejectedProposals` に数える
+    (不正提案を続けるモデルはノイズではなく findings)。同じ答えの中の他の決定は巻き添えにしない
+  - **shadow は per-tick 一致率を出さない** — ClaudeBrain は `minIntervalMs` ごとに 1 回しか
+    聞かれず答えも遅れる。RuleBrain は毎 tick。tick 単位の差分は**cadence の差**を測ってしまい、
+    「聞かれてすらいない tick で不一致」と採点する。2 本のストリームを記録し種別/対象で要約するに留める
+    (それ以上は未検証の照合規則を計測器に焼き込むこと = §12 再分析で 1 度踏んだ穴)
+  - **プロンプトがレンズの語彙を教える** — L3 の核心は「LLM が dip を分類できる」ではなく
+    「LLM が $Q を操作する」。`replayRequest` に `window_ms`/`group_by`/`downsample_factor`/`decay` を載せさせる
+  - 配線確認は **Messages API のスタブ** (`ANTHROPIC_BASE_URL` 差し替え) で課金ゼロで実施
+  - **primary への昇格判断は未着手** — shadow ログの証拠で行う
+  - 前段の §12 A/B 実験 (以下) は当初の仮説が検証できなかった件も含めそのまま記録:
   **前段 dry-run 完了 (2026-07-28)**: A/B fixture (RC/AR + QUIET 陰性対照、シード付き、`ab-fixture.ts`) +
   ハーネス dry-run 層 (`ab-harness.ts` — prompt 2 アーム/パーサ/採点器、`askFn` 注入シームで API 接触ゼロ)。
   テスト 132→140 件。

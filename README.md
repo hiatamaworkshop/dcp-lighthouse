@@ -94,7 +94,16 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 
 - [x] **L1** 足場固め — 実運用ストリームからの field findings を core に還元 (ts≤now クロック方針・count 窓の有効性フラグ・baseline 有効性ゲート+閾値フロア)
 - [x] **L2** Brain write surface + replay 表面化 — `$Q[schema].baseline_delta` 昇格 (RuleBrain がレジストリ経由で読み、dashboard から書ける)・RC replayRequest の区間指定 (fromTs/toTs)・dashboard 粗(live)/細(replay) 対比 UI
-- [ ] **L3 (本丸)** ClaudeBrain — §12 A/B 実験 (数列のみ vs snapshot package) → `BRAIN_MODE=claude` で RuleBrain と shadow 併走。LLM 起点の $Q 操作が核心。
+- [x] **L3 (本丸)** ClaudeBrain — `server/src/claude-brain.ts` + `server/src/shadow-brain.ts`。
+      `BRAIN_MODE=claude` で RuleBrain と shadow 併走 (RuleBrain がハンドルを握ったまま、
+      LLM の提案は記録のみ)。プロンプトが**レンズの語彙を教える**ので `replayRequest` に
+      `window_ms`/`group_by`/`downsample_factor`/`decay` を載せられる = LLM 起点の $Q 操作。
+      同期 `decide()` に非同期の審議を載せるため**審議を tick から切り離した** —
+      決定は誘発した snapshot の数 tick 後に出て、`meta.snapshotTs` がどの時点を
+      考えていたかを名乗る。`validateObserveParams` を通らないレンズは**決定になる前に棄却**
+      (index.ts の catch は最後の砦であって関門ではない)。詳細は ROADMAP_BRIEF.md 2026-08-18。
+      **ClaudeBrain を primary に昇格する判断は未着手** — shadow ログの証拠で行う。
+      前段の §12 A/B 実験 (数列のみ vs snapshot package) は下記の通り:
       前段の A/B 実験は実行済みだが、**当初の仮説「提示形式が判断を助ける」は検証できていない** (再分析で下方修正)。
       副産物として curator の較正欠陥を検出し、Šidák 補正 (対策A) で package 単位の誤警報率 29%→6.85%、
       さらに**連続性補正 (2026-08-17) で 6.85%→4.40%** = 設計値 4.55% に着地させた。
@@ -129,4 +138,22 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       十分統計量からプールできず、downsample・参照レンズが依存する分解可能性と噛み合わない)
 - [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)
 
-現在テスト計 292 件、全 green。
+現在テスト計 328 件、全 green。
+
+## BRAIN_MODE
+
+```sh
+npm run dev                                  # BRAIN_MODE=rule (既定)。RuleBrain 単独
+ANTHROPIC_API_KEY=sk-... BRAIN_MODE=claude npm run dev   # ClaudeBrain を shadow 併走
+```
+
+shadow モードでは **RuleBrain の決定だけが適用され**、ClaudeBrain の提案は
+`[shadow] (not applied) ...` として記録されるだけ。環境変数:
+
+| | 既定 | |
+|---|---|---|
+| `BRAIN_MODE` | `rule` | `rule` \| `claude` |
+| `CLAUDE_BRAIN_MODEL` | `claude-sonnet-5` | 上位で回すなら `claude-opus-5` |
+| `CLAUDE_BRAIN_INTERVAL_MS` | `15000` | 審議の下限間隔 (支出ガード) |
+
+`BRAIN_MODE=claude` は**実課金**。キー未設定・不正な `BRAIN_MODE` は起動時に落ちる。

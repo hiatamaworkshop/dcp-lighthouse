@@ -20,7 +20,11 @@ import { bindPipelineRetention } from "./q-retention-binding.js";
 import { ObservationOverlay } from "./lens-view.js";
 import { SnapshotCurator } from "./snapshot-curator.js";
 import { RuleBrain } from "./rule-brain.js";
+import { ClaudeBrain } from "./claude-brain.js";
+import { ShadowBrain } from "./shadow-brain.js";
+import { makeAnthropicAsk } from "./anthropic-ask.js";
 import { DashboardServer } from "./dashboard.js";
+import type { ResettableBrain } from "./brain-adapter.js";
 import type { TestEvent } from "./mock-stream-generator.js";
 
 // ── $Q bootstrap ─────────────────────────────────────────────────────────────
@@ -57,7 +61,48 @@ const adapter    = new TestorAdapter({ windowMs: 5_000 });
 const buffer     = new RetentionBuffer<TestEvent>(testEventExtractor, { retentionWindowMs: RETENTION_WINDOW_MS });
 const overlay    = new ObservationOverlay(registry);
 const curator    = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
-const brain      = new RuleBrain(registry);
+const ruleBrain  = new RuleBrain(registry);
+
+/**
+ * BRAIN_MODE (ROADMAP L3) — "rule" (default) or "claude".
+ *
+ * "claude" does NOT replace RuleBrain: it runs ClaudeBrain in shadow beside it
+ * (see shadow-brain.ts). RuleBrain keeps the wheel, so a $Q write still comes
+ * from a rule that has been calibrated, while the LLM's proposals are recorded
+ * for comparison. Promoting the shadow to primary is a later, separate call
+ * that should be made on evidence from these logs.
+ *
+ * A missing key fails at boot rather than on the first deliberation: the
+ * failure would otherwise be a warning 15 seconds into a running server, which
+ * reads as "the model had nothing to say".
+ */
+const BRAIN_MODE = process.env.BRAIN_MODE ?? "rule";
+const CLAUDE_BRAIN_MODEL = process.env.CLAUDE_BRAIN_MODEL ?? "claude-sonnet-5";
+/** Floor between deliberations. 15s at TICK_MS=1000 is one call per 15 ticks. */
+const CLAUDE_BRAIN_INTERVAL_MS = Number(process.env.CLAUDE_BRAIN_INTERVAL_MS ?? 15_000);
+
+let shadowBrain: ShadowBrain | undefined;
+let brain: ResettableBrain = ruleBrain;
+
+if (BRAIN_MODE === "claude") {
+  const claudeBrain = new ClaudeBrain({
+    askFn: makeAnthropicAsk({ model: CLAUDE_BRAIN_MODEL }),
+    minIntervalMs: CLAUDE_BRAIN_INTERVAL_MS,
+    onError: (err) => console.warn(`[shadow] deliberation failed: ${err.message}`),
+  });
+  shadowBrain = new ShadowBrain(ruleBrain, claudeBrain, {
+    onShadowError: (err) => console.warn(`[shadow] ${err.message}`),
+  });
+  brain = shadowBrain;
+  console.log(
+    `[lighthouse] BRAIN_MODE=claude — ${CLAUDE_BRAIN_MODEL} running in shadow ` +
+      `beside RuleBrain, deliberating at most every ${CLAUDE_BRAIN_INTERVAL_MS}ms. ` +
+      `Only RuleBrain's decisions are applied.`,
+  );
+} else if (BRAIN_MODE !== "rule") {
+  throw new Error(`BRAIN_MODE must be "rule" or "claude", got "${BRAIN_MODE}"`);
+}
+
 const dashboard  = new DashboardServer(generator, adapter, brain, registry, curator, overlay, buffer);
 
 // Two parallel observation views
@@ -89,6 +134,9 @@ generator.onEvent((event) => {
 // ── Tick loop (Brain + dashboard broadcast) ───────────────────────────────────
 
 const TICK_MS = 1000;
+
+/** Highest ShadowEntry.seq already printed (see the shadow block below). */
+let shadowLogCursor = -1;
 
 setInterval(() => {
   const snapshot = adapter.snapshot();
@@ -158,6 +206,22 @@ setInterval(() => {
         dashboard.broadcastReplay(pkg);
       }
     }
+  }
+
+  // Shadow log (ROADMAP L3). Printed as it arrives rather than only summarised
+  // at exit, so a shadow run can be watched live next to the applied decisions
+  // above. These are PROPOSALS: nothing here reached registry.set.
+  if (shadowBrain !== undefined) {
+    // Keyed on ShadowEntry.seq, not on an array index: the log is bounded and
+    // trims from the front, so an index-based cursor would stop matching new
+    // entries after the first trim and the channel would silently go quiet.
+    for (const e of shadowBrain.getLog()) {
+      if (e.seq <= shadowLogCursor || e.source !== "shadow") continue;
+      const q = e.decision.qProposal ? ` ${JSON.stringify(e.decision.qProposal.params)}` : "";
+      console.log(`[shadow] (not applied) ${e.decision.type}${q}: ${e.decision.reason}`);
+    }
+    const newest = shadowBrain.getLog().at(-1);
+    if (newest !== undefined) shadowLogCursor = newest.seq;
   }
 
   dashboard.broadcast(snapshot, decisions);

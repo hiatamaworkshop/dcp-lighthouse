@@ -68,8 +68,10 @@ export function makeAnthropicAsk(opts: AnthropicAskOptions): AskFn {
   const apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error(
-      "ANTHROPIC_API_KEY is not set. 対策B trials call the Anthropic API directly " +
-        "and need a real key (see ROADMAP_BRIEF.md 2026-07-28 実行基盤について).",
+      "ANTHROPIC_API_KEY is not set. Both callers of this module reach the " +
+        "Anthropic API directly and need a real key: 対策B trials " +
+        "(ROADMAP_BRIEF.md 2026-07-28 実行基盤について) and BRAIN_MODE=claude " +
+        "(ROADMAP L3, ClaudeBrain in shadow).",
     );
   }
   const client = new Anthropic({ apiKey });

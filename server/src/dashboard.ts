@@ -21,7 +21,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { MockStreamGenerator } from "./mock-stream-generator.js";
 import type { TestorAdapter, STSnapshot } from "./testor-adapter.js";
-import type { RuleBrain } from "./rule-brain.js";
+import type { ResettableBrain } from "./brain-adapter.js";
 import type { QRegistry, QObserveParams } from "./q-registry.js";
 import type { SnapshotCurator } from "./snapshot-curator.js";
 import type { ObservationOverlay } from "./lens-view.js";
@@ -211,7 +211,9 @@ export class DashboardServer {
   constructor(
     private readonly generator: MockStreamGenerator,
     private readonly adapter: TestorAdapter,
-    private readonly brain: RuleBrain,
+    // Widened from RuleBrain for ROADMAP L3: under BRAIN_MODE=claude this is a
+    // ShadowBrain wrapping RuleBrain. reset() is all the dashboard ever used.
+    private readonly brain: ResettableBrain,
     private readonly registry: QRegistry,
     private readonly curator: SnapshotCurator,
     private readonly overlay: ObservationOverlay,

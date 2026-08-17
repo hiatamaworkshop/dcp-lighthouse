@@ -2985,3 +2985,81 @@ RC 35.18/38.00σ、AR 21.39〜23.48σ、fp シード集合も不変。テスト 
 
 実測: 単体 50 連続 green、フルスイート 7 連続 green (292 件)。
 **代償**: 窓を満たす 3.2 秒ぶんこのテストが遅くなった (約 4s → 約 8s)。
+
+---
+
+## 2026-08-18 — L3 本体: `ClaudeBrain` + shadow 併走 (`BRAIN_MODE=claude`)
+
+L3 の核心は「LLM が dip を分類できる」ではなく **「LLM が $Q を操作する」**。
+なので ClaudeBrain のプロンプトは**レンズの語彙そのもの**を教え、
+`replayRequest` に `window_ms` / `group_by` / `downsample_factor` / `decay` /
+`decay_anchor` / `align` / `origin` を載せさせる。保持した生データを別レンズで
+見直す — MODEL.md §5 の操作を、ルールではなくモデルが起動する。
+
+テスト 292 → **328 件** (claude-brain 21 + shadow-brain 15)。
+
+### ① 同期 `decide()` に非同期の思考をどう載せるか
+
+`BrainAdapter.decide()` は同期、tick は 1s、モデル呼び出しはどちらでもない。
+インターフェースを非同期化すると RuleBrain・dashboard・E2E が全部巻き添えになるので、
+**審議を tick から切り離した**:
+
+- `observe()` は審議を**開始することがある** (in-flight ラッチ + `minIntervalMs` の床)
+- `decide()` は**到着済みのものを drain する**
+
+結果として決定はそれを誘発した snapshot の**数 tick 後**に出てくる。これは隠さず
+`meta.snapshotTs` に「何時のデータについて考えていたか」を載せる
+(drain した tick ではなく)。**考える Brain は答えるのに時間がかかる**、が正しいモデル。
+
+**支出のガードが 2 枚**: TICK_MS=1000 で無防備だと毎秒 1 コールになる。
+`minIntervalMs` (既定 15s) が床、in-flight ラッチが「遅いコールの後ろに 2 本目を積まない」。
+
+### ② 提案の関所を Brain 側に置いた
+
+index.ts には既に「LLM Brain は rulebook が拒むレンズを提案しうる最有力候補」
+という注記と `registry.set` の catch がある。**あれは最後の砦であって関門ではない**。
+`validateObserveParams` を通らないレンズは **ClaudeBrain の中で棄却され、
+そもそも BrainDecision にならない** — 決定ログには「実際に取れる行動」だけが並ぶ。
+棄却は `stats.rejectedProposals` に**数える** (黙って捨てない)。
+不正なレンズを提案し続けるモデルは**ノイズではなく findings** だから。
+
+同じ答えの中の他の決定は巻き添えにしない (テストで固定)。
+
+### ③ shadow は「per-tick 一致率」を出さない
+
+出したくなるが、**出すと cadence の差を測ってしまう**。ClaudeBrain は
+`minIntervalMs` ごとに 1 回しか聞かれず、しかも答えが数 tick 遅れる。
+RuleBrain は毎 tick 聞かれる。tick 単位で差分を取ると
+**「聞かれてすらいない tick で不一致」と採点される**。
+なので ShadowBrain は 2 本のタイムスタンプ付きストリームを記録し、
+種別と対象 (agentId/domain) で要約するに留める。
+それ以上 (同じ回帰を指したか?) は窓許容つきの対応付けが要り、
+**検証していない照合規則を計測器に焼き込むこと**になる — §12 再分析で 1 度踏んだ穴。
+
+**封じ込め**: shadow の決定は `decide()` から返らない (RuleBrain がハンドルを握ったまま)。
+shadow が throw しても tick は死なない。ただし**黙って死なせない** —
+死んだ shadow は「全部に同意した shadow」と見分けがつかず、最も自分に都合のいい失敗になる。
+
+### ④ 実配線の確認 (ユニットテストが届かない範囲)
+
+`index.ts` の配線はユニットテストの外なので、**Messages API のスタブを立てて**
+実際に起動して確かめた (課金ゼロ)。`ANTHROPIC_BASE_URL` を差し替えるだけで通る。
+
+- 起動ログ・`[shadow] (not applied) ...` の出力を確認
+- スタブが返した 4 決定のうち **2 つ (未知 type と `window_ms:-1`) が関所で落ちて 2 つだけ出た**
+- RuleBrain 側の適用は 0 件 (シナリオ未実行の静穏時) = 正常
+- 既定 (`BRAIN_MODE=rule`) の起動も無傷、`[shadow]` 行は出ない
+- 不正な `BRAIN_MODE`・API キー無しは**起動時に落ちる** (15 秒後の warning にすると
+  「モデルが何も言わなかった」と区別がつかない)
+
+### 途中で潰した自分のバグ
+
+shadow ログを index.ts で tail する最初の実装が**配列インデックスのカーソル**だった。
+ログは上限付きで**前から捨てる**ので、trim が始まった瞬間に length が伸びなくなり
+**カーソルが追いつかず黙る**。`ShadowEntry.seq` (単調・再利用なし) を足して回帰テストを書いた。
+
+### 残り
+
+- **ClaudeBrain を primary に昇格する判断は未着手**。それはこのログから出す証拠でやる話
+- `agg_func` (L4 の残り) は依然ブロック中 — median は十分統計量からプールできない
+- L5 retention 参照ゾーン 未着手
