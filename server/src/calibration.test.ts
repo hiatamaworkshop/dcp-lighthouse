@@ -25,53 +25,58 @@ import { familyWiseAlpha } from "./snapshot-curator.js";
 const SEEDS = 500;
 
 describe("curator calibration — false alarms on a null stream", () => {
-  it("stays far below the pre-対策A rate and well above silence, on the pilot's own data shape", () => {
-    // The pilot streams pass/fail at a ~0.95 pass rate, so this is the shape
-    // the shipped detector actually meets.
+  const design = familyWiseAlpha(2.0);
+
+  it("sits on the design target on the pilot's own data shape", () => {
+    // The pilot streams pass/fail at a ~0.95 pass rate with ~100 events per
+    // window, so this is the shape the shipped detector actually meets. It read
+    // 6.85% here until the continuity correction of 2026-08-17; 29% before 対策A.
     const r = measureFalseAlarmRate({ seeds: SEEDS });
     const summary = formatCalibration("shipped shape", r);
 
     assert.ok(r.trials > SEEDS * 0.9, `most trials must be scorable — ${summary}`);
-    // 29% was the defect 対策A corrected; anything approaching it is a regression.
-    assert.ok(r.rate < 0.10, `false-alarm rate too high — ${summary}`);
-    // A detector that never fires would sail past the bound above. The design
-    // target is ~4.55%, so a rate near zero means something stopped working.
+    assert.ok(
+      Math.abs(r.rate - design) < 0.015,
+      `shipped shape should sit near the ${(100 * design).toFixed(2)}% design target — ${summary}`,
+    );
+    // A detector that never fires would satisfy any upper bound, so the lower
+    // side is asserted separately rather than folded into the band above.
     assert.ok(r.rate > 0.02, `false-alarm rate suspiciously low, detector may be silenced — ${summary}`);
   });
 
-  it("matches the design target on SYMMETRIC data — the model itself is calibrated", () => {
-    // Separating this from the case above is the point. On symmetric values the
-    // measured rate sits on the design target, which says the Šidák budget and
-    // the standard error are right. The gap that remains on the pilot's skewed
-    // shape is therefore a normal-approximation problem, not a broken
-    // comparator — see the skew test below.
-    const design = familyWiseAlpha(2.0);
-    const r = measureFalseAlarmRate({
-      seeds: SEEDS,
-      shape: { passRate: 0.5 },
-    });
+  it("errs conservative on SYMMETRIC data — the cost of the correction, pinned", () => {
+    // MEASURED, NOT DESIRED. The continuity correction is derived from the
+    // lattice, not from the skew, so it applies to symmetric pass/fail data too
+    // — where the normal approximation needed no help. The rate lands under
+    // design instead of on it (2.9% vs 4.55%). That is the price paid for the
+    // skewed case, and it is asserted so a future refinement that removes it
+    // shows up here rather than passing unnoticed.
+    const r = measureFalseAlarmRate({ seeds: SEEDS, shape: { passRate: 0.5 } });
     const summary = formatCalibration("symmetric", r);
-    assert.ok(
-      Math.abs(r.rate - design) < 0.03,
-      `symmetric-data rate should sit near the ${(100 * design).toFixed(2)}% design target — ${summary}`,
-    );
+    assert.ok(r.rate <= design, `symmetric data should not exceed design — ${summary}`);
+    assert.ok(r.rate > 0.01, `conservative is not the same as silent — ${summary}`);
   });
 
-  it("documents the open skew gap rather than pretending it is not there", () => {
-    // MEASURED, NOT DESIRED (ROADMAP_BRIEF.md 2026-08-17): at a 0.95 pass rate
-    // the window mean's sampling distribution is left-skewed, so the normal
-    // approximation understates the lower tail and dips fire more often than
-    // the nominal alpha. Measured at n=2000: 6.85% overall, split 136 dip to 1
-    // spike. This asserts the imbalance still exists so that a future fix
-    // (skewness correction via a pooled third moment) shows up here as a
-    // failure demanding the numbers be re-read, rather than passing silently.
-    const skewed = measureFalseAlarmRate({ seeds: SEEDS, shape: { passRate: 0.95 } });
-    const symmetric = measureFalseAlarmRate({ seeds: SEEDS, shape: { passRate: 0.5 } });
-    assert.ok(
-      skewed.rate > symmetric.rate,
-      `the known skew excess should still be visible — ` +
-        `${formatCalibration("skewed", skewed)} vs ${formatCalibration("symmetric", symmetric)}`,
-    );
+  it("documents where the correction still does NOT close the gap", () => {
+    // MEASURED, NOT DESIRED (ROADMAP_BRIEF.md 2026-08-17). Half a lattice step
+    // is the right first-order term, not the whole error. Two regimes still
+    // overshoot, both because the sampling distribution is further from normal
+    // than one step accounts for:
+    //
+    //   extreme skew  p=0.99, ~100 events/window : 14.6% -> 8.1%
+    //   thin windows  p=0.95, ~20 events/window  : 13.5% -> 6.9%
+    //
+    // Halved in each case, still above design. Asserting the residual keeps the
+    // claim in the devlog honest: this fixed the shipped operating point, it did
+    // not make the detector calibrated everywhere.
+    const skewed = measureFalseAlarmRate({ seeds: SEEDS, shape: { passRate: 0.99 } });
+    const thin = measureFalseAlarmRate({ seeds: SEEDS, shape: { eventsPerSpan: 200 } });
+    assert.ok(skewed.rate > design, `extreme skew should still overshoot — ${formatCalibration("p=0.99", skewed)}`);
+    assert.ok(thin.rate > design, `thin windows should still overshoot — ${formatCalibration("n~20", thin)}`);
+    // ...but not by as much as before the correction, which is the other half
+    // of the claim.
+    assert.ok(skewed.rate < 0.12, `extreme skew regressed past its corrected level — ${formatCalibration("p=0.99", skewed)}`);
+    assert.ok(thin.rate < 0.11, `thin windows regressed past their corrected level — ${formatCalibration("n~20", thin)}`);
   });
 });
 
@@ -86,6 +91,11 @@ describe("curator calibration — power", () => {
   it("degrades gracefully rather than cliff-edging as the effect shrinks", () => {
     // 対策D's finding, kept as a standing shape check: Šidák preserves
     // family-wise alpha, not power, and the cost lands near the noise floor.
+    // The continuity correction charges here too — a 0.95→0.90 drop was detected
+    // in 52.2% of trials before it and 44.5% after. That trade is why the exact
+    // conditional (Fisher) alternative was measured and rejected: it never
+    // exceeds design, but takes the same figure to 27.4% (ROADMAP_BRIEF.md
+    // 2026-08-17).
     const strong = measureDetectionRate(0.6, { seeds: SEEDS });
     const weak = measureDetectionRate(0.9, { seeds: SEEDS });
     assert.ok(strong.rate > weak.rate, "a larger effect must be detected at least as often");

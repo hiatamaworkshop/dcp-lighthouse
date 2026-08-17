@@ -413,14 +413,22 @@ export class SnapshotCurator {
       const tag = unit.group !== undefined ? `[${unit.group}] ` : "";
       const inGroup = unit.group !== undefined ? ` in group "${unit.group}"` : "";
 
-      collectUnreachableTails(unit, effectiveZThreshold, unreachableTails);
+      // The gate is applied to a continuity-corrected z where the data is
+      // lattice-valued (see detectLattice); the z that gets REPORTED stays the
+      // raw one, for the same reason the Šidák correction is not folded into it
+      // — the correction belongs to the tail probability, not to the effect
+      // size Brain reads.
+      const latticeStep = detectLattice(unit.windows, unit.refWindows);
+
+      collectUnreachableTails(unit, effectiveZThreshold, latticeStep, unreachableTails);
 
       for (const w of unit.windows) {
         if (w.count < MIN_VALID_COUNT) continue;
         const se = comparisonSE(w, unit.ref);
         if (!(se > 0)) continue;
         const z = (w.mean - unit.ref.mean) / se;
-        if (z >= effectiveZThreshold) {
+        const gated = gateZ(w, unit.ref, se, latticeStep);
+        if (gated >= effectiveZThreshold) {
           tiles.push({
             label: `${tag}spike at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${unit.ref.mean.toFixed(3)})`,
             shapeTag: "spike",
@@ -431,7 +439,7 @@ export class SnapshotCurator {
             magnitude: z,
             ...(unit.group !== undefined ? { group: unit.group } : {}),
           });
-        } else if (z <= -effectiveZThreshold) {
+        } else if (gated <= -effectiveZThreshold) {
           tiles.push({
             label: `${tag}dip at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${unit.ref.mean.toFixed(3)})`,
             shapeTag: "dip",
@@ -542,6 +550,15 @@ interface ScoringUnit {
   group?: string;
   windows: WindowStat[];
   ref: RefStats;
+  /**
+   * The reference's windows, not just their pooled summary.
+   *
+   * `ref` is everything the z-score needs, but `detectLattice` asks a question
+   * pooling throws away — whether the underlying values are two-valued, and
+   * across what span. Answering it from both sides makes the answer robust to an
+   * observation that happens to have seen only one of the two values.
+   */
+  refWindows: WindowStat[];
 }
 
 /**
@@ -561,7 +578,10 @@ function buildScoringUnits(
 ): { units: ScoringUnit[]; unscoredGroups: string[] } {
   const obsGroups = observation.groups;
   if (obsGroups === undefined || obsGroups.length === 0) {
-    return { units: [{ windows: observation.windows, ref: packageRef }], unscoredGroups: [] };
+    return {
+      units: [{ windows: observation.windows, ref: packageRef, refWindows: reference.windows }],
+      unscoredGroups: [],
+    };
   }
 
   const refByLabel = new Map<string, LensGroup>(
@@ -575,11 +595,11 @@ function buildScoringUnits(
     const ref = refGroup !== undefined ? poolStats(refGroup.windows) : undefined;
     // Same usability test the package applies: fewer than 2 pooled events means
     // there is no variance, so no comparison exists to make.
-    if (ref === undefined || ref.effectiveN < 2 || !Number.isFinite(ref.variance)) {
+    if (refGroup === undefined || ref === undefined || ref.effectiveN < 2 || !Number.isFinite(ref.variance)) {
       unscoredGroups.push(g.label);
       continue;
     }
-    units.push({ group: g.label, windows: g.windows, ref });
+    units.push({ group: g.label, windows: g.windows, ref, refWindows: refGroup.windows });
   }
 
   return { units, unscoredGroups };
@@ -656,6 +676,7 @@ function poolStats(windows: WindowStat[]): RefStats {
 function collectUnreachableTails(
   unit: { windows: WindowStat[]; ref: RefStats; group?: string },
   requiredZ: number,
+  latticeStep: number | null,
   out: UnreachableTail[],
 ): void {
   const scorable = unit.windows.filter((w) => w.count >= MIN_VALID_COUNT && w.range !== undefined);
@@ -667,8 +688,13 @@ function collectUnreachableTails(
 
   const observedMax = Math.max(...scorable.map((w) => w.range!.max));
   const observedMin = Math.min(...scorable.map((w) => w.range!.min));
-  const maxZ = (observedMax - unit.ref.mean) / se;
-  const minZ = (observedMin - unit.ref.mean) / se;
+  // Scored through the same gate, continuity correction included. Asking a
+  // different question here than the gate asks would be a slow way to start
+  // declaring reachable tails unreachable, or worse, the reverse.
+  const ceiling: WindowStat = { ...best, mean: observedMax };
+  const floor: WindowStat = { ...best, mean: observedMin };
+  const maxZ = gateZ(ceiling, unit.ref, se, latticeStep);
+  const minZ = gateZ(floor, unit.ref, se, latticeStep);
 
   const group = unit.group !== undefined ? { group: unit.group } : {};
   if (maxZ < requiredZ) {
@@ -710,6 +736,86 @@ function collectUnreachableTails(
  */
 function comparisonSE(w: WindowStat, ref: RefStats): number {
   return Math.sqrt(ref.variance * (1 / effectiveN(w) + 1 / ref.effectiveN));
+}
+
+/**
+ * The spacing of the value lattice this comparison lives on, or null when the
+ * data is not verifiably lattice-valued.
+ *
+ * The z-score treats the window mean as continuous. It is not: on a pass/fail
+ * stream a window of n events can only produce n+1 distinct means, spaced
+ * `(max-min)/n` apart, and the gate falls wherever it falls between two of them.
+ * That coarseness is the larger half of the calibration gap measured on
+ * 2026-08-17 — see ROADMAP_BRIEF.md, where a smooth skewness correction
+ * (Cornish-Fisher) was tried first and failed precisely because the error it
+ * models is not smooth.
+ *
+ * Two-valuedness is DETECTED, not assumed. If every event is either `min` or
+ * `max`, then the mean fixes the mix, and the mean of squares is forced:
+ *
+ *     E[v]  = min + q·(max-min),  q = fraction at max
+ *     E[v²] = min² + q·(max²-min²)
+ *
+ * so `sumSq/count` must equal that second expression. Checking the identity
+ * costs nothing (both quantities are already carried as sufficient statistics)
+ * and keeps the curator domain-blind in the way the rest of the module is: it
+ * asks the data a question rather than assuming values are pass/fail, and
+ * measurably declines on continuous data — a uniform[0,1] stream scores
+ * bit-identically with and without this path.
+ *
+ * Returns null under a weighting lens: a weighted sum is not confined to a
+ * lattice, so the premise fails even when the raw values are two-valued.
+ */
+function detectLattice(observation: readonly WindowStat[], reference: readonly WindowStat[]): number | null {
+  let min = Infinity;
+  let max = -Infinity;
+  let sumSq = 0;
+  let sum = 0;
+  let count = 0;
+
+  for (const w of [...observation, ...reference]) {
+    if (w.count === 0) continue;
+    if (w.range === undefined || w.weights !== undefined) return null;
+    min = Math.min(min, w.range.min);
+    max = Math.max(max, w.range.max);
+    sumSq += w.sumSq;
+    sum += w.mean * w.count;
+    count += w.count;
+  }
+  if (count === 0 || !(max > min)) return null;
+
+  const q = (sum / count - min) / (max - min);
+  const predicted = min * min + (max * max - min * min) * q;
+  const tolerance = 1e-9 * Math.max(1, Math.abs(predicted));
+  return Math.abs(sumSq / count - predicted) <= tolerance ? max - min : null;
+}
+
+/**
+ * The window's deviation from the reference, in standard errors, with a
+ * continuity correction applied when the data is lattice-valued.
+ *
+ * Half a step of the MEAN's lattice — `latticeStep / count`, since the sum moves
+ * by `latticeStep` and the mean by that over n — is taken off the magnitude of
+ * the deviation, never off its sign, and never past zero. This is the textbook
+ * correction for approximating a discrete tail by a continuous one, and it is
+ * the direction that matters here: it makes the gate harder to clear, which is
+ * what a rate measured ABOVE its design target needs.
+ *
+ * `count` and not `effectiveN`: the lattice argument is about how many discrete
+ * events the sum is built from. `detectLattice` has already refused to answer
+ * under weighting, so the two are the same number wherever this runs.
+ *
+ * Measured at the pilot's own shape (0.95 pass, ~100 events/window, 2000 null
+ * trials): 6.85% package false-alarm rate against a 4.55% design target, down to
+ * 4.40% with this correction. The full sweep, including where it does NOT close
+ * the gap (p=0.99, and windows under ~50 events), is in ROADMAP_BRIEF.md
+ * 2026-08-17.
+ */
+function gateZ(w: WindowStat, ref: RefStats, se: number, latticeStep: number | null): number {
+  const deviation = w.mean - ref.mean;
+  if (latticeStep === null || w.count === 0) return deviation / se;
+  const shrunk = Math.max(0, Math.abs(deviation) - 0.5 * (latticeStep / w.count));
+  return (Math.sign(deviation) * shrunk) / se;
 }
 
 /**

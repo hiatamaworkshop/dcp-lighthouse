@@ -613,6 +613,58 @@ describe("SnapshotCurator — explicit reference lens", () => {
 
 // ── Comparator soundness (2026-07-25 self-review regressions) ───────────────
 
+// ── Continuity correction (2026-08-17) ──────────────────────────────────────
+
+describe("SnapshotCurator — the gate corrects for lattice-valued data, and only then", () => {
+  // Background in ROADMAP_BRIEF.md 2026-08-17: on pass/fail data a window of n
+  // events can only produce n+1 distinct means, and treating that staircase as
+  // continuous put the package false-alarm rate at 6.85% against a 4.55%
+  // design. Half a lattice step comes off the deviation before the gate sees it.
+  //
+  // The property that makes this honest rather than a fudge factor is that the
+  // lattice is DETECTED from sufficient statistics, so the correction switches
+  // itself off on data it does not apply to. Both cases below are the same
+  // stream to three decimal places; the only thing that differs is whether the
+  // values are two-valued.
+  const REF = applyLens(
+    Array.from({ length: 300 }, (_, i) => ev(i * 10, i % 25 === 0 ? 0 : 1)), // 0.96
+    { window_ms: 1000 },
+  );
+  // 91/100 against a 0.96 baseline: 2.21σ raw, 1.99σ once the staircase is
+  // accounted for — deliberately between the two, which is the only place the
+  // correction is observable at all.
+  const window = (perturbFirstZeroTo: number | null): LensEvent[] => {
+    const out: LensEvent[] = [];
+    for (let i = 0; i < 100; i++) {
+      const pass = i < 91 ? 1 : 0;
+      out.push(ev(100_000 + i, pass === 0 && i === 91 && perturbFirstZeroTo !== null ? perturbFirstZeroTo : pass));
+    }
+    return out;
+  };
+  const curator = new SnapshotCurator({ includeBaseline: false });
+  const dips = (evts: LensEvent[]): number =>
+    curator.curate(applyLens(evts, { window_ms: 1000 }), REF).tiles.filter((t) => t.shapeTag === "dip").length;
+
+  it("does not fire on a two-valued window whose raw z clears the bar only by the lattice's own coarseness", () => {
+    assert.equal(dips(window(null)), 0);
+  });
+
+  it("fires on the same window once one event lands off the lattice — even though that makes the dip shallower", () => {
+    // Moving a single 0 up to 0.001 raises the window mean, so this observation
+    // is strictly LESS anomalous than the one above. It fires because sumSq no
+    // longer matches what two-valued data forces it to be, so the correction
+    // correctly declines to apply. Nothing but the lattice test differs.
+    assert.equal(dips(window(0.001)), 1);
+  });
+
+  it("reports the uncorrected z as magnitude, so the effect size Brain reads is untouched", () => {
+    const tile = curator
+      .curate(applyLens(window(0.001), { window_ms: 1000 }), REF)
+      .tiles.find((t) => t.shapeTag === "dip");
+    assert.ok(tile!.magnitude! > 2.15, `magnitude ${tile!.magnitude} should be the raw z, above the gate it passed`);
+  });
+});
+
 describe("SnapshotCurator — comparator scores against the reference's spread, not the window's own", () => {
   // Regression for a bug found by self-review: scoring with a Welch-style SE
   // that used each window's OWN variance made a perfectly uniform window look
@@ -845,7 +897,12 @@ describe("SnapshotCurator — group_by: the mixture hides what the group shows",
     // The mixed window scores too low to be reported at all, so it is re-read
     // through a deliberately loose threshold purely to obtain its z. magnitude
     // is the uncorrected z in both packages, so the two are comparable.
-    const loose = new SnapshotCurator({ spikeZThreshold: 1.0, includeBaseline: false });
+    //
+    // 0.5 and not 1.0: the extraction device has to stay clear of the gate, and
+    // at 1.0 the N=3 bar (1.553σ) sat within a hundredth of this window's
+    // continuity-corrected 1.55σ. That is the device interfering with the
+    // measurement, not a property of grouping.
+    const loose = new SnapshotCurator({ spikeZThreshold: 0.5, includeBaseline: false });
     const mixedZ = loose
       .curate(applyLens(obsEvents, FLAT), applyLens(refEvents, FLAT))
       .tiles.find((t) => t.regionStart === 4000 && t.shapeTag === "dip")!.magnitude!;
@@ -943,25 +1000,53 @@ describe("SnapshotCurator — group_by: the Šidák family is the package, not t
   // The cost is real and is pinned here: the same anomaly at the same depth
   // fires when it is the only group and does not when it is one of four.
   const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false });
-  const BORDERLINE = 21; // 0.84 vs 0.96 ≈ 2.63σ — above the N=3 bar, below N=12
-  const sick = { windowStart: 4000, agentId: "agent-c", passCount: BORDERLINE };
+
+  // This pair needs an effect BETWEEN two bars 0.47σ apart, and the 25-event
+  // cells the rest of this file uses cannot express one: on that lattice the
+  // neighbouring depths score 2.19σ and 3.07σ (continuity-corrected), which
+  // straddle both bars together. That is the discreteness finding of
+  // 2026-08-17 showing up as a test-authoring constraint, so the fixture is
+  // made finer here rather than the assertion loosened. At 200 events per cell
+  // the correction costs 0.16σ instead of 0.44σ and a borderline exists again.
+  const DENSE_RATE = 200;
+  const DENSE_HEALTHY = 192; // 192/200 = 0.96, the same rate as the shared fixture
+  const BORDERLINE = 183; // 0.915 vs 0.96 = 2.81σ raw, 2.65σ gated — above N=3 (2.42σ), below N=12 (2.89σ)
+
+  function denseCell(windowStart: number, agentId: string, passCount: number): LensEvent[] {
+    return Array.from({ length: DENSE_RATE }, (_, i) => ({
+      ts: windowStart + i * (1000 / DENSE_RATE),
+      value: i < passCount ? 1 : 0,
+      keys: { agentId },
+    }));
+  }
+  function denseSpan(windowStarts: number[], sickWindow?: number): LensEvent[] {
+    const out: LensEvent[] = [];
+    for (const ws of windowStarts) {
+      for (const agentId of AGENTS) {
+        const passes =
+          ws === sickWindow && agentId === "agent-c" ? BORDERLINE : DENSE_HEALTHY;
+        out.push(...denseCell(ws, agentId, passes));
+      }
+    }
+    return out;
+  }
   const onlyC = (evts: LensEvent[]): LensEvent[] =>
     evts.filter((e) => e.keys!.agentId === "agent-c");
 
   it("fires at family size 3 (one group × three windows)", () => {
     const pkg = curator.curate(
-      applyLens(onlyC(span(OBS_WINDOWS, sick)), GROUPED),
-      applyLens(onlyC(span(REF_WINDOWS)), GROUPED),
+      applyLens(onlyC(denseSpan(OBS_WINDOWS, 4000)), GROUPED),
+      applyLens(onlyC(denseSpan(REF_WINDOWS)), GROUPED),
     );
     const dip = pkg.tiles.find((t) => t.shapeTag === "dip");
-    assert.ok(dip, "a 2.63σ dip must clear the N=3 bar (2.42σ)");
-    assert.ok(dip!.magnitude! > 2.4 && dip!.magnitude! < 2.9, `magnitude ${dip!.magnitude}`);
+    assert.ok(dip, "a 2.81σ dip must clear the N=3 bar (2.42σ)");
+    assert.ok(dip!.magnitude! > 2.6 && dip!.magnitude! < 3.0, `magnitude ${dip!.magnitude}`);
   });
 
   it("does not fire at family size 12 (four groups × three windows)", () => {
     const pkg = curator.curate(
-      applyLens(span(OBS_WINDOWS, sick), GROUPED),
-      applyLens(span(REF_WINDOWS), GROUPED),
+      applyLens(denseSpan(OBS_WINDOWS, 4000), GROUPED),
+      applyLens(denseSpan(REF_WINDOWS), GROUPED),
     );
     assert.equal(
       pkg.tiles.filter((t) => t.shapeTag === "dip").length,

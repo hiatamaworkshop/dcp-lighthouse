@@ -96,7 +96,11 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **L2** Brain write surface + replay 表面化 — `$Q[schema].baseline_delta` 昇格 (RuleBrain がレジストリ経由で読み、dashboard から書ける)・RC replayRequest の区間指定 (fromTs/toTs)・dashboard 粗(live)/細(replay) 対比 UI
 - [ ] **L3 (本丸)** ClaudeBrain — §12 A/B 実験 (数列のみ vs snapshot package) → `BRAIN_MODE=claude` で RuleBrain と shadow 併走。LLM 起点の $Q 操作が核心。
       前段の A/B 実験は実行済みだが、**当初の仮説「提示形式が判断を助ける」は検証できていない** (再分析で下方修正)。
-      副産物として curator の較正欠陥を検出し、Šidák 補正で package 単位の誤警報率 29%→6.5% に是正済み。
+      副産物として curator の較正欠陥を検出し、Šidák 補正 (対策A) で package 単位の誤警報率 29%→6.85%、
+      さらに**連続性補正 (2026-08-17) で 6.85%→4.40%** = 設計値 4.55% に着地させた。
+      補正は格子を仮定せず十分統計量から**検出**するので、連続データでは自分で切れる (実測ビット同一)。
+      なお補正で curator が発火しにくくなった結果 **fp シード集合が変わっており、
+      今後の対策B 実行は記録済み 18 trial と比較不能**。
       **対策 E (reason フィールド) 実装済み** — 回答 JSON に verdict の根拠を書かせ、
       「タイルを読んだだけ」か「吟味したか」を区別できるようにした。
       **対策 B 実行済み (2026-08-17、Sonnet 5 / Opus 5 × 9 seed)** — `server/src/anthropic-ask.ts`
@@ -122,4 +126,4 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       十分統計量からプールできず、downsample・参照レンズが依存する分解可能性と噛み合わない)
 - [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)
 
-現在テスト計 276 件、全 green。
+現在テスト計 279 件、全 green。
