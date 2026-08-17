@@ -1985,3 +1985,56 @@ throw・fixture 自体の決定性)。`anthropic-ask.ts` / `run-ab-strategy-b.ts
 - `decay` / `agg_func` は未着手 (変わらず)
 - overlay の存在意義は依然未解決
 - grouping 時の適正 window_ms (見送り、変わらず)
+
+## 2026-08-17 — 対策B 初回実行で seed 選定バグを発見・修正、再実行
+
+ユーザが `ANTHROPIC_API_KEY` を用意し、対策B を実際に実行した。1 回目の実行 (9 seed ×
+Sonnet/Opus = 18 trial、課金済み) は**設計バグにより無効**だったため、修正して再実行した。
+
+### 見つかったバグ: `baseline` タイルは false positive ではない
+
+`ab-strategy-b.ts` の初版は `fx.curated.tiles.length > 0` で false-positive seed を集めていた。
+しかし `snapshot-curator.ts` の baseline タイルは `includeBaseline && windows.length > 0` の
+時点でほぼ無条件に追加される (異常検知の成否と無関係) — QUIET fixture であっても
+「代表的な静穏窓」として出るのが仕様どおりの動作。結果、1 回目の実行が集めた 9 seed
+(1〜9 と連番、この不自然な連続性が事後的な手がかりになった) は全て baseline タイルのみで、
+spike/dip/step 等の**誤って上げられた異常主張**は 1 件も含まれていなかった。
+モデルが「baseline」というラベルの付いたタイルに none と答えるのは当然で、
+対策B が測ろうとしていた「タイルを却下できるか」を何も検証していなかった。
+
+修正: フィルタを `tiles.some(t => t.shapeTag !== "baseline")` に変更。再スイープすると
+seed 22/30/36/37/48/60/89/100/114 に散らばった `dip` タイル (2.86〜3.40σ) が見つかった —
+散らばり方 (対策A後の較正済み false-positive rate ~6.5% と整合する間隔) がバグ修正の
+妥当性を裏付ける。テスト 209 → 210 件 (バグを再発させないための回帰テストを追加)。
+
+### 対策B 再実行の結果 (Sonnet 5 / Opus 5、curated arm、seed 9 件)
+
+パース成功 16/18 trial は**全て verdict:"anomaly"** — curator の dip タイルをそのまま
+追認しており、reject (none) は 0 件。**haiku と同じ結果**: 「上位モデルなら curator の
+誤検知を却下できる」という対策B の仮説はこの 9 seed では支持されなかった (ceiling not broken)。
+
+Opus の 2 trial (seed 36, 89) はパース不能。当初「`max_tokens:512` を使い切った」と誤診断
+したが、実際の応答長は seed36 が 100 文字 (≈25 token)、seed89 が 0 文字で、
+どちらも 512 token の枠に遠く及ばない時点で生成が止まっていた。原因は max_tokens
+枯渇ではなく、API 側の別の `stop_reason` (未記録のため不明、`refusal` 等の可能性) と見られる。
+`anthropic-ask.ts` は現状 `stop_reason` を記録していないため確定診断ができておらず、
+次のセッションで記録を足してから追跡する。`maxTokens` のデフォルトは 512→1024 に
+上げておいた (無関係だが安全側の変更として先に実施)。
+
+### 解釈上の注意
+
+16/18 という結果は L3 (ClaudeBrain) の前提を弱める方向の知見であり、L3 に進む前提を
+覆すものではない — 対策B は「curator の較正欠陥をモデルが自力で見抜けるか」という
+狭い問いへの答えであって、「ClaudeBrain に価値が無い」という結論ではない
+($Q 操作という ClaudeBrain の中核機能はここでは一切問うていない)。
+09-07-28 の想定どおり、この結果自体が qualitative に決着する類のものであり、
+1 つでも reject が出れば ceiling break だったが、今回は 0 件だった。
+
+### 残課題 (更新)
+
+- **`anthropic-ask.ts` に `stop_reason` の記録を追加**し、seed36/89 の空/途中切れ応答の
+  原因を特定する (次点の作業。追加の API 呼び出しが要る可能性あり)
+- 対策B の 16/18 という結果を L3 着手判断にどう反映するかはユーザ判断待ち
+- `decay` / `agg_func` は未着手 (変わらず)
+- overlay の存在意義は依然未解決
+- grouping 時の適正 window_ms (見送り、変わらず)

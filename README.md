@@ -41,7 +41,15 @@ dcp-lighthouse/
 cd server
 npm install
 npm run dev    # tsc && node dist/index.js
-npm test       # tsc && node --test dist/*.test.js
+npm test       # tsc && node --test dist/
+```
+
+**§12 A/B 対策B (上位モデルでの再測定)** — `ANTHROPIC_API_KEY` が必要な実課金スクリプト。
+`npm test` には含まれない (node の test glob は `*.test.js` のみを拾う)。
+
+```sh
+npm run build
+ANTHROPIC_API_KEY=sk-... node dist/run-ab-strategy-b.js claude-sonnet-5 claude-opus-5
 ```
 
 ## ステータス
@@ -80,10 +88,13 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       副産物として curator の較正欠陥を検出し、Šidák 補正で package 単位の誤警報率 29%→6.5% に是正済み。
       **対策 E (reason フィールド) 実装済み** — 回答 JSON に verdict の根拠を書かせ、
       「タイルを読んだだけ」か「吟味したか」を区別できるようにした。
-      **対策 B の実行基盤も整備済み** — `@anthropic-ai/sdk` 直叩きの `askFn`
-      (`server/src/anthropic-ask.ts`)・false-positive QUIET seed 選定
-      (`server/src/ab-strategy-b.ts`)・実行スクリプト (`server/src/run-ab-strategy-b.ts`)。
-      実行には `ANTHROPIC_API_KEY` が必要で、本体はまだ未実行 (実課金を伴うため)
+      **対策 B 実行済み (2026-08-17、Sonnet 5 / Opus 5 × 9 seed)** — `server/src/anthropic-ask.ts`
+      (直 SDK askFn)・`server/src/ab-strategy-b.ts` (false-positive QUIET seed 選定)・
+      `server/src/run-ab-strategy-b.ts` で実行。パース成功 16/18 trial は全て verdict:"anomaly"
+      (curator の誤検知タイルをそのまま追認、reject 0 件) — haiku と同じ結果で、
+      「上位モデルなら curator の誤検知を却下できる」という仮説はこの回では支持されず。
+      Opus 2 trial はパース不能 (原因未特定、`stop_reason` 記録を追加してから追跡予定)。
+      詳細は ROADMAP_BRIEF.md 2026-08-17 参照
 - [x] **L4** レンズチェーン — 参照レンズ (検出を二項演算に)・窓格子 (`origin`/`align` で格子をレンズの性質にする)・
       `group_by` (比較器を単一分布の前提に戻す)・`downsample_factor` (十分統計量の厳密プーリングで窓を間引く)
       を実装。混合ストリームで 1.77σ にしか見えない単一エージェントの dip が、グループ内では 3.51σ になる。

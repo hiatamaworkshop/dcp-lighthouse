@@ -4,14 +4,28 @@ import { findQuietFalsePositiveSeeds } from "./ab-strategy-b.js";
 import { buildQuietFixture } from "./ab-fixture.js";
 
 describe("ab-strategy-b — false-positive seed sweep (対策B fixture selection)", () => {
-  test("returns exactly `count` QUIET fixtures, each with a tile and no injected anomaly", () => {
+  test("returns exactly `count` QUIET fixtures, each with a non-baseline tile and no injected anomaly", () => {
     const fixtures = findQuietFalsePositiveSeeds(9);
     assert.equal(fixtures.length, 9);
     for (const fx of fixtures) {
       assert.equal(fx.scenario, "QUIET");
       assert.equal(fx.injectedAnomaly, null, `seed ${fx.seed} must be a true negative control`);
-      assert.ok(fx.curated.tiles.length > 0, `seed ${fx.seed} must be a false positive (a tile despite no injection)`);
+      // The bug this pins (found 2026-08-17): baseline tiles are near-unconditional
+      // on a QUIET fixture and are not anomaly claims, so they must not satisfy
+      // the sweep on their own — only spike/dip/gap/step_*/divergence do.
+      assert.ok(
+        fx.curated.tiles.some((t) => t.shapeTag !== "baseline"),
+        `seed ${fx.seed} must carry a real false-positive anomaly tile, not just baseline`,
+      );
     }
+  });
+
+  test("a baseline-only tile set does not satisfy the sweep", () => {
+    // Regression pin: seed 1 is baseline-only pre-fix (verified against the
+    // live curator during the 2026-08-17 bug investigation), so it must NOT
+    // be the first hit once the filter excludes baseline.
+    const fixtures = findQuietFalsePositiveSeeds(1);
+    assert.notEqual(fixtures[0].seed, 1, "seed 1 is baseline-only and must not count as a false positive");
   });
 
   test("seeds are unique and reproducible — rerunning the sweep finds the same set", () => {

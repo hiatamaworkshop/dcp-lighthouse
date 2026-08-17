@@ -5,3 +5,5 @@ server/package-lock.json
 .claude/settings.local.json
 CLAUDE.local.md
 server/server.log
+server/strategy-b-*.log
+server/strategy-b-*.jsonl

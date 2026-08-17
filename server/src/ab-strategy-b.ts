@@ -14,6 +14,17 @@
  * the 2026-07-28 Šidák correction) is a property of the comparator, not a
  * fixture bug. This sweeps seeds until it has collected `count` of exactly
  * those cases.
+ *
+ * "baseline" tiles are excluded from that count (bug found and fixed
+ * 2026-08-17, after an initial run burned real API trials on the wrong
+ * set): SnapshotCurator emits a baseline tile whenever `includeBaseline` is
+ * set and any window exists at all (snapshot-curator.ts, unconditional on
+ * whether an anomaly fired), so on a QUIET fixture it appears on essentially
+ * every seed. A naive `tiles.length > 0` filter therefore collects
+ * "representative quiet window" tiles, not false-positive anomaly claims —
+ * a model saying "none" to a tile explicitly labeled as quiet proves
+ * nothing about rejection. Only spike/dip/gap/step_up/step_down/divergence
+ * tiles are the false alarms 対策B's question is actually about.
  */
 
 import { buildQuietFixture, type ABFixture } from "./ab-fixture.js";
@@ -41,7 +52,7 @@ export function findQuietFalsePositiveSeeds(
   const found: ABFixture[] = [];
   for (let seed = startSeed; seed < startSeed + maxSeeds && found.length < count; seed++) {
     const fx = buildQuietFixture(seed);
-    if (fx.curated.tiles.length > 0) found.push(fx);
+    if (fx.curated.tiles.some((t) => t.shapeTag !== "baseline")) found.push(fx);
   }
   if (found.length < count) {
     throw new Error(

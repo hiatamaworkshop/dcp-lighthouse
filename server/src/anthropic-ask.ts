@@ -43,7 +43,12 @@ export function makeAnthropicAsk(opts: AnthropicAskOptions): AskFn {
     );
   }
   const client = new Anthropic({ apiKey });
-  const maxTokens = opts.maxTokens ?? 512;
+  // 1024, not 512: the 対策E reason field made responses long enough that a
+  // verbose model (Opus, observed 2026-08-17) can get truncated mid-JSON
+  // before closing the object, which parseAnswer then correctly treats as
+  // an unparseable (and therefore wrong) answer — silently losing the trial
+  // rather than failing loudly.
+  const maxTokens = opts.maxTokens ?? 1024;
   const model = opts.model;
 
   return async (prompt: string): Promise<string> => {
