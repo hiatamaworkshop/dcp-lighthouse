@@ -14,51 +14,126 @@
  *
  * Usage:
  *   ANTHROPIC_API_KEY=... node dist/run-ab-strategy-b.js claude-sonnet-5 claude-opus-5
+ *   ANTHROPIC_API_KEY=... node dist/run-ab-strategy-b.js --seeds=36,89 claude-opus-5
  *
  * Prints one JSON trial record per line to stdout (redirect to a file to
- * keep the record); progress and the ceiling-break flag go to stderr.
+ * keep the record); progress and the summary go to stderr.
  */
 
+import { pathToFileURL } from "node:url";
 import { findQuietFalsePositiveSeeds } from "./ab-strategy-b.js";
 import { runTrial } from "./ab-harness.js";
-import { makeAnthropicAsk } from "./anthropic-ask.js";
+import { makeAnthropicAsk, type AskMeta } from "./anthropic-ask.js";
 
 const SEED_COUNT = 9;
 
+export interface ParsedArgs {
+  models: string[];
+  /** Restrict the run to these seeds; empty means "all of them". */
+  seeds: number[];
+}
+
+/**
+ * Split `--seeds=a,b,c` out of the positional model list.
+ *
+ * The filter exists so a partially-failed batch can be re-run for just the
+ * trials that failed, without paying for the ones that already succeeded —
+ * the situation that actually arose on 2026-08-17 (2 of 18 unparseable).
+ * Re-running the whole batch to recover two trials is both wasteful and
+ * bad method: it would silently replace 16 already-recorded answers with
+ * fresh samples.
+ */
+export function parseArgs(argv: readonly string[]): ParsedArgs {
+  const models: string[] = [];
+  const seeds: number[] = [];
+  for (const arg of argv) {
+    if (arg.startsWith("--seeds=")) {
+      for (const part of arg.slice("--seeds=".length).split(",")) {
+        // The empty check is not redundant with Number.isInteger: Number("")
+        // is 0, so a bare `--seeds=` would otherwise parse as seed 0 and run
+        // a batch nobody asked for.
+        const raw = part.trim();
+        const n = Number(raw);
+        if (raw === "" || !Number.isInteger(n)) throw new Error(`--seeds: "${part}" is not an integer`);
+        seeds.push(n);
+      }
+    } else {
+      models.push(arg);
+    }
+  }
+  return { models, seeds };
+}
+
 async function main(): Promise<void> {
-  const models = process.argv.slice(2);
+  const { models, seeds } = parseArgs(process.argv.slice(2));
   if (models.length === 0) {
-    console.error("usage: node dist/run-ab-strategy-b.js <model> [<model> ...]");
+    console.error("usage: node dist/run-ab-strategy-b.js [--seeds=N,N] <model> [<model> ...]");
     process.exitCode = 1;
     return;
   }
 
-  const fixtures = findQuietFalsePositiveSeeds(SEED_COUNT);
+  const all = findQuietFalsePositiveSeeds(SEED_COUNT);
+  const fixtures = seeds.length > 0 ? all.filter((f) => seeds.includes(f.seed)) : all;
+  if (fixtures.length === 0) {
+    console.error(`[strategy-b] --seeds matched none of the ${SEED_COUNT} false-positive seeds (${all.map((f) => f.seed).join(", ")})`);
+    process.exitCode = 1;
+    return;
+  }
   console.error(`[strategy-b] seeds: ${fixtures.map((f) => f.seed).join(", ")}`);
 
-  let brokeCeiling = false;
+  let rejected = 0;
+  let confirmed = 0;
+  let unusable = 0;
+
   for (const model of models) {
-    const ask = makeAnthropicAsk({ model });
+    // Captured per call and attached to the record below. Sound only because
+    // trials run strictly sequentially — if this loop is ever parallelized,
+    // the meta must be threaded through instead of latched here.
+    let lastMeta: AskMeta | null = null;
+    const ask = makeAnthropicAsk({ model, onMeta: (m) => { lastMeta = m; } });
+
     for (const fx of fixtures) {
+      lastMeta = null;
       const record = await runTrial(fx, "curated", ask);
-      console.log(JSON.stringify({ model, ...record }));
-      const rejected = record.answer?.verdict === "none";
-      if (rejected) brokeCeiling = true;
+      const meta = lastMeta as AskMeta | null;
+      console.log(JSON.stringify({ model, ...record, meta }));
+
+      const verdict = record.answer?.verdict;
+      if (verdict === "none") rejected++;
+      else if (verdict === "anomaly") confirmed++;
+      else unusable++;
+
       console.error(
-        `[strategy-b] model=${model} seed=${fx.seed} verdict=${record.answer?.verdict ?? "(unparsed)"}` +
-          (rejected ? "  <-- broke the ceiling (rejected a tile)" : ""),
+        `[strategy-b] model=${model} seed=${fx.seed} verdict=${verdict ?? "(unparsed)"}` +
+          ` stop_reason=${meta?.stopReason ?? "?"} out_tokens=${meta?.outputTokens ?? "?"}` +
+          ` text_len=${meta?.textLength ?? "?"}` +
+          (verdict === "none" ? "  <-- broke the ceiling (rejected a tile)" : ""),
       );
     }
   }
 
+  // Report the unusable count alongside the verdict counts. Saying only
+  // "no trial rejected a tile" over a batch containing unreadable answers
+  // would overstate the evidence — those trials measured nothing, and are
+  // not the same as trials that confirmed the tile.
   console.error(
-    brokeCeiling
-      ? "[strategy-b] at least one trial rejected a tile — ceiling broken."
-      : "[strategy-b] no trial rejected a tile — ceiling not broken in this run.",
+    `[strategy-b] ${rejected} rejected / ${confirmed} confirmed / ${unusable} unusable ` +
+      `(${rejected + confirmed + unusable} trials). ` +
+      (rejected > 0
+        ? "Ceiling broken."
+        : unusable > 0
+          ? "Ceiling not broken among readable answers; unusable trials measured nothing."
+          : "Ceiling not broken."),
   );
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exitCode = 1;
-});
+// Run only when invoked as the entry point. Without this guard, the unit test
+// that imports parseArgs also *executes* the script: main() reads the test
+// runner's argv, finds no model, prints usage and sets exitCode 1, failing a
+// suite in which every assertion passed.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((err) => {
+    console.error(err);
+    process.exitCode = 1;
+  });
+}

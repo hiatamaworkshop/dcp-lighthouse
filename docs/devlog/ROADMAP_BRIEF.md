@@ -2038,3 +2038,83 @@ Opus の 2 trial (seed 36, 89) はパース不能。当初「`max_tokens:512` �
 - `decay` / `agg_func` は未着手 (変わらず)
 - overlay の存在意義は依然未解決
 - grouping 時の適正 window_ms (見送り、変わらず)
+
+## 2026-08-17 — 対策B パース失敗の原因特定 (thinking ブロックが max_tokens を食う) + レビュー由来の修正
+
+前節の残課題「seed36/89 の空・途中切れ応答の原因特定」を実施。併せて直近実装のレビューで
+見つかったバグを 3 件修正した。テスト 210 → 215 件。
+
+### 原因: Opus 5 の thinking ブロックが output token 予算を消費していた
+
+`anthropic-ask.ts` に `AskMeta` (`stop_reason` / `contentBlockTypes` / `outputTokens` /
+`textLength`) を追加し、失敗した 2 seed だけを再実行 (`--seeds=36,89` を新設)。結果:
+
+```
+seed 36: contentBlockTypes=["thinking","text"] outputTokens=418 textLength=333
+seed 89: contentBlockTypes=["thinking","text"] outputTokens=398 textLength=314
+```
+
+**Opus 5 は既定で thinking ブロックを出す。** `output_tokens` はその thinking を含むため、
+可視テキストは全体の約 1/5 (333 文字 ≒ 85 token / 418 token) にすぎない。
+初回実行の `max_tokens:512` はこの thinking と共有の予算であり、
+seed36 は thinking 後に JSON 生成の途中で、seed89 は thinking だけで使い切って
+テキストブロックを 1 つも出せずに打ち切られた — 観測された「100 文字で中断」
+「0 文字」という 2 つの症状はどちらもこの機序に一致する。
+thinking の長さは確率的なので、Opus 9 件中 2 件だけが失敗し、Sonnet 9 件が全て通った
+ことも整合する。
+
+**診断過程の誤り (記録として残す)**: 初回に「max_tokens 枯渇」と当たりを付けたのは
+機序として正しかったが、その後「可視テキスト 100 文字 ≒ 25 token で 512 に遠く及ばない」
+という文字数計算で自ら否定し、`refusal` 等を疑う方向に誤誘導した。
+**可視テキストの文字数から output token 消費を推定してはいけない** — thinking や
+他のブロックが同じ予算を引く。なお当時の `stop_reason` は未記録なので、
+上記は強い推論であって確定ではない。今後は記録されるため再発時は即断できる。
+
+### 副次的だがより重要な発見: モデルはタイルを吟味した上で追認している
+
+再実行で得た `reason` (対策E のフィールド) が実質的だった:
+
+> One window at t=2005016 has a pass rate of 0.891 versus the reference baseline of 0.956
+> (~2.9σ, ~3 standard errors for n=92), while neighbouring windows (e.g. 0.958 at t=2004016)
+> stay at baseline — an isolated short drop rather than a sustained level change.
+
+σ 値・近傍窓との比較・「持続的な水準変化ではなく孤立した短い低下」という形状判断まで
+書いており、**タイルを転記しているのではなく評価している**。それでも verdict は anomaly。
+
+つまり ceiling が破れないのはモデルが怠慢だからではない。**提示された情報の範囲では
+2.9σ の dip を異常と読むのは正しい** — プロンプトは「これは 10 窓を検査して選ばれた
+1 枚である」という多重比較の文脈を一切伝えていないからだ。これは 07-28 の対策A 検討で
+挙げられていた選択肢「閾値は動かさず、タイルに『N 窓中の 1 本』という文脈を明示して
+判断は Brain に委ねる」が、実際に効きうることを示唆する。対策A では閾値補正 (Šidák) の
+方を採ったが、**Brain に多重比較の文脈を渡す道は別途残っている**。
+
+### レビューで見つけた修正 3 件
+
+1. **`effectiveWindowMs` の factor 二重適用** (`dashboard.ts`) — `lens.window_ms ?? fallback`
+   に factor を掛けていたが、fallback 側 (`LensResult.window_ms`) は applyLens が既に
+   掛けた後の値。`window_ms` を宣言せず `downsample_factor` だけ持つレンズで
+   実効 3000ms が 9000ms と算出される。index.ts の bootstrap 経由では踏まないが、
+   **`{downsample_factor: N}` だけを書く $Q writer — まさに L3 の ClaudeBrain — が踏む**。
+   `window_ms` 未宣言時は fallback をそのまま返すよう修正
+2. **`--seeds=` (値が空) が seed 0 として通る** (`run-ab-strategy-b.ts`) — `Number("")` が 0 で
+   `Number.isInteger(0)` が true のため。空文字チェックを追加
+3. **スクリプトの import 時副作用** (`run-ab-strategy-b.ts`) — `parseArgs` を import した
+   テストが `main()` を実行してしまい、全 assertion が通るのに suite が exit 1 で落ちた。
+   `import.meta.url === pathToFileURL(process.argv[1]).href` のエントリポイントガードを追加
+
+併せて `run-ab-strategy-b.ts` の集計を `N rejected / N confirmed / N unusable` 形式に変更。
+従来は「no trial rejected a tile」としか言わず、16 件追認 + 2 件パース不能を
+「18 件全部が追認」と読ませる報告になっていた。
+
+### 残課題 (更新)
+
+- **thinking ブロックの本文は捨てている** — `contentBlockTypes` に型は記録するが中身は
+  破棄。対策E の `reason` は自己申告だが thinking は実際の推論過程であり、
+  「読んだだけか吟味したか」の判別には thinking の方が直接的な証拠になる。
+  記録するかは記録サイズとの兼ね合いで判断待ち
+- **多重比較の文脈をプロンプトに足した場合の再測定** — 上記の発見から導かれる新しい実験。
+  「N 窓中の 1 本」を明示したら reject が出るかは、対策B の問いへのより公平な検証になる
+- 対策B の結果を L3 着手判断にどう反映するかはユーザ判断待ち
+- `decay` / `agg_func` は未着手 (変わらず)
+- overlay の存在意義は依然未解決
+- grouping 時の適正 window_ms (見送り、変わらず)

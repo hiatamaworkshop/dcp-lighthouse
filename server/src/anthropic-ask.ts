@@ -19,12 +19,42 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { AskFn } from "./ab-harness.js";
 
+/**
+ * Per-response diagnostics the AskFn contract itself cannot carry.
+ *
+ * Exists because of a concrete misdiagnosis (2026-08-17): two Opus trials
+ * came back unparseable — one cut off mid-JSON at ~100 characters, one
+ * empty — and the first explanation reached for was max_tokens exhaustion.
+ * Response length ruled that out (100 chars is ~25 tokens against a 512
+ * budget), but nothing in the record could say what DID stop the
+ * generation, because askFn returns a bare string and the API's
+ * `stop_reason` was discarded at the call site. A trial that fails for an
+ * unknown reason is worse than one that fails loudly: it silently counts
+ * as a wrong answer in the score.
+ */
+export interface AskMeta {
+  /** API stop_reason: "end_turn" | "max_tokens" | "stop_sequence" | "refusal" | … */
+  stopReason: string | null;
+  /** Content block types actually returned; empty when the model emitted nothing. */
+  contentBlockTypes: string[];
+  outputTokens: number;
+  /** Characters of text extracted — 0 distinguishes "empty completion" from "no text block". */
+  textLength: number;
+}
+
 export interface AnthropicAskOptions {
   /** e.g. "claude-sonnet-5" / "claude-opus-5". No default — 対策B is explicitly about comparing models, so callers must say which one. */
   model: string;
   /** Defaults to process.env.ANTHROPIC_API_KEY. */
   apiKey?: string;
   maxTokens?: number;
+  /**
+   * Invoked once per completed call with that response's diagnostics. Kept as
+   * a side channel rather than widening AskFn's return type on purpose: the
+   * seam's value is that ab-harness.ts stays ignorant of who answers it, and
+   * a stub or a human at the other end has no stop_reason to report.
+   */
+  onMeta?: (meta: AskMeta) => void;
 }
 
 /**
@@ -57,7 +87,20 @@ export function makeAnthropicAsk(opts: AnthropicAskOptions): AskFn {
       max_tokens: maxTokens,
       messages: [{ role: "user", content: prompt }],
     });
-    const textBlock = res.content.find((b): b is Anthropic.TextBlock => b.type === "text");
-    return textBlock?.text ?? "";
+    // Join every text block rather than taking the first: a response split
+    // across blocks would otherwise be silently truncated at the call site,
+    // which is indistinguishable from the model stopping early — exactly the
+    // ambiguity AskMeta exists to remove.
+    const text = res.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+    opts.onMeta?.({
+      stopReason: res.stop_reason ?? null,
+      contentBlockTypes: res.content.map((b) => b.type),
+      outputTokens: res.usage.output_tokens,
+      textLength: text.length,
+    });
+    return text;
   };
 }

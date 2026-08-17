@@ -135,14 +135,22 @@ export function maxCoarseWindowMs(
  * fewer, wider windows than the span was sized for. That shrinks the
  * comparator's family size silently, the same class of grid mismatch the
  * `origin`/`align` work exists to prevent, just on the downsample stage
- * instead of the window stage. `fallbackWindowMs` (typically the view's
- * already-derived `LensResult.window_ms`, which already has any factor
- * baked in) is used only when the lens itself does not declare `window_ms`,
- * in which case `downsample_factor` is absent too — the ×1 is a no-op.
+ * instead of the window stage.
+ *
+ * The two inputs are scaled DIFFERENTLY and that asymmetry is the whole
+ * subtlety: `lens.window_ms` is the raw declared width and must be
+ * multiplied, while `fallbackWindowMs` is a `LensResult.window_ms` that
+ * applyLens has ALREADY multiplied. Multiplying the fallback too would apply
+ * the stage twice — a lens of `{downsample_factor: 3}` with no declared
+ * window_ms produces 3000ms windows but would be sized as 9000ms. Not
+ * reachable from index.ts's bootstrap (which always declares window_ms), but
+ * squarely reachable by the $Q writer L3 exists to enable: a Brain writing
+ * `{downsample_factor: N}` alone is a legal row, and the registry's
+ * `observe:*` fallback can supply one too.
  */
 export function effectiveWindowMs(lens: QObserveParams, fallbackWindowMs: number): number {
-  const base = lens.window_ms ?? fallbackWindowMs;
-  return base * (lens.downsample_factor ?? 1);
+  if (lens.window_ms === undefined) return fallbackWindowMs;
+  return lens.window_ms * (lens.downsample_factor ?? 1);
 }
 
 /**

@@ -50,7 +50,13 @@ npm test       # tsc && node --test dist/
 ```sh
 npm run build
 ANTHROPIC_API_KEY=sk-... node dist/run-ab-strategy-b.js claude-sonnet-5 claude-opus-5
+
+# 失敗した trial だけ再実行 (バッチ全体を再サンプリングしない)
+ANTHROPIC_API_KEY=sk-... node dist/run-ab-strategy-b.js --seeds=36,89 claude-opus-5
 ```
+
+1 trial 1 行の JSON を stdout に、進捗 (`stop_reason` / output token 数を含む) と
+集計を stderr に出す。
 
 ## ステータス
 
@@ -93,7 +99,10 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       `server/src/run-ab-strategy-b.ts` で実行。パース成功 16/18 trial は全て verdict:"anomaly"
       (curator の誤検知タイルをそのまま追認、reject 0 件) — haiku と同じ結果で、
       「上位モデルなら curator の誤検知を却下できる」という仮説はこの回では支持されず。
-      Opus 2 trial はパース不能 (原因未特定、`stop_reason` 記録を追加してから追跡予定)。
+      Opus 2 trial のパース不能は**原因特定済み** — Opus 5 が既定で出す thinking ブロックが
+      `max_tokens` 予算を食っていた (再実行で解消、両方 anomaly)。
+      なお `reason` フィールドを見るとモデルは σ 値・近傍窓・形状まで吟味した上で追認しており、
+      プロンプトが「N 窓中の 1 本」という多重比較の文脈を伝えていないことが効いている可能性がある。
       詳細は ROADMAP_BRIEF.md 2026-08-17 参照
 - [x] **L4** レンズチェーン — 参照レンズ (検出を二項演算に)・窓格子 (`origin`/`align` で格子をレンズの性質にする)・
       `group_by` (比較器を単一分布の前提に戻す)・`downsample_factor` (十分統計量の厳密プーリングで窓を間引く)
@@ -103,4 +112,4 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       残るチェーン段は `decay` / `agg_func` (curator の統計モデルに触れるため未着手)
 - [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)
 
-現在テスト計 209 件、全 green。
+現在テスト計 215 件、全 green。

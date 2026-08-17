@@ -90,10 +90,24 @@ test("effectiveWindowMs folds downsample_factor into the live span size", () => 
   // LIVE_REFERENCE_WINDOW_COUNT windows of the wrong (narrower) width.
   assert.equal(effectiveWindowMs({ window_ms: 10_000, downsample_factor: 3 }, 10_000), 30_000);
 
-  // No window_ms declared at all (falls back to the view's own derived
-  // width) — downsample_factor is necessarily absent too on that same lens
-  // object, so the fallback is used unmultiplied.
+  // No window_ms declared at all: the fallback is a LensResult.window_ms that
+  // applyLens has already scaled, so it must be returned as-is.
   assert.equal(effectiveWindowMs({}, 10_000), 10_000);
+});
+
+test("effectiveWindowMs does not double-apply the factor to an already-scaled fallback", () => {
+  // A lens may legally declare downsample_factor without window_ms — a $Q row
+  // a Brain can write, and what the registry's `observe:*` fallback can carry.
+  // applyLens then uses its own default width and returns width*factor, so the
+  // fallback ALREADY includes the factor; multiplying it again sized the live
+  // spans 3x too wide (found in review 2026-08-17, pre-fix behavior).
+  const lens = { downsample_factor: 3 };
+  const derived = applyLens([{ ts: 0, value: 1 }, { ts: 1_000, value: 1 }], lens);
+  assert.equal(
+    effectiveWindowMs(lens, derived.window_ms),
+    derived.window_ms,
+    "span sizing must agree with the width applyLens actually produced",
+  );
 });
 
 test("liveSpans sized via effectiveWindowMs still yields exactly LIVE_REFERENCE_WINDOW_COUNT windows once downsample_factor is set", () => {
