@@ -162,6 +162,24 @@ describe("SnapshotCurator — a degenerate reference is blindness, not quiet", (
     assert.ok(pkg.globalStats.stdDev > 0);
   });
 
+  it("no longer calls effectiveN==2 usable — the floor is MIN_VALID_COUNT, not the Bessel minimum", () => {
+    // Two reference events with real spread (mean 1.0 and 0.0): enough for
+    // Bessel's correction to produce a variance (0.5, not NaN or 0), but
+    // n_eff=2 carries essentially no degrees of freedom, so that variance
+    // does not mean anything yet. Before the floor was raised from
+    // effectiveN>=2 to effectiveN>=MIN_VALID_COUNT, this reference reported
+    // referenceUsable=true (ROADMAP_BRIEF.md 2026-08-18 (5) §B: "a bare
+    // floor of 2, not a practical one" — the precondition L5 needed tightened
+    // before thinning could reuse it).
+    const reference = buildResult([
+      { windowStart: -2000, mean: 1.0, count: 1 },
+      { windowStart: -1000, mean: 0.0, count: 1 },
+    ]);
+    const observation = buildResult([{ windowStart: 0, mean: 0.5, count: 50 }]);
+    const pkg = new SnapshotCurator({ includeBaseline: false }).curate(observation, reference);
+    assert.equal(pkg.referenceUsable, false);
+  });
+
   it("reports the reference's event weight, which windowCount cannot convey", () => {
     // Three windows can hold three events or three thousand, and the
     // comparator divides by the event total, not the window total.
@@ -1043,6 +1061,35 @@ describe("SnapshotCurator — group_by: blindness is per group", () => {
       applyLens(span(REF_WINDOWS), GROUPED),
     );
     assert.equal(pkg.unscoredGroups, undefined);
+  });
+
+  it("also names a group whose OWN reference pool is degenerate, not just an absent one", () => {
+    // agent-c's reference is a uniform 100% pass rate across all three
+    // windows — real events, effectiveN well above 2, but zero within-agent
+    // spread, so its pooled reference variance is exactly 0. Before
+    // isReferenceUsable unified the package-level flag with buildScoringUnits
+    // (this fix), the group path only checked effectiveN>=2, not variance>0,
+    // so this group silently entered scoring: comparisonSE returned 0, so it
+    // never fired a tile, but it was reported as SCORED-AND-QUIET rather than
+    // UNSCORABLE — indistinguishable from a genuinely healthy, well-grounded
+    // group. Mirrors the whole-package bug pinned above ("a degenerate
+    // reference is blindness, not quiet"), reached here through group_by.
+    const refEvents = [
+      ...span(REF_WINDOWS).filter((e) => e.keys!.agentId !== "agent-c"),
+      ...REF_WINDOWS.flatMap((ws) => cell(ws, "agent-c", RATE_PER_AGENT)), // 100% pass, zero spread
+    ];
+    const obsEvents = span(OBS_WINDOWS, { windowStart: 4000, agentId: "agent-c", passCount: 5 });
+    const pkg = curator.curate(applyLens(obsEvents, GROUPED), applyLens(refEvents, GROUPED));
+
+    assert.ok(
+      pkg.unscoredGroups?.includes("agent-c"),
+      `expected agent-c in unscoredGroups, got ${JSON.stringify(pkg.unscoredGroups)}`,
+    );
+    assert.equal(
+      pkg.tiles.some((t) => t.group === "agent-c"),
+      false,
+      "an unscorable group must not produce tiles, scored-quiet or otherwise",
+    );
   });
 });
 

@@ -367,8 +367,7 @@ export class SnapshotCurator {
     // makes every deviation infinitely significant precisely when the estimate
     // is least trustworthy. The scoring loop already declined to score these
     // windows; only the flag disagreed.
-    const referenceUsable =
-      refStats.effectiveN >= 2 && Number.isFinite(refStats.variance) && refStats.variance > 0;
+    const referenceUsable = isReferenceUsable(refStats);
     const globalStats = {
       mean: refStats.mean,
       stdDev: referenceUsable ? Math.sqrt(refStats.variance) : 0,
@@ -590,9 +589,10 @@ function buildScoringUnits(
   for (const g of obsGroups) {
     const refGroup = refByLabel.get(g.label);
     const ref = refGroup !== undefined ? poolStats(refGroup.windows) : undefined;
-    // Same usability test the package applies: fewer than 2 pooled events means
-    // there is no variance, so no comparison exists to make.
-    if (refGroup === undefined || ref === undefined || ref.effectiveN < 2 || !Number.isFinite(ref.variance)) {
+    // Same usability test the package applies (isReferenceUsable) — a group
+    // whose own reference pool cannot ground a comparison is unscored, not
+    // silently scored against nothing.
+    if (refGroup === undefined || ref === undefined || !isReferenceUsable(ref)) {
       unscoredGroups.push(g.label);
       continue;
     }
@@ -648,6 +648,44 @@ function poolStats(windows: WindowStat[]): RefStats {
   const denom = sumW - sumW2 / sumW;
   const variance = Math.max(0, (sumSq - sumW * mean * mean) / denom);
   return { mean, variance, count, effectiveN: nEff };
+}
+
+/**
+ * Can this pooled reference ground a comparison at all?
+ *
+ * ONE predicate, called by all three places that read a reference's
+ * usability: the package-level `referenceUsable` flag, buildScoringUnits'
+ * per-group pairing, and detectSteps' per-run guard. Before this they were
+ * three independent copies that had already drifted apart — only the
+ * package-level flag checked `variance > 0` (added 2026-08-17, after a
+ * reference whose pooled events were all identical reported "usable" while
+ * grounding no comparison, ROADMAP_BRIEF.md 2026-08-17); the group and step
+ * paths still read a zero-variance reference as usable. Same failure shape
+ * as isScorable's history above — three copies that happened to agree,
+ * until one of them silently didn't.
+ *
+ * The floor is also raised here, from `effectiveN >= 2` to
+ * `effectiveN >= MIN_VALID_COUNT`. `effectiveN >= 2` is the bare minimum for
+ * Bessel's correction to produce a number at all, not a claim that the
+ * number MEANS anything — at n_eff≈2 the variance estimate carries close to
+ * zero degrees of freedom and can land almost anywhere. MIN_VALID_COUNT is
+ * already this codebase's answer to "how many samples does a normal
+ * approximation need before it means something" (see isScorable, same
+ * reasoning, applied to the window being scored); reusing it here applies
+ * the identical rule to the yardstick doing the scoring, rather than
+ * inventing a second unmeasured constant.
+ *
+ * This precondition matters most for L5 (ROADMAP_BRIEF.md 2026-08-18 (5)
+ * §B): thinning a retained reference keeps its raw event `count` intact
+ * while shrinking `effectiveN`, unlike decay, which shrinks both together
+ * and is easier to notice going wrong. A floor of exactly 2 would let a
+ * heavily-thinned reference keep reporting "usable" long after it stopped
+ * being one — the silence-vs-blindness failure this project treats as its
+ * worst case, reached this time on the reference side instead of the
+ * observation side.
+ */
+function isReferenceUsable(ref: RefStats): boolean {
+  return ref.effectiveN >= MIN_VALID_COUNT && Number.isFinite(ref.variance) && ref.variance > 0;
 }
 
 /**
@@ -950,9 +988,10 @@ function detectSteps(
   if (windows.length < minRun) return [];
   // No yardstick, no comparison — mirrors spike/dip's silent skip when the
   // reference can't ground a z-score (buildScoringUnits applies the same
-  // test), rather than reporting a step_up/step_down with a fabricated
-  // magnitude:0. Blindness must not read as "measured, no shift".
-  if (!(ref.effectiveN >= 2 && Number.isFinite(ref.variance))) return [];
+  // test, via the same isReferenceUsable predicate), rather than reporting a
+  // step_up/step_down with a fabricated magnitude:0. Blindness must not read
+  // as "measured, no shift".
+  if (!isReferenceUsable(ref)) return [];
   const tiles: SnapshotTile[] = [];
   const tag = group !== undefined ? `[${group}] ` : "";
   let runDir: 1 | -1 | null = null;
