@@ -86,7 +86,10 @@ let brain: ResettableBrain = ruleBrain;
 
 if (BRAIN_MODE === "claude") {
   const claudeBrain = new ClaudeBrain({
-    askFn: makeAnthropicAsk({ model: CLAUDE_BRAIN_MODEL }),
+    // effort:"low" + a 2048 budget: the Brain returns a short JSON decision, and
+    // on Sonnet 5 / Opus 5 thinking is on by default and shares max_tokens with
+    // the answer — an unbounded think can eat the budget and truncate the JSON.
+    askFn: makeAnthropicAsk({ model: CLAUDE_BRAIN_MODEL, maxTokens: 2048, effort: "low" }),
     minIntervalMs: CLAUDE_BRAIN_INTERVAL_MS,
     onError: (err) => console.warn(`[shadow] deliberation failed: ${err.message}`),
   });

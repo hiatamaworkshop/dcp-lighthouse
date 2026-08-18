@@ -49,6 +49,19 @@ export interface AnthropicAskOptions {
   apiKey?: string;
   maxTokens?: number;
   /**
+   * Thinking depth (`output_config.effort`). Omitted by default so the 対策B
+   * request bytes stay exactly as they were when its trials were recorded —
+   * changing them would make a re-run non-comparable with the logged results.
+   *
+   * Callers that want a bounded answer should SET this. On Sonnet 5 and Opus 5
+   * thinking is on by default and `max_tokens` caps thinking PLUS response
+   * text together, so a small budget can be spent entirely on thinking and cut
+   * the JSON off mid-object — which parseAnswer then correctly reads as an
+   * unparseable (i.e. wrong) answer. That is not hypothetical: it is what made
+   * two Opus trials unreadable on 2026-08-17.
+   */
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /**
    * Invoked once per completed call with that response's diagnostics. Kept as
    * a side channel rather than widening AskFn's return type on purpose: the
    * seam's value is that ab-harness.ts stays ignorant of who answers it, and
@@ -87,6 +100,9 @@ export function makeAnthropicAsk(opts: AnthropicAskOptions): AskFn {
     const res = await client.messages.create({
       model,
       max_tokens: maxTokens,
+      // Spread rather than pass `undefined`: an absent key keeps the request
+      // body byte-identical to the 対策B trials that are already on record.
+      ...(opts.effort !== undefined ? { output_config: { effort: opts.effort } } : {}),
       messages: [{ role: "user", content: prompt }],
     });
     // Join every text block rather than taking the first: a response split
