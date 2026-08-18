@@ -273,6 +273,39 @@ describe("applyLens — downsample_factor (ROADMAP L4 residual chain stage)", ()
   });
 });
 
+describe("applyLens — agg_func (ROADMAP L4 residual chain stage, throw-before-median precedent)", () => {
+  it("defaults to mean, and accepts agg_func: 'mean' explicitly as the same no-op", () => {
+    const events = [ev(0, 1), ev(100, 3)];
+    const implicit = applyLens(events, { window_ms: 1000 });
+    const explicit = applyLens(events, { window_ms: 1000, agg_func: "mean" });
+    assert.deepEqual(implicit, explicit);
+    assert.equal(explicit.windows[0].mean, 2);
+  });
+
+  it("rejects any agg_func other than mean, rather than silently ignoring it", () => {
+    assert.throws(
+      () => applyLens([ev(0, 1)], { window_ms: 1000, agg_func: "median" }),
+      /agg_func/,
+    );
+    assert.throws(
+      () => applyLens([ev(0, 1)], { window_ms: 1000, agg_func: "p95" }),
+      /agg_func/,
+    );
+  });
+
+  it("rejects agg_func: median even combined with downsample_factor, closing the pooling mismatch at the source", () => {
+    assert.throws(
+      () =>
+        applyLens([ev(0, 1), ev(1000, 3)], {
+          window_ms: 1000,
+          downsample_factor: 2,
+          agg_func: "median",
+        }),
+      /agg_func/,
+    );
+  });
+});
+
 describe("parseDecay — MODEL.md §228 syntax", () => {
   it("parses the step form, with or without the symbolic `now-` prefix", () => {
     assert.deepEqual(parseDecay("step(cutoff=now-60s)"), { kind: "step", cutoffMs: 60_000 });

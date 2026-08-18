@@ -130,6 +130,18 @@ export interface QObserveParams {
    * which raw events land in which window.
    */
   downsample_factor?: number;
+  /**
+   * What each window's WindowStat summarises. Only "mean" (or omitting the
+   * field) is implemented — WindowStat already IS {mean, count, sumSq}, so
+   * that case needs no code path. Anything else is rejected by
+   * validateObserveParams at write time: median/percentile cannot be pooled
+   * from those sufficient statistics (a merged window's median is not a
+   * function of its parts' medians), which conflicts with how
+   * downsample_factor and the reference lens pool windows. See
+   * ROADMAP_BRIEF.md 2026-08-18 (5) §C — the throw ships ahead of any partial
+   * agg_func implementation, on the same "parse but throw" precedent as
+   * decay's exp form before it existed.
+   */
   agg_func?: string;
 }
 

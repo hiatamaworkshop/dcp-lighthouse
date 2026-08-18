@@ -141,6 +141,7 @@ describe("parseBrainAnswer — content is not", () => {
       `{"decay": "exp(tau=0s)"}`,
       `{"decay": "wobble(3)"}`,
       `{"group_by": "agentId"}`,
+      `{"agg_func": "median"}`,
     ];
     for (const lens of bad) {
       const out = parseBrainAnswer(

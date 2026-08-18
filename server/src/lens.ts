@@ -10,9 +10,14 @@
  * precision gain from repetition.
  *
  * Implemented stages: group_by → window_ms (with the `origin`/`align` grid) →
- * downsample_factor → decay (both forms; see applyDecay). agg_func still
- * passes through — callers (replay) keep handing over the same observeParams
- * object unchanged, so filling it later needs no change at any call site.
+ * downsample_factor → decay (both forms; see applyDecay). agg_func has no
+ * separate code path — WindowStat already IS {mean, count, sumSq}, so
+ * `agg_func: "mean"` (or omitting it) is already honoured — but any other
+ * value is rejected by validateObserveParams rather than silently ignored:
+ * median/percentile cannot be pooled from those sufficient statistics, so
+ * they are mathematically incompatible with downsample_factor's and the
+ * reference lens's pooling, not merely unimplemented (ROADMAP_BRIEF.md
+ * 2026-08-18 (5) §C).
  *
  * `decay: "exp(tau=...)"` is what made the weighted statistics real. It gives
  * each event a weight, which turns count/mean/sumSq — the unweighted sufficient
@@ -445,6 +450,20 @@ export function validateObserveParams(lens: QObserveParams): void {
       throw new RangeError(`decay "${lens.decay}" — tau must be greater than zero`);
     }
   }
+  if (lens.agg_func !== undefined && lens.agg_func !== "mean") {
+    // Same precedent as decay's exp form before it was implemented: parse but
+    // throw, rather than silently reporting mean/sumSq numbers under a
+    // agg_func the lens never actually applied. "mean" needs no separate code
+    // path — WindowStat already IS mean/sum/sumSq — but median/percentile
+    // cannot be pooled from those sufficient statistics (two windows' medians
+    // do not merge into the merged window's median), so they are mathematically
+    // incompatible with downsample_factor's and the reference lens's pooling,
+    // not merely unimplemented. See ROADMAP_BRIEF.md 2026-08-18 (5) §C.
+    throw new RangeError(
+      `agg_func "${lens.agg_func}" is not implemented — only "mean" (the default) ` +
+        `is poolable from this module's sufficient statistics`,
+    );
+  }
 }
 
 /**
@@ -490,9 +509,6 @@ export function applyLens(events: readonly LensEvent[], lens: QObserveParams = {
   const window_ms = lens.window_ms ?? DEFAULT_WINDOW_MS;
   const downsampleFactor = lens.downsample_factor ?? 1;
   const outputWindowMs = window_ms * downsampleFactor;
-
-  // Stages not yet implemented — declared so the chain is visible and the
-  // wiring contract is honest. agg_func: passes through.
 
   if (events.length === 0) return { window_ms: outputWindowMs, windows: [] };
 
