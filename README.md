@@ -157,10 +157,16 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       切っていた**ことが判明 (誤警報 7.1% = 補正導入前の値に逆戻り)。二値性の恒等式は
       count を総重みに置き換えれば加重でも成立するので、格子検出を一般化して 4.5% に復帰。
       無加重の数値は 1 つも動いていない。残るのは `agg_func` (median/percentile は
-      十分統計量からプールできず、downsample・参照レンズが依存する分解可能性と噛み合わない)
-- [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)
+      十分統計量からプールできず、downsample・参照レンズが依存する分解可能性と噛み合わない)。
+      **着手前に ROADMAP_BRIEF.md 2026-08-18 (5) §C を読むこと** — median より先に
+      「整合しない組み合わせを throw する」方を実装する順序でないと、動くケースと壊れるケースが黙って混在する
+- [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)。
+      **疎化は「加重」であって新しい統計ではない** — exp decay で実装・較正済みの
+      `weights`/`effectiveN`/加重 `poolStats` をそのまま使う。前提として `referenceUsable` の
+      締め直しが要る (疎化は事象数を減らさないまま有効標本だけ落とすので、減衰より見えにくい)。
+      ヒントは ROADMAP_BRIEF.md 2026-08-18 (5) §B
 
-現在テスト計 328 件、全 green。
+現在テスト計 336 件、全 green。
 
 ## BRAIN_MODE
 
@@ -170,7 +176,17 @@ ANTHROPIC_API_KEY=sk-... BRAIN_MODE=claude npm run dev   # ClaudeBrain を shado
 ```
 
 shadow モードでは **RuleBrain の決定だけが適用され**、ClaudeBrain の提案は
-`[shadow] (not applied) ...` として記録されるだけ。環境変数:
+`[shadow] (not applied) ...` として記録されるだけ。走行中の集計は **`GET /brain`** で読める
+(rule モードでは `{"mode":"rule"}`)。昇格判断の材料はここ:
+
+```sh
+curl -s http://localhost:3001/brain
+# llm:    生涯カウンタ (deliberations / unparseable / refusals / truncated / discarded / rejectedProposals)
+# tally:  primary と shadow の走行中の決定タリー (log の trim を受けない実数)
+# recent: 直近 5 審議の stop_reason と決定型
+```
+
+環境変数:
 
 | | 既定 | |
 |---|---|---|
@@ -183,9 +199,8 @@ shadow モードでは **RuleBrain の決定だけが適用され**、ClaudeBrai
 **モデル選択の落とし穴 (2026-08-18 実測)**:
 
 - **`claude-opus-5` は現在このプロンプトを拒否する** — `stop_reason:"refusal"`、出力 0 トークン
-  (11/11 再現)。最小プロンプトには正常応答するのでアクセス問題ではない。
-  さらに **`ClaudeBrain` は `onMeta` を配線していないため refusal が `stats.unparseable` に化ける**ので、
-  ログ上は「モデルが JSON を書けない」ように見える。原因追跡が効かない状態なので、
-  現状 opus を指定してはいけない
+  (11/11 再現)。最小プロンプトには正常応答するのでアクセス問題ではない。現状 opus を指定してはいけない。
+  かつては refusal が `stats.unparseable` に化けて「モデルが JSON を書けない」と読めたが、
+  **`onMeta` を配線したので `/brain` の `refusals` / `lastStopReason` で区別できる** (2026-08-18 修正)
 - **`claude-haiku-4-5` は `output_config.effort` を 400 で拒否**する。指定するなら
   `index.ts` の `makeAnthropicAsk({ ..., effort: "low" })` から `effort` を外す必要がある

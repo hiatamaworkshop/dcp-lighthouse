@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1/L2/L3/L4 完了 (agg_func のみ保留)・L5 未着手 (テスト328件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1/L2/L3/L4 完了 (agg_func のみ保留)・L5 未着手 (テスト336件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -220,7 +220,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
 - **L1 ✅ (2026-07-03)** 足場固め — field findings の core 還元 (ts≤now クロック方針 / count 窓・有効性 / baseline ゲート+床)。テスト 113→121 件
 - **L2 ✅ (2026-07-03)** Brain write surface + replay 表面化 — $Q[schema] baseline_delta 昇格・区間指定 replay (fromTs/toTs)・dashboard 粗/細対比 UI。テスト 121→124 件。ブラウザ実地確認も完了 (2026-07-25)
 - **L3 ✅ (2026-08-18)** **ClaudeBrain (本丸)** — `claude-brain.ts` + `shadow-brain.ts`。
-  `BRAIN_MODE=claude` で RuleBrain と shadow 併走。テスト 292→328 件。設計判断 4 つ:
+  `BRAIN_MODE=claude` で RuleBrain と shadow 併走。テスト 292→336 件。設計判断 4 つ:
   - **審議を tick から切り離した** — `BrainAdapter.decide()` は同期、tick は 1s、モデルはどちらでもない。
     インターフェースを非同期化すると RuleBrain/dashboard/E2E が巻き添えなので、`observe()` が
     審議を開始しうる (in-flight ラッチ + `minIntervalMs` の床 = 支出ガード 2 枚)、`decide()` は
@@ -261,9 +261,23 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
       §12 の転写の罠も踏まない (LLM が写せる判定が存在しない)。**未実装**
   - **Opus 5 はこのプロンプトを拒否する (2026-08-18)** — `stop_reason:"refusal"`、出力 0 tok、
     11/11 再現。最小プロンプトには正常応答するのでアクセス問題ではない。引き金は
-    プレアンブル冒頭 2 行の**組**(単独では通る)。**`ClaudeBrain` は `onMeta` を配線していないので
-    refusal が `stats.unparseable` に化ける** = 「モデルが JSON を書けない」と誤読する。未修正。
-    付随: **Haiku 4.5 は `output_config.effort` を 400 で拒否**する
+    プレアンブル冒頭 2 行の**組**(単独では通る)。かつては `onMeta` 未配線で refusal が
+    `stats.unparseable` に化けた (=「モデルが JSON を書けない」と誤読) が、**2026-08-18 のレビューで修正**
+    (下記)。付随: **Haiku 4.5 は `output_config.effort` を 400 で拒否**する
+  - **レビューで出た欠陥 3 件 (2026-08-18、同日修正。テスト 328→336 件)**:
+    - **`ClaudeBrain.reset()` が in-flight の審議を切り離していなかった** — `/demo/start` は
+      審議中 (5〜10s 対 15s 床) に来るのが常態。前シナリオの決定が新シナリオに drain され、
+      さらに reset がラッチを開けるので**同時 2 本**になっていた (支出ガード 2 枚の 1 枚が無効)。
+      `generation` カウンタで解決: reset は世代を上げるだけで**ラッチは開けない**。
+      走っている呼び出しがラッチの持ち主なので `finally` は無条件に返す (条件付きにすると
+      reset 後に閉じたまま固着する)。捨てた答えは `stats.discarded` に数える (課金は発生済み)
+    - **shadow の証拠に読み手がいなかった** — `getSummary`/`getStats` はテスト以外に呼び出し元ゼロ。
+      「これらのログの証拠で昇格を判断する」と書いてあるのに出口が無い状態だった。
+      **`GET /brain`** を新設 (dashboard は `brainDiagnostics?: () => unknown` を受けるだけで
+      ClaudeBrain/ShadowBrain を知らないまま)。`onMeta` 配線もここで閉じた
+    - **`ShadowSummary` が保持ログを数えていた** — `maxEntries` を超えると古い決定が静かに
+      counts から消え、**長時間走行ほど「不一致が少ない」方向に過小報告**する。
+      record() 時点の累積タリーに変更、`recorded`/`retained` を併記
   - **実課金の罠 (先回りして潰した)**: Sonnet 5/Opus 5 は thinking が既定オンで `max_tokens` は
     思考+本文の合計上限。`anthropic-ask.ts` に `effort` を optional 追加し Brain 側で
     `maxTokens:2048, effort:"low"` を明示。**既定は不変** = 対策B のリクエストはバイト同一のまま
@@ -338,8 +352,26 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     問題なのではない。median/percentile は**十分統計量からプールできない** (2 窓の median を
     マージしても merged median にならない)。`downsample` と参照レンズのプーリングは
     どちらもこの分解可能性に依存しているので、`agg_func: median` と `downsample_factor` の
-    組み合わせは現設計では**数学的に整合しない**。実装するなら生値保持か sketch (t-digest 等) が要る
-- **L5** retention 参照ゾーン (疎化)
+    組み合わせは現設計では**数学的に整合しない**。実装するなら生値保持か sketch (t-digest 等) が要る。
+    **着手順序**: median より先に「整合しない組み合わせを throw する」方を入れる
+    (`decay: exp(τ)` で作った前例と同じ。逆順だと動くケースと壊れるケースが黙って混在する期間ができる)。
+    curator 側は 0 を返さず `unscoredGroups` と同形で「採点できない」と申告する。詳細は
+    ROADMAP_BRIEF.md 2026-08-18 (5) §C
+- **L5** retention 参照ゾーン (疎化) — **疎化は「加重」であって新しい統計ではない**。
+  exp decay で実装・較正済みの `weights{sumW,sumW2}` / `effectiveN` (Kish) / 加重 `poolStats` を
+  そのまま使う (並行の統計パスを新設しない)。踏んではいけないのは **`count` に代表数を入れること** —
+  `count` は実保持事象数のままでないと `isScorable` の標本サイズ判定が
+  「持っていない証拠を持っている」と信じる。格子検出は加重で一般化済みなので疎化しても
+  連続性補正は切れない (この罠は閉じ済み)。**前提条件**: `referenceUsable` の判定は
+  `effectiveN >= 2` = 「分散が存在するか」の床でしかなく、疎化は**事象数を減らさないまま
+  有効標本だけ落とす**ので減衰より見えにくい。L5 の前に締め直すのが順序として正しい。
+  詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §B
+- **分業アーキテクチャ (未実装)** — 判定は curator に既にある。足りないのは配線で、
+  ゲートは Brain の中ではなく**決定が返ってきた後**に置く (`meta.snapshotTs` が照合先の
+  package を既に名乗っている)。`renderBrainPrompt` に σ / タイル判定を**入れないこと**は
+  維持すべき不変条件 (§12 の転写の罠)。`stats.rejectedProposals` は
+  「形式が不正」と「断定の裏が取れない」で割る (性質の違う findings)。
+  詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §A
 - 常設: 実データ派生 (非公開の姉妹プロジェクト) からの還元フィルタ — 「機構を行使/変更する or ドメイン非依存知見を生む」もののみ灯台の実証に数える
 
 ---
