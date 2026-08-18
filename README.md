@@ -164,11 +164,14 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       着手前に ROADMAP_BRIEF.md 2026-08-18 (5) §C を読むこと
 - [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)。
       **疎化は「加重」であって新しい統計ではない** — exp decay で実装・較正済みの
-      `weights`/`effectiveN`/加重 `poolStats` をそのまま使う。前提として `referenceUsable` の
-      締め直しが要る (疎化は事象数を減らさないまま有効標本だけ落とすので、減衰より見えにくい)。
-      ヒントは ROADMAP_BRIEF.md 2026-08-18 (5) §B
+      `weights`/`effectiveN`/加重 `poolStats` をそのまま使う。**前提条件は締め直し済み
+      (2026-08-18)**: `referenceUsable` の床を `effectiveN >= 2` から `effectiveN >= MIN_VALID_COUNT`
+      に上げ、`referenceUsable` フラグ・`buildScoringUnits`・`detectSteps` の3箇所に分かれていた
+      判定 (実は既にズレていた — グループ/step 側は分散ゼロの参照を採点可能扱いしていた) を
+      `isReferenceUsable` 1個に統一。**疎化ロジック本体は未実装**。ヒントは ROADMAP_BRIEF.md
+      2026-08-18 (5) §B
 
-現在テスト計 339 件、全 green。
+現在テスト計 341 件、全 green。
 
 ## BRAIN_MODE
 

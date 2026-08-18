@@ -3517,3 +3517,50 @@ L5 の前に `referenceUsable` を実用的な `effectiveN` 下限に締める�
   無いので `isScorable`/`comparisonSE`/`gateZ`/`detectLattice` の入力が成立しない
 - 着手前に `LensResult` 構造変化の curator 影響を先に設計すること (2026-06-11 から
   一貫して出ている警告、§C 本文にも記載済み)
+
+---
+
+## 2026-08-18 (7) — `referenceUsable`: 床を締め、3箇所の乖離を統一 (§B の前段のみ)
+
+§B の前提条件だけを先にやった (L5 疎化本体はまだ)。§C と同じ「軽量な先行部分だけ切り出す」パターン。
+
+### やったこと
+
+- `snapshot-curator.ts` に `isReferenceUsable(ref: RefStats): boolean` を新設。
+  `ref.effectiveN >= MIN_VALID_COUNT && Number.isFinite(ref.variance) && ref.variance > 0`。
+  床を `effectiveN >= 2` (Bessel 補正が数値を出せる最低限、その数値が意味を持つ保証ではない) から
+  `effectiveN >= MIN_VALID_COUNT` (=3、`isScorable` が観測窓側に使っているのと同じ
+  「正規近似が意味を持つには一握りのサンプルが要る」という理由を、参照側にも同じ値で適用) に上げた。
+  新しい定数は発明していない — 既に測定・正当化済みの `MIN_VALID_COUNT` を再利用しただけ
+- **副産物で実バグを1つ潰した**: 統一前は 3箇所が個別に判定をコピーしていて、既に**乖離していた**。
+  `referenceUsable` フラグ (2026-08-17 に `variance > 0` を追加済み) はゼロ分散の参照を弾いていたが、
+  `buildScoringUnits` (グループ別ペアリング) と `detectSteps` (連続ラン判定) は `effectiveN>=2` と
+  `Number.isFinite(variance)` だけ見ていて `variance>0` を見ていなかった —
+  `Number.isFinite(0)` は true なので、全windowが同一値 (例: 全pass) の参照グループは
+  「採点可能」として素通りしていた。実害は限定的 (comparisonSE が 0 を返すので実際にタイルが
+  誤発火することはない) だが、`unscoredGroups` に載らず**無言でスコア対象**扱いになる —
+  健全なグループと見分けがつかない、まさに `isScorable` が一度踏んだ「3コピーが揃っている
+  つもりでズレていた」形の再発。3箇所を `isReferenceUsable` 1個の呼び出しに統一して閉じた
+- 新規テスト (`snapshot-curator.test.ts`):
+  - 床の引き上げ自体を固定するテスト (`effectiveN===2` の参照が real variance を持っていても
+    now-false になることを確認。旧床では true だった)
+  - グループ側の実バグを再現するテスト (`agent-c` の参照が3窓とも100% passで
+    event数は75と十分、分散のみゼロ → 修正前は無言でスコア対象、修正後は `unscoredGroups` に載る)
+  - テスト 339→341件、`npx tsc` 通過、全 green (`npm test` フルスイート、calibration/AB含め無回帰)
+
+### 確認したこと (影響範囲)
+
+- `effectiveN` は常に `count` 以下 (Kish 効果的サンプルサイズの定義上)。よって
+  `effectiveN >= MIN_VALID_COUNT` を要求すると自動的に `count >= MIN_VALID_COUNT` も成立する —
+  参照側に別途 `count` の床を足す必要はない
+- 既存テストは全て `count` に大きな値 (デフォルト10、または実イベント生成で数十〜数百) を
+  使っており、`effectiveN` が2〜3の境界に触れるフィクスチャは無かった (`count:1` の劣化ケースが
+  数件あるが、いずれも新旧どちらの床でも false になる) — 既存の137件超の green は無傷
+
+### 残っている部分 (§B 本体、未着手のまま)
+
+- retention-buffer.ts への疎化ロジック本体。「N事象に1つ残す = 重み」として既存の
+  `weights{sumW,sumW2}`/`effectiveN`/加重 `poolStats` にそのまま乗せる設計は §B に記載済みだが未実装
+- 疎化された窓の `count` は**実際に保持している事象数のまま**でなければならない
+  (代表数を入れると `isScorable` の標本サイズ判定が壊れる) という制約は今回の変更と直交、
+  引き続き有効
