@@ -335,6 +335,7 @@ import { ObservationOverlay } from "./lens-view.js";
  */
 async function startTestServer(
   generator: unknown,
+  brainDiagnostics?: () => unknown,
 ): Promise<{ base: string; close: () => Promise<void> }> {
   const registry = new QRegistry();
   const server = new DashboardServer(
@@ -345,6 +346,7 @@ async function startTestServer(
     null as never,
     new ObservationOverlay(registry),
     { replay: () => ({ window_ms: 1000, windows: [] }), getRetentionWindowMs: () => 120_000 },
+    brainDiagnostics,
   ).start({ port: 0 });
 
   await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -373,6 +375,33 @@ test("a throwing handler answers the request instead of killing the process", as
     assert.ok(after, "server must still accept requests after a handler threw");
   } finally {
     await close();
+  }
+});
+
+test("/brain serves the shadow's evidence, and says so when there is none", async () => {
+  // The reason this endpoint exists: getSummary()/getStats() had no caller
+  // outside the tests, so a whole shadow run's counters were unreadable while
+  // it was running — which is how a refusal spent an entire run being
+  // reported as an unparseable answer.
+  const quiet = await startTestServer({ getCurrentLoad: () => ({}) });
+  try {
+    assert.deepEqual(await (await fetch(`${quiet.base}/brain`)).json(), { mode: "rule" },
+      "no LLM Brain is an answer, not a broken route");
+  } finally {
+    await quiet.close();
+  }
+
+  const loud = await startTestServer(
+    { getCurrentLoad: () => ({}) },
+    () => ({ mode: "claude", llm: { refusals: 3, unparseable: 3 }, tally: { recorded: 7 } }),
+  );
+  try {
+    const body = await (await fetch(`${loud.base}/brain`)).json();
+    assert.equal(body.mode, "claude");
+    assert.equal(body.llm.refusals, 3, "the counter that distinguishes refusal from malformed output");
+    assert.equal(body.tally.recorded, 7);
+  } finally {
+    await loud.close();
   }
 });
 

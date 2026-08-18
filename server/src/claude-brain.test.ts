@@ -349,6 +349,118 @@ describe("ClaudeBrain — deliberation is detached from the tick", () => {
     assert.match(brain.currentPrompt(), /no observations yet/);
   });
 
+  test("an answer still in the post at reset() never reaches the next scenario", async () => {
+    // /demo/start resets mid-deliberation as a matter of course: a call runs
+    // 5-10s against a 15s floor. Before the generation guard, the previous
+    // scenario's decision was drained by the next one — and index.ts applies a
+    // replayRequest by type, so as primary this would have written $Q.
+    let resolveAsk!: (answer: string) => void;
+    const brain = new ClaudeBrain({
+      askFn: () => new Promise<string>((r) => { resolveAsk = r; }),
+      minIntervalMs: 0,
+    });
+
+    brain.observe(snap(1000, 0.70));
+    brain.reset();                                    // scenario boundary
+    resolveAsk(`{"decisions":[{"type":"quarantine","reason":"previous scenario","agentId":"agent-C"}]}`);
+    await settle();
+
+    assert.deepEqual(brain.decide(), [], "a superseded answer must not be delivered");
+    assert.equal(brain.getDeliberations().length, 0, "nor recorded against the new scenario");
+    // Counted, not silently dropped: the call was issued and billed.
+    assert.equal(brain.getStats().discarded, 1);
+    assert.equal(brain.getStats().deliberations, 0);
+  });
+
+  test("reset() does not open the in-flight latch", async () => {
+    // The latch is one of the two spend guards. reset() used to clear it, so a
+    // second call started beside the first and the older one's finally then
+    // cleared the flag out from under the newer.
+    let calls = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const brain = new ClaudeBrain({
+      askFn: async () => { calls++; await gate; return `{"decisions":[]}`; },
+      minIntervalMs: 15_000,
+    });
+
+    brain.observe(snap(1000));
+    brain.reset();
+    brain.observe(snap(2000));
+    await settle();
+    assert.equal(calls, 1, "resetting must not let a second call start beside the first");
+
+    // ...and the latch is released when the outstanding call returns, so the
+    // new scenario is not locked out forever.
+    release();
+    await settle();
+    assert.equal(brain.getStats().inFlight, false);
+    brain.observe(snap(3000));
+    await settle();
+    assert.equal(calls, 2, "the interval floor is rewound by reset, so the next tick deliberates");
+  });
+
+  test("a refusal is named as one, not filed under 'could not write JSON'", async () => {
+    // Opus 5 refuses this Brain's prompt outright (11/11, 2026-08-18): zero
+    // content blocks, so the answer is "". Without the stop_reason it lands in
+    // `unparseable` and reads as a model that cannot produce the format.
+    // Reported from INSIDE the askFn, which is where makeAnthropicAsk reports
+    // it: onMeta fires before the promise resolves, so the meta always lands
+    // before the awaiting deliberation resumes.
+    let brain!: ClaudeBrain;
+    brain = new ClaudeBrain({
+      askFn: async () => {
+        brain.noteAnswerMeta({ stopReason: "refusal", contentBlockTypes: [], outputTokens: 0, textLength: 0 });
+        return "";
+      },
+      minIntervalMs: 0,
+    });
+    brain.observe(snap(1000));
+    await settle();
+
+    const stats = brain.getStats();
+    assert.equal(stats.refusals, 1);
+    assert.equal(stats.lastStopReason, "refusal");
+    assert.equal(stats.unparseable, 1, "it did also fail to parse — both facts are true");
+    assert.equal(brain.getDeliberations().at(-1)!.answerMeta?.stopReason, "refusal",
+      "the record must carry why the answer was empty, not just that it was");
+  });
+
+  test("a truncated answer is distinguished from a refused one", async () => {
+    let brain!: ClaudeBrain;
+    brain = new ClaudeBrain({
+      askFn: async () => {
+        brain.noteAnswerMeta({ stopReason: "max_tokens", contentBlockTypes: ["text"], outputTokens: 2048, textLength: 7 });
+        return '{"decis';
+      },
+      minIntervalMs: 0,
+    });
+    brain.observe(snap(1000));
+    await settle();
+
+    assert.equal(brain.getStats().truncated, 1);
+    assert.equal(brain.getStats().refusals, 0);
+    assert.equal(brain.getDeliberations().at(-1)!.answerMeta?.stopReason, "max_tokens");
+  });
+
+  test("lifetime counters survive a reset; the per-scenario record does not", async () => {
+    const brain = new ClaudeBrain({
+      askFn: async () => "not json at all",
+      minIntervalMs: 0,
+    });
+    brain.observe(snap(1000));
+    await settle();
+    assert.equal(brain.getStats().unparseable, 1);
+    assert.equal(brain.getDeliberations().length, 1);
+
+    brain.reset();
+    // How the model has behaved is a fact about the model, not about the
+    // scenario that happened to be running; what it said about a stream that
+    // no longer exists is not.
+    assert.equal(brain.getStats().unparseable, 1);
+    assert.equal(brain.getDeliberations().length, 0);
+  });
+
   test("describe() identifies the brain for the decision log", () => {
     const brain = new ClaudeBrain({ askFn: async () => "", minIntervalMs: 5_000 });
     assert.match(brain.describe(), /ClaudeBrain/);

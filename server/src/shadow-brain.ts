@@ -41,6 +41,15 @@ export interface ShadowEntry {
   decision: BrainDecision;
 }
 
+/**
+ * Totals over the whole run, NOT over the retained log.
+ *
+ * The log is bounded and trims from the front, so counting it would quietly
+ * turn this into a summary of the tail — and it would do so exactly on the long
+ * runs the comparison is for, always in the direction of reporting less
+ * disagreement than there was. The counters below are accumulated as decisions
+ * are recorded and survive the trim; `getLog()` remains the bounded detail view.
+ */
 export interface ShadowSummary {
   /** Decision counts by type, per side. */
   primary: Record<string, number>;
@@ -50,6 +59,9 @@ export interface ShadowSummary {
   shadowSubjects: string[];
   /** Errors thrown by the shadow and swallowed (see observe/decide). */
   shadowErrors: number;
+  /** Decisions recorded in total, and how many of those the log still holds. */
+  recorded: number;
+  retained: number;
 }
 
 export interface ShadowBrainOptions {
@@ -80,6 +92,9 @@ export class ShadowBrain implements BrainAdapter {
   private shadowErrors = 0;
   private lastTs = 0;
   private nextSeq = 0;
+  /** Run totals, accumulated at record() time so the log's trim cannot erode them. */
+  private totals = { primary: emptyTally(), shadow: emptyTally() };
+  private recorded = 0;
 
   constructor(
     private readonly primary: BrainAdapter,
@@ -119,6 +134,8 @@ export class ShadowBrain implements BrainAdapter {
   reset(): void {
     this.log.length = 0;
     this.shadowErrors = 0;
+    this.totals = { primary: emptyTally(), shadow: emptyTally() };
+    this.recorded = 0;
     resetIfPossible(this.primary);
     this.guard(() => resetIfPossible(this.shadow));
   }
@@ -128,33 +145,24 @@ export class ShadowBrain implements BrainAdapter {
   }
 
   getSummary(): ShadowSummary {
-    const count = (source: "primary" | "shadow"): Record<string, number> => {
-      const out: Record<string, number> = {};
-      for (const e of this.log) {
-        if (e.source === source) out[e.decision.type] = (out[e.decision.type] ?? 0) + 1;
-      }
-      return out;
-    };
-    const subjects = (source: "primary" | "shadow"): string[] =>
-      [
-        ...new Set(
-          this.log
-            .filter((e) => e.source === source)
-            .map((e) => subjectOf(e.decision))
-            .filter((s): s is string => s !== null),
-        ),
-      ].sort();
-
     return {
-      primary: count("primary"),
-      shadow: count("shadow"),
-      primarySubjects: subjects("primary"),
-      shadowSubjects: subjects("shadow"),
+      primary: { ...this.totals.primary.types },
+      shadow: { ...this.totals.shadow.types },
+      primarySubjects: [...this.totals.primary.subjects].sort(),
+      shadowSubjects: [...this.totals.shadow.subjects].sort(),
       shadowErrors: this.shadowErrors,
+      recorded: this.recorded,
+      retained: this.log.length,
     };
   }
 
   private record(source: "primary" | "shadow", decision: BrainDecision): void {
+    const tally = this.totals[source];
+    tally.types[decision.type] = (tally.types[decision.type] ?? 0) + 1;
+    const subject = subjectOf(decision);
+    if (subject !== null) tally.subjects.add(subject);
+    this.recorded++;
+
     this.log.push({ seq: this.nextSeq++, ts: this.lastTs, source, decision });
     if (this.log.length > this.maxEntries) this.log.splice(0, this.log.length - this.maxEntries);
   }
@@ -173,6 +181,15 @@ export class ShadowBrain implements BrainAdapter {
       this.onShadowError?.(err instanceof Error ? err : new Error(String(err)));
     }
   }
+}
+
+interface Tally {
+  types: Record<string, number>;
+  subjects: Set<string>;
+}
+
+function emptyTally(): Tally {
+  return { types: {}, subjects: new Set() };
 }
 
 function resetIfPossible(brain: BrainAdapter): void {

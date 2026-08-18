@@ -11,6 +11,7 @@
  *   GET /control/baseline-delta?value=N — write $Q[schema].baseline_delta
  *   GET /control/coarse-downsample?factor=N — write $Q[observe:...#coarse].downsample_factor
  *   GET /status             — current load
+ *   GET /brain              — Brain diagnostics (shadow tally, LLM counters)
  *
  * SSE payload is always newline-delimited JSON ("data: {...}\n\n").
  * Mirrors the Minecraft dashboard SSE pattern.
@@ -218,6 +219,21 @@ export class DashboardServer {
     private readonly curator: SnapshotCurator,
     private readonly overlay: ObservationOverlay,
     private readonly buffer: ReplaySource,
+    /**
+     * Serialisable Brain diagnostics for GET /brain (ROADMAP L3).
+     *
+     * A callback rather than the Brain itself, so this module keeps knowing
+     * nothing about ClaudeBrain or ShadowBrain — `reset()` stays the whole of
+     * the Brain surface the dashboard depends on. index.ts owns the shape
+     * because index.ts is what decided which Brains exist.
+     *
+     * It exists at all because the shadow's evidence had no reader: index.ts
+     * says promotion is "a later call made on evidence from these logs", but
+     * getSummary() and getStats() had no caller outside the tests, so the only
+     * observable output was console lines — and a counter nobody can read is
+     * how a refusal spent a whole run being reported as unparseable.
+     */
+    private readonly brainDiagnostics?: () => unknown,
   ) {}
 
   /**
@@ -531,6 +547,15 @@ export class DashboardServer {
       this.registry.set("observe:test_result:v1#coarse", { ...current, downsample_factor: factor });
       jsonHeaders(res);
       res.end(JSON.stringify({ scope: "observe:test_result:v1#coarse", downsample_factor: factor }));
+      return;
+    }
+
+    if (url.startsWith("/brain")) {
+      // `mode: "rule"` rather than a 404: "this build has no LLM Brain" is an
+      // answer, and a 404 would read to a polling client as a broken route.
+      const body = JSON.stringify(this.brainDiagnostics?.() ?? { mode: "rule" });
+      jsonHeaders(res);
+      res.end(body);
       return;
     }
 

@@ -191,6 +191,48 @@ describe("ShadowBrain — the record", () => {
       "every entry should be seen exactly once despite the log trimming under the reader");
   });
 
+  test("the summary counts the whole run, not the retained tail", () => {
+    // The log is bounded and trims from the front. Counting it made the summary
+    // silently undercount exactly on the long runs the shadow comparison is
+    // for — and always toward reporting less activity than there was.
+    const primary = new StubBrain("primary");
+    const shadow = new StubBrain("shadow");
+    const sb = new ShadowBrain(primary, shadow, { maxEntries: 3 });
+
+    for (let i = 0; i < 10; i++) {
+      primary.queued = [reroute("agent-C")];
+      shadow.queued = [reroute(`agent-${i}`)];
+      sb.observe(snap(1000 * i));
+      sb.decide();
+    }
+
+    const s = sb.getSummary();
+    assert.equal(s.primary.rerouteSchema, 10, "10 primary decisions were recorded");
+    assert.equal(s.shadow.rerouteSchema, 10);
+    assert.equal(s.recorded, 20);
+    assert.equal(s.retained, 3, "while the detail log still holds only the cap");
+    // Subjects the trim would have erased are still named.
+    assert.ok(s.shadowSubjects.includes("rerouteSchema:agent-0"),
+      "a subject named early in the run must not vanish with the entry");
+    assert.deepEqual(s.primarySubjects, ["rerouteSchema:agent-C"]);
+  });
+
+  test("reset clears the run tallies too", () => {
+    const primary = new StubBrain("primary");
+    const sb = new ShadowBrain(primary, new StubBrain("shadow"));
+    primary.queued = [reroute("agent-C")];
+    sb.observe(snap(1000));
+    sb.decide();
+    assert.equal(sb.getSummary().recorded, 1);
+
+    sb.reset();
+    const s = sb.getSummary();
+    assert.deepEqual(s.primary, {});
+    assert.deepEqual(s.primarySubjects, []);
+    assert.equal(s.recorded, 0);
+    assert.equal(s.retained, 0);
+  });
+
   test("describe() names both sides", () => {
     const sb = new ShadowBrain(new StubBrain("RuleBrain v1"), new StubBrain("ClaudeBrain"));
     assert.equal(sb.describe(), "ShadowBrain(primary=RuleBrain v1, shadow=ClaudeBrain)");

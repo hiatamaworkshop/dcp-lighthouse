@@ -83,13 +83,30 @@ const CLAUDE_BRAIN_INTERVAL_MS = Number(process.env.CLAUDE_BRAIN_INTERVAL_MS ?? 
 
 let shadowBrain: ShadowBrain | undefined;
 let brain: ResettableBrain = ruleBrain;
+/** Backs GET /brain. Left undefined under BRAIN_MODE=rule (see dashboard.ts). */
+let brainDiagnostics: (() => unknown) | undefined;
 
 if (BRAIN_MODE === "claude") {
-  const claudeBrain = new ClaudeBrain({
+  // Declared before the askFn that reports into it: AskFn returns a bare string
+  // by design, so `stop_reason` has to come back through this side channel, and
+  // the channel's only possible destination is the Brain being built from it.
+  // The closure runs per answer, long after the assignment below.
+  let claudeBrain: ClaudeBrain | undefined;
+  const askFn = makeAnthropicAsk({
+    model: CLAUDE_BRAIN_MODEL,
     // effort:"low" + a 2048 budget: the Brain returns a short JSON decision, and
     // on Sonnet 5 / Opus 5 thinking is on by default and shares max_tokens with
     // the answer — an unbounded think can eat the budget and truncate the JSON.
-    askFn: makeAnthropicAsk({ model: CLAUDE_BRAIN_MODEL, maxTokens: 2048, effort: "low" }),
+    maxTokens: 2048,
+    effort: "low",
+    // Without this a refusal — Opus 5 declines this prompt outright, 11/11 on
+    // 2026-08-18 — arrives as an empty string and is counted as "the model
+    // could not write JSON". Two very different findings, one indistinguishable
+    // symptom, until the stop_reason travels with it.
+    onMeta: (meta) => claudeBrain?.noteAnswerMeta(meta),
+  });
+  claudeBrain = new ClaudeBrain({
+    askFn,
     minIntervalMs: CLAUDE_BRAIN_INTERVAL_MS,
     onError: (err) => console.warn(`[shadow] deliberation failed: ${err.message}`),
   });
@@ -97,6 +114,30 @@ if (BRAIN_MODE === "claude") {
     onShadowError: (err) => console.warn(`[shadow] ${err.message}`),
   });
   brain = shadowBrain;
+
+  const shadow = shadowBrain;
+  const llm = claudeBrain;
+  brainDiagnostics = () => ({
+    mode: "claude",
+    model: CLAUDE_BRAIN_MODEL,
+    minIntervalMs: CLAUDE_BRAIN_INTERVAL_MS,
+    /** Lifetime counters — refusals/truncated/discarded do not reset per scenario. */
+    llm: llm.getStats(),
+    /** Run tallies for both sides. Only `primary` was ever applied. */
+    tally: shadow.getSummary(),
+    /** Newest first: the shape of what the model actually said, for eyeballing. */
+    recent: llm
+      .getDeliberations()
+      .slice(-5)
+      .reverse()
+      .map((d) => ({
+        snapshotTs: d.snapshotTs,
+        latencyMs: d.latencyMs,
+        stopReason: d.answerMeta?.stopReason ?? null,
+        types: d.decisions.map((x) => x.type),
+        error: d.error,
+      })),
+  });
   console.log(
     `[lighthouse] BRAIN_MODE=claude — ${CLAUDE_BRAIN_MODEL} running in shadow ` +
       `beside RuleBrain, deliberating at most every ${CLAUDE_BRAIN_INTERVAL_MS}ms. ` +
@@ -106,7 +147,7 @@ if (BRAIN_MODE === "claude") {
   throw new Error(`BRAIN_MODE must be "rule" or "claude", got "${BRAIN_MODE}"`);
 }
 
-const dashboard  = new DashboardServer(generator, adapter, brain, registry, curator, overlay, buffer);
+const dashboard  = new DashboardServer(generator, adapter, brain, registry, curator, overlay, buffer, brainDiagnostics);
 
 // Two parallel observation views
 overlay.add("coarse", "test_result:v1", { view: "coarse" });

@@ -25,6 +25,13 @@
  * between deliberations and an in-flight latch means a slow call never stacks
  * a second one behind it.
  *
+ * reset() deliberately does NOT open that latch. A scenario boundary
+ * (/demo/start) arrives while a call is very likely still outstanding — a
+ * deliberation runs 5-10s against a 15s floor — and clearing the flag there let
+ * a second call start beside the first, which is the one thing the latch exists
+ * to prevent. The outstanding call keeps the latch until it returns; what reset
+ * changes is that its ANSWER is then thrown away (see `generation`).
+ *
  * ── The proposal boundary ───────────────────────────────────────────────────
  *
  * index.ts already notes that an LLM Brain writing $Q is the caller most
@@ -42,6 +49,7 @@
  */
 
 import type { AskFn } from "./ab-harness.js";
+import type { AskMeta } from "./anthropic-ask.js";
 import type { BrainAdapter, BrainDecision, BrainDecisionType } from "./brain-adapter.js";
 import type { STSnapshot } from "./testor-adapter.js";
 import type { QObserveParams } from "./q-registry.js";
@@ -89,6 +97,13 @@ export interface ClaudeBrainOptions {
   onError?: (err: Error) => void;
 }
 
+/**
+ * Counters over the LIFETIME of the process, deliberately not cleared by
+ * reset(). They answer "how has this model behaved, and what has it cost",
+ * which are questions about the model and the account rather than about the
+ * scenario currently running. `getDeliberations()` is the scenario-scoped view
+ * and IS cleared, so the two disagree after a reset by design.
+ */
 export interface ClaudeBrainStats {
   deliberations: number;
   failures: number;
@@ -96,6 +111,22 @@ export interface ClaudeBrainStats {
   unparseable: number;
   /** Decisions dropped because their type or their proposed lens was invalid. */
   rejectedProposals: number;
+  /**
+   * Answers the model DECLINED to give (`stop_reason: "refusal"`), which arrive
+   * as an empty string and would otherwise land in `unparseable` — reading as
+   * "the model cannot write JSON" when it is "the model would not answer". Not
+   * hypothetical: Opus 5 refuses this Brain's prompt 11 times out of 11
+   * (ROADMAP_BRIEF.md 2026-08-18). Refusals are counted here AND in
+   * `unparseable`, because an empty answer really did fail to parse; this
+   * counter says how many of them had a known reason.
+   */
+  refusals: number;
+  /** Answers cut off at the token budget (`stop_reason: "max_tokens"`). */
+  truncated: number;
+  /** Answers that arrived after a reset() and were thrown away (see `generation`). */
+  discarded: number;
+  /** The most recent `stop_reason` seen, or null when the seam reports none. */
+  lastStopReason: string | null;
   /** True while a call is outstanding. */
   inFlight: boolean;
 }
@@ -108,6 +139,11 @@ export interface DeliberationRecord {
   decisions: BrainDecision[];
   /** Raw answer text, so an unparseable response can be inspected rather than guessed at. */
   rawAnswer: string;
+  /**
+   * Per-answer diagnostics, when the askFn reports them (see noteAnswerMeta).
+   * Absent under a stub or a recorded transcript, which have no stop_reason.
+   */
+  answerMeta?: AskMeta;
   error?: string;
 }
 
@@ -335,12 +371,28 @@ export class ClaudeBrain implements BrainAdapter {
 
   private inFlight = false;
   private lastDeliberationAt = Number.NEGATIVE_INFINITY;
-  private stats: ClaudeBrainStats = {
+  /**
+   * Bumped by reset(). A deliberation captures it before awaiting and compares
+   * on the way back: an answer from a superseded generation is about a stream
+   * that no longer exists and must not reach `arrived`.
+   */
+  private generation = 0;
+  /** Diagnostics for the answer currently being awaited (see noteAnswerMeta). */
+  private pendingMeta?: AskMeta;
+  /**
+   * `inFlight` is NOT held here — getStats() reads the live field. Two copies
+   * of one fact is how the curator's scorability test drifted into three
+   * disagreeing versions; one is enough.
+   */
+  private stats: Omit<ClaudeBrainStats, "inFlight"> = {
     deliberations: 0,
     failures: 0,
     unparseable: 0,
     rejectedProposals: 0,
-    inFlight: false,
+    refusals: 0,
+    truncated: 0,
+    discarded: 0,
+    lastStopReason: null,
   };
 
   constructor(opts: ClaudeBrainOptions) {
@@ -380,18 +432,53 @@ export class ClaudeBrain implements BrainAdapter {
     return `ClaudeBrain (LLM, min interval ${this.minIntervalMs}ms, history ${this.historySize} ticks)`;
   }
 
-  /** Mirrors RuleBrain.reset(): clear per-scenario state, keep nothing stale. */
+  /**
+   * Mirrors RuleBrain.reset(): clear per-scenario state, keep nothing stale.
+   *
+   * "Nothing stale" has to include the answer already in the post. RuleBrain
+   * decides synchronously, so for it a reset is complete the moment it returns;
+   * this Brain may have a call outstanding, and that call was reasoning about
+   * the stream the reset just ended. Bumping the generation makes the answer
+   * arrive into a void. Measured before this existed: a `quarantine agent-C`
+   * provoked at ts=1000 was drained by the NEXT scenario and, had this Brain
+   * been primary rather than shadow, would have reached registry.set.
+   *
+   * `inFlight` is left alone on purpose — see the class comment. The
+   * outstanding call still owns the latch and clears it when it returns, and
+   * `lastDeliberationAt` is rewound here so a fresh deliberation starts on the
+   * first tick after that, without waiting out the interval floor as well.
+   */
   reset(): void {
+    this.generation++;
     this.history = [];
     this.arrived = [];
     this.deliberations = [];
-    this.inFlight = false;
-    this.stats.inFlight = false;
     this.lastDeliberationAt = Number.NEGATIVE_INFINITY;
   }
 
   getStats(): ClaudeBrainStats {
     return { ...this.stats, inFlight: this.inFlight };
+  }
+
+  /**
+   * Record the diagnostics for the answer now being awaited.
+   *
+   * The AskFn seam returns a bare string so that a stub, a recorded transcript
+   * and the live SDK are interchangeable — which means `stop_reason` cannot
+   * travel with the answer, and a refusal (zero content blocks, empty text)
+   * looks exactly like a model that wrote no JSON. index.ts wires this to
+   * makeAnthropicAsk's `onMeta` to close that gap.
+   *
+   * Association with the right call is safe because at most one call is ever
+   * outstanding (the in-flight latch, which reset() no longer opens), and
+   * because makeAnthropicAsk reports meta before it resolves the promise —
+   * so this always lands before the awaiting deliberation resumes.
+   */
+  noteAnswerMeta(meta: AskMeta): void {
+    this.pendingMeta = meta;
+    this.stats.lastStopReason = meta.stopReason;
+    if (meta.stopReason === "refusal") this.stats.refusals++;
+    else if (meta.stopReason === "max_tokens") this.stats.truncated++;
   }
 
   /** Completed deliberations, newest last — for the dashboard and shadow log. */
@@ -405,13 +492,26 @@ export class ClaudeBrain implements BrainAdapter {
   }
 
   private async deliberate(snapshot: STSnapshot): Promise<void> {
+    const generation = this.generation;
     this.inFlight = true;
-    this.stats.inFlight = true;
+    this.pendingMeta = undefined;
     const startedAt = this.clockFn();
     const prompt = renderBrainPrompt(this.history, this.observationTicks);
 
     try {
       const answer = await this.askFn(prompt);
+      const answerMeta = this.pendingMeta;
+      this.pendingMeta = undefined;
+      // Superseded by a reset while we were waiting. The call was issued and
+      // billed, so it is counted; its CONTENT belongs to a stream that no
+      // longer exists and goes no further. Counting it under `discarded`
+      // rather than dropping it silently keeps a run whose scenarios are
+      // switched faster than the model answers from looking like a run where
+      // the model had nothing to say.
+      if (generation !== this.generation) {
+        this.stats.discarded++;
+        return;
+      }
       const { decisions, rejected, unparseable } = parseBrainAnswer(answer, this.replayScope);
 
       this.stats.deliberations++;
@@ -435,10 +535,19 @@ export class ClaudeBrain implements BrainAdapter {
         latencyMs: this.clockFn() - startedAt,
         decisions,
         rawAnswer: answer,
+        ...(answerMeta !== undefined ? { answerMeta } : {}),
       });
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err));
+      // Counted and reported even when superseded: a throw says something about
+      // the model or the network, and that is true regardless of which scenario
+      // was running. Only the per-scenario RECORD is withheld.
       this.stats.failures++;
+      this.onError?.(error);
+      if (generation !== this.generation) {
+        this.stats.discarded++;
+        return;
+      }
       this.deliberations.push({
         snapshotTs: snapshot.ts,
         latencyMs: this.clockFn() - startedAt,
@@ -446,10 +555,13 @@ export class ClaudeBrain implements BrainAdapter {
         rawAnswer: "",
         error: error.message,
       });
-      this.onError?.(error);
     } finally {
+      // Unconditional: this call owns the latch. Only one deliberation can be
+      // outstanding (observe() latches, reset() no longer opens it), so the
+      // call that set the flag is always the call that must clear it —
+      // making it conditional on the generation would strand the latch closed
+      // after a reset and the Brain would never deliberate again.
       this.inFlight = false;
-      this.stats.inFlight = false;
     }
   }
 }
