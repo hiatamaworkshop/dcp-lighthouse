@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1/L2/L3/L4 完了 (agg_func のみ保留)・L5 未着手 (テスト336件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1/L2/L3/L4 完了 (agg_func は throw ガードのみ、median 本体は保留)・L5 未着手 (テスト339件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -347,16 +347,24 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     (コピーが 3 つあったのが温床)。述語は `count >= MIN_VALID_COUNT && effectiveN > 0` —
     `effectiveN >= MIN_VALID_COUNT` にすると健全な 3 事象窓が n_eff 2.999998 で落ちる。
     **標本サイズの判定は `count` の仕事、`effectiveN` に問うのは「標準誤差が存在するか」だけ**
-  - 残るチェーン段: **`agg_func`** (下記の理由で本質的に重い)
+  - 残るチェーン段: **`agg_func`** (median/percentile が本質的に重い。理由は下記)
   - **`agg_func` の本質的な難しさ (2026-08-17 に判明)**: z 検定のガウス仮定が変わることだけが
     問題なのではない。median/percentile は**十分統計量からプールできない** (2 窓の median を
     マージしても merged median にならない)。`downsample` と参照レンズのプーリングは
     どちらもこの分解可能性に依存しているので、`agg_func: median` と `downsample_factor` の
     組み合わせは現設計では**数学的に整合しない**。実装するなら生値保持か sketch (t-digest 等) が要る。
-    **着手順序**: median より先に「整合しない組み合わせを throw する」方を入れる
-    (`decay: exp(τ)` で作った前例と同じ。逆順だと動くケースと壊れるケースが黙って混在する期間ができる)。
-    curator 側は 0 を返さず `unscoredGroups` と同形で「採点できない」と申告する。詳細は
-    ROADMAP_BRIEF.md 2026-08-18 (5) §C
+  - **throw ガード実装済 (2026-08-18)**: median 本体より先に「整合しない値を throw する」方を入れた
+    (`decay: exp(τ)` で作った前例と同じ順序。逆順だと動くケースと壊れるケースが黙って混在する期間が
+    できる)。`validateObserveParams` が `agg_func` を検証し、`"mean"`(省略時の既定と同じ) 以外は
+    RangeError。`"mean"` は `WindowStat` が既に `{mean, count, sumSq}` そのものなので別コード
+    パスが要らない — 実装が要るのは median/percentile 側だけ。ClaudeBrain の `replayRequest`
+    ゲート (`validateObserveParams` を再利用) も自動的にこの値を拒否するようになった
+    (`claude-brain.test.ts` の「REJECTS a replayRequest whose lens the rulebook refuses」に
+    `agg_func: median` を追加、`lens.test.ts` に専用 describe を追加)。テスト 336→339件。
+    **median/percentile 本体・curator 側の `unscoredGroups` 相当の申告は依然未着手** —
+    生値保持/sketch を要する `WindowStat` の構造変更なので、着手前に
+    `LensResult` 構造変化の curator 影響を先に設計する (2026-06-11 から一貫した警告と同じ)。
+    詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §C
 - **L5** retention 参照ゾーン (疎化) — **疎化は「加重」であって新しい統計ではない**。
   exp decay で実装・較正済みの `weights{sumW,sumW2}` / `effectiveN` (Kish) / 加重 `poolStats` を
   そのまま使う (並行の統計パスを新設しない)。踏んではいけないのは **`count` に代表数を入れること** —

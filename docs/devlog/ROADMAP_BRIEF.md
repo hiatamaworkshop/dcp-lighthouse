@@ -3476,3 +3476,44 @@ L5 の前に `referenceUsable` を実用的な `effectiveN` 下限に締める�
 `downsample_factor` は「十分統計量の**厳密**プーリング」であることが売りなので、
 近似を入れるなら `calibration.ts` で誤警報率を測り直してからでないと出荷判断ができない
 (加重で 1 度、測らずに正しそうな理屈を採用して 7.1% に戻した前例がある)。
+
+---
+
+## 2026-08-18 (6) — `agg_func`: throw ガード実装 (§C の前段のみ)
+
+上の §C で書いた順序どおり、median 本体ではなく「整合しない値を throw する」方だけを先に入れた。
+軽量な増分として選んだ — median/percentile 本体は `WindowStat` の構造変更 (§C 後段) を要する
+一方、throw ガードは既存の `validateObserveParams` に 1 分岐足すだけで済む。
+
+### やったこと
+
+- `lens.ts` の `validateObserveParams` に `agg_func` チェックを追加。`undefined` または
+  `"mean"` 以外は `RangeError`。`decay: exp(τ)` が未実装だった頃の「パースするが throw」と
+  同じ判断 — 黙って無視すると mean/sumSq の数値を「適用していない agg_func」の答えとして
+  報告することになる
+- `"mean"` は別コードパスが要らない。`WindowStat` が既に `{mean, count, sumSq}` そのものなので、
+  `agg_func: "mean"` は省略時の既定と完全に同じ結果になる (`lens.test.ts` で `deepEqual` 確認)
+- §C が挙げた具体例 (`agg_func: "median"` + `downsample_factor > 1`) は、`agg_func` 単体で
+  拒否する以上**組み合わせを個別に見る必要がない** — median は downsample の有無に関わらず
+  常に未実装なので、狭い「この組み合わせだけ拒否」より広い「mean 以外は全部拒否」の方が
+  `decay` の前例と一貫し、実装も単純
+- `validateObserveParams` は `q-registry.ts` の書込みゲート (`QRegistry.set`) と
+  `applyLens` の両方から呼ばれる 1 つのルールブック (2026-07-29 の教訓どおり) なので、
+  `$Q` への書込み・replay 呼び出しのどちらでも同じ場所で止まる。curator の `poolStats` に
+  `agg_func: median` の窓が届くルートはそもそも存在しない
+- **副産物**: ClaudeBrain の `replayRequest` ゲート (`parseBrainAnswer` が
+  `validateObserveParams` を再利用) も自動的にこの値を拒否するようになった。
+  `claude-brain.test.ts` の「REJECTS a replayRequest whose lens the rulebook refuses」の
+  bad-lens 表に `{"agg_func": "median"}` を追加して確認
+- 新規テスト: `lens.test.ts` に `describe("applyLens — agg_func ...")` (3件:
+  mean の暗黙/明示が同一・median/p95 を拒否・downsample との組み合わせも拒否)、
+  `claude-brain.test.ts` に 1 件追加。テスト 336→339件、`npx tsc` 通過、全 green
+
+### 残っている部分 (§C 後段、未着手のまま)
+
+- median/percentile 本体の実装。生値保持 or t-digest 等の sketch が要り、`WindowStat` の
+  構造変更を伴う
+- curator 側の「採点できない」申告 (`unscoredGroups` 相当)。median 窓には `mean`/`sumSq` が
+  無いので `isScorable`/`comparisonSE`/`gateZ`/`detectLattice` の入力が成立しない
+- 着手前に `LensResult` 構造変化の curator 影響を先に設計すること (2026-06-11 から
+  一貫して出ている警告、§C 本文にも記載済み)
