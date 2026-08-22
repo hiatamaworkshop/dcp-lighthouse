@@ -66,6 +66,89 @@ describe("RetentionBuffer — tap ingestion + eviction", () => {
   });
 });
 
+describe("RetentionBuffer — reference zone (ROADMAP L5 thinning, 2026-08-22)", () => {
+  it("is off by default: an aged-out event is simply gone, not retained anywhere", () => {
+    const buf = new RetentionBuffer<RawRec>(extractor, { retentionWindowMs: 1000 });
+    buf.observe({ ts: 0, v: 1, $schema: "s" }, "s");
+    buf.observe({ ts: 2000, v: 1, $schema: "s" }, "s"); // evicts ts=0
+    assert.equal(buf.referenceSize(), 0);
+    assert.equal(buf.segment(-Infinity, 500).length, 0, "the aged event must not reappear from anywhere");
+  });
+
+  it("rejects configuring one of the pair without the other", () => {
+    assert.throws(
+      () => new RetentionBuffer<RawRec>(extractor, { retentionWindowMs: 1000, referenceWindowMs: 5000 }),
+      /must be set together/,
+    );
+    assert.throws(
+      () => new RetentionBuffer<RawRec>(extractor, { retentionWindowMs: 1000, thinningRatio: 5 }),
+      /must be set together/,
+    );
+  });
+
+  it("rejects a thinningRatio below 2", () => {
+    assert.throws(
+      () => new RetentionBuffer<RawRec>(extractor, {
+        retentionWindowMs: 1000, referenceWindowMs: 5000, thinningRatio: 1,
+      }),
+      /thinningRatio must be an integer/,
+    );
+  });
+
+  it("keeps 1 in N aged-out events, weighted at N, count never inflated", () => {
+    const buf = new RetentionBuffer<RawRec>(extractor, {
+      retentionWindowMs: 100, referenceWindowMs: 1_000_000, thinningRatio: 5,
+    });
+    // 20 events 100ms apart; each new one evicts the ones that fell 100ms behind it.
+    for (let i = 0; i < 20; i++) buf.observe({ ts: i * 100, v: i, $schema: "s" }, "s");
+    // 19 events aged out (all but the newest survive in the freshness zone... but
+    // retentionWindowMs=100 keeps only the last two on the boundary); assert the
+    // reference zone reflects exactly floor(agedCount / 5) kept, each weight 5.
+    const agedCount = 20 - buf.size();
+    assert.equal(buf.referenceSize(), Math.floor(agedCount / 5));
+    for (const e of buf.segment(-Infinity, Infinity)) {
+      if (e.weight !== undefined) assert.equal(e.weight, 5, `reference event weight must be exactly the ratio`);
+    }
+  });
+
+  it("segment() reaches into the reference zone for a span before the freshness zone", () => {
+    const buf = new RetentionBuffer<RawRec>(extractor, {
+      retentionWindowMs: 1000, referenceWindowMs: 1_000_000, thinningRatio: 2,
+    });
+    for (let i = 0; i < 40; i++) buf.observe({ ts: i * 100, v: i, $schema: "s" }, "s");
+    // ts=0..2900 has long since aged out of a 1000ms freshness window at ts=3900.
+    const old = buf.segment(0, 500);
+    assert.ok(old.length > 0, "the reference zone must answer for a span the freshness zone no longer covers");
+    assert.ok(old.every((e) => e.weight === 2), "every event recovered from the reference zone is thinned");
+  });
+
+  it("the reference zone is itself bounded — it does not accumulate forever", () => {
+    const buf = new RetentionBuffer<RawRec>(extractor, {
+      retentionWindowMs: 100, referenceWindowMs: 500, thinningRatio: 2,
+    });
+    for (let i = 0; i < 200; i++) buf.observe({ ts: i * 10, v: i, $schema: "s" }, "s");
+    // referenceWindowMs=500 over ts steps of 10ms, thinned 1-in-2 ⇒ retained
+    // reference span covers ~500ms of THINNED ts, i.e. ~25 kept events, not 100.
+    assert.ok(buf.referenceSize() < 40, `reference zone grew unbounded: ${buf.referenceSize()} events`);
+  });
+
+  it("replaying a reference-zone-only span through applyLens produces real, weighted WindowStats", () => {
+    // Ties the retention-buffer plumbing to lens.ts's weighted aggregate end to end:
+    // a window built entirely from thinned events must report its true (small)
+    // count alongside a weights field, not a plain unweighted window.
+    const buf = new RetentionBuffer<RawRec>(extractor, {
+      retentionWindowMs: 200, referenceWindowMs: 1_000_000, thinningRatio: 4,
+    });
+    for (let i = 0; i < 100; i++) buf.observe({ ts: i * 50, v: 1, $schema: "s" }, "s");
+    const r = buf.replay({ window_ms: 1_000_000 }, -Infinity, 500); // well before the freshness zone
+    assert.equal(r.windows.length, 1);
+    const win = r.windows[0];
+    assert.ok(win.count > 0 && win.count < 3, `count must reflect actually-retained events, got ${win.count}`);
+    assert.ok(win.weights !== undefined, "a reference-zone-only window must carry weights");
+    assert.ok(Math.abs(win.mean - 1) < 1e-9, "thinning must not bias the mean for a constant-value stream");
+  });
+});
+
 describe("RetentionBuffer — retroactive re-observation (RC criterion)", () => {
   const truth: InjectedTruth = {
     baselineValue: 0.5,

@@ -20,6 +20,7 @@ import {
 const ev = (ts: number, value: number): LensEvent => ({ ts, value });
 const kev = (ts: number, value: number, keys: Record<string, string>): LensEvent =>
   ({ ts, value, keys });
+const wev = (ts: number, value: number, weight: number): LensEvent => ({ ts, value, weight });
 
 describe("applyLens — windowing", () => {
   it("returns no windows for an empty segment", () => {
@@ -560,6 +561,73 @@ describe("applyLens — decay exp(τ): the weight producer", () => {
       () => applyLens([ev(0, 1), ev(1, 1)], { window_ms: 1_000, decay: "exp(tau=0s)" }),
       /tau must be greater than zero/,
     );
+  });
+});
+
+describe("applyLens — LensEvent.weight (ROADMAP L5 thinning producer, decay's plumbing reused)", () => {
+  it("an unweighted event (weight undefined) is byte-identical to today's output", () => {
+    // The invariant thinning must not break: nothing in this codebase sets
+    // LensEvent.weight yet, so every existing figure depends on this staying true.
+    const events = [ev(0, 1), ev(400, 0), ev(800, 1)];
+    const r = applyLens(events, { window_ms: 1_000 });
+    assert.equal(r.windows[0].weights, undefined, "no weight, no decay ⇒ no weights field at all");
+    assert.ok(Math.abs(r.windows[0].mean - 2 / 3) < 1e-12);
+  });
+
+  it("a lone thinned event reports its own value, weighted by how many it stands for", () => {
+    // count stays 1 — it IS one retained LensEvent — but weights.sumW carries
+    // what it represents, exactly as MIN_VALID_COUNT/isScorable need (ROADMAP
+    // 2026-08-18 (5) §B: count must never be filled with the represented total).
+    const r = applyLens([wev(0, 0.8, 5)], { window_ms: 1_000 });
+    const win = r.windows[0];
+    assert.equal(win.count, 1, "one retained event, not five");
+    assert.equal(win.weights!.sumW, 5);
+    assert.equal(win.weights!.sumW2, 25);
+    assert.ok(Math.abs(win.mean - 0.8) < 1e-12);
+  });
+
+  it("is NOT equivalent to duplicating the underlying events — Kish stays honest about what was actually seen", () => {
+    // The conservative property that makes thinning safe to score: a single
+    // weight-5 stand-in has effectiveN 1 (all its weight is one lump), while
+    // five actually-retained same-value events have effectiveN 5. Thinning
+    // must not let a sparse sample masquerade as a dense one.
+    const thinned = applyLens([wev(0, 1, 5)], { window_ms: 1_000 }).windows[0];
+    const dense = applyLens(
+      Array.from({ length: 5 }, (_, i) => ev(i * 10, 1)),
+      { window_ms: 1_000 },
+    ).windows[0];
+    assert.ok(Math.abs(effectiveN(thinned) - 1) < 1e-12, `thinned n_eff ${effectiveN(thinned)}`);
+    assert.equal(dense.weights, undefined, "5 real events with no decay stay unweighted");
+    assert.equal(dense.count, 5);
+  });
+
+  it("multiplies with decay rather than one replacing the other — a thinned event can also decay", () => {
+    const solo = applyLens([wev(0, 1, 4)], { window_ms: 1_000, decay: "exp(tau=1000000s)" }).windows[0];
+    // τ effectively infinite ⇒ decay weight ≈ 1, so sumW should read ≈ the thinning weight alone.
+    assert.ok(Math.abs(solo.weights!.sumW - 4) < 1e-6, `expected ≈4, got ${solo.weights!.sumW}`);
+
+    const decayed = applyLens([wev(0, 1, 4), wev(5_000, 1, 4)], {
+      window_ms: 1_000,
+      align: "epoch",
+      decay: "exp(tau=5000ms)",
+    });
+    // The stale window's thinning weight (4) times its decay factor (exp(-1)),
+    // not 4 flatly and not exp(-1) flatly.
+    const staleSumW = decayed.windows.find((w) => w.windowStart === 0)!.weights!.sumW;
+    assert.ok(Math.abs(staleSumW - 4 * Math.exp(-1)) < 1e-9, `expected 4·e⁻¹, got ${staleSumW}`);
+  });
+
+  it("composes with downsample_factor EXACTLY, the same way decay's weights do", () => {
+    const events = Array.from({ length: 9 }, (_, i) => wev(i * 1_000, (i * 7) % 3, i + 1));
+    const merged = applyLens(events, { align: "epoch", window_ms: 1_000, downsample_factor: 3 });
+    const direct = applyLens(events, { align: "epoch", window_ms: 3_000 });
+    assert.equal(merged.windows.length, direct.windows.length);
+    for (const [i, m] of merged.windows.entries()) {
+      const d = direct.windows[i];
+      assert.ok(Math.abs(m.mean - d.mean) < 1e-12, `mean ${m.mean} vs ${d.mean}`);
+      assert.ok(Math.abs(m.weights!.sumW - d.weights!.sumW) < 1e-12);
+      assert.ok(Math.abs(m.weights!.sumW2 - d.weights!.sumW2) < 1e-12);
+    }
   });
 });
 

@@ -55,6 +55,22 @@ export interface LensEvent {
    * for, and the extractor that built the event decides what those names mean.
    */
   keys?: Readonly<Record<string, string>>;
+  /**
+   * How many real events this one stands in for; undefined/1 means it is
+   * itself. The retention buffer's reference-zone thinning (ROADMAP L5) is the
+   * producer: keeping 1 event in N and setting its weight to N is exactly the
+   * decay stage's move (a real event's contribution scaled down) run in
+   * reverse (a real event's contribution scaled up to cover the ones it
+   * replaced) — same mechanism, same WindowStat.weights/effectiveN plumbing,
+   * no parallel statistic. Multiplies with decay's weightOf(ts) in aggregate()
+   * rather than replacing it: an event can be both thinned AND decayed.
+   *
+   * Deliberately NOT folded into `count` — count must stay the number of
+   * LensEvent objects actually retained (what isScorable's sample-size gate
+   * reads); only weight may say "but each one stands for more than itself"
+   * (ROADMAP_BRIEF.md 2026-08-18 (5) §B).
+   */
+  weight?: number;
 }
 
 /**
@@ -635,11 +651,14 @@ function downsample(
  * Window one already-ts-sorted event list onto the grid anchored at `origin`.
  * Shared by the ungrouped pass and every group so all of them land on one grid.
  *
- * `weightOf` is the decay stage's output. When it is null every event weighs 1,
- * every weighted sum collapses to its unweighted form, and no `weights` field
- * is emitted at all — an unweighted lens produces windows byte-identical to the
- * ones it produced before weighting existed, which is what keeps every figure
- * the devlog has published still true.
+ * `weightOf` is the decay stage's output; `ev.weight` is the retention
+ * buffer's thinning output (ROADMAP L5) — the two multiply per event rather
+ * than one replacing the other, so a thinned reference event can also decay.
+ * When `weightOf` is null AND no event in the window carries a `weight` other
+ * than 1/undefined, every weighted sum collapses to its unweighted form and no
+ * `weights` field is emitted at all — an unweighted, unthinned lens produces
+ * windows byte-identical to the ones it produced before weighting existed,
+ * which is what keeps every figure the devlog has published still true.
  *
  * The sums are the WEIGHTED sufficient statistics, because that is what the
  * consumers expect: poolStats builds its mean over ΣW and its variance from
@@ -660,6 +679,7 @@ function aggregate(
   let sumW = 0;
   let sumW2 = 0;
   let count = 0;
+  let weighted = false;
   let min = Infinity;
   let max = -Infinity;
 
@@ -670,6 +690,7 @@ function aggregate(
     // would poison every pool the window enters.
     if (count === 0 || sumW <= 0) {
       sum = sumSq = sumW = sumW2 = count = 0;
+      weighted = false;
       min = Infinity;
       max = -Infinity;
       return;
@@ -682,10 +703,11 @@ function aggregate(
       mean: sum / sumW,
       sumSq,
       valid: count >= MIN_VALID_COUNT,
-      ...(weightOf !== null ? { weights: { sumW, sumW2 } } : {}),
+      ...(weighted ? { weights: { sumW, sumW2 } } : {}),
       range: { min, max },
     });
     sum = sumSq = sumW = sumW2 = count = 0;
+    weighted = false;
     min = Infinity;
     max = -Infinity;
   };
@@ -696,7 +718,10 @@ function aggregate(
       flush();
       curIdx = idx;
     }
-    const w = weightOf === null ? 1 : weightOf(ev.ts);
+    const thinW = ev.weight ?? 1;
+    const decayW = weightOf === null ? 1 : weightOf(ev.ts);
+    const w = thinW * decayW;
+    if (weightOf !== null || thinW !== 1) weighted = true;
     sum += w * ev.value;
     sumSq += w * ev.value * ev.value;
     sumW += w;
