@@ -3617,3 +3617,58 @@ Step 3b で言う「動的データ追加」寄りの配線の穴の可能性) �
 `dashboard.test.ts` にスタブ generator で `start()` → `runScenario()` の呼び出し順を
 固定する回帰テストを追加。テスト 341→342件、`npx tsc` 通過、実サーバでも
 `/demo/stop` → `/demo/start?scenario=RC` 後に `agents:4` (旧: `agents:[]` のまま固着) を確認。
+
+## 2026-08-22 (2) — L5 本体 (疎化レイヤー) の Step 1・2: `LensEvent.weight` + `RetentionBuffer` 参照ゾーン
+
+§B (L5) の前提条件 (`referenceUsable` 床締め、8-18 (7)) の続き。疎化の形状はユーザ確認済み:
+**固定比率 (N個に1個)**。ピラミッド型の段階的疎化は見送り (実装量が増えるため、まずこれで動かす)。
+2段に分けて実装 — 較正済みの `lens.ts` に触る Step 1 を先に単独でテストしてから、
+`retention-buffer.ts` 側の Step 2 に進んだ。
+
+### Step 1: `LensEvent.weight` (lens.ts)
+
+- `LensEvent` に `weight?: number` を追加 (未設定 = 1)。`aggregate()` で
+  `w = (ev.weight ?? 1) × decayWeight` として **decay の `weightOf(ts)` と掛け算で合成**
+  (どちらかがどちらかを上書きするのではない — 疎化されたイベントも decay できる)
+- `weights` フィールドの発火条件を `weightOf !== null` から
+  `weightOf !== null || 疎化由来の重みが1でないイベントがある` に拡張。これをやらないと
+  「decay レンズなしで疎化だけ効いている窓」が無加重扱いのまま数値だけ歪む
+- **`count` は無変更** — 疎化イベント1個は `count:1` のまま。`weights.sumW` だけが
+  「本来N個分」を運ぶ (ROADMAP 2026-08-18 (5) §B の「count に代表数を入れるな」を字義通り実装)
+- テスト5件追加 (lens.test.ts): 無疎化パスのバイト同一性、疎化1個の統計 (`count:1, sumW:5`)、
+  **疎化1個は生5個の複製と別物** (`effectiveN` が 1 vs 5 — 疎いサンプルが密なサンプルを
+  偽装しない、という保守的な性質を明示的に固定)、decay×疎化の掛け算、downsample_factor との
+  厳密プーリング。テスト 342→347件
+
+### Step 2: `RetentionBuffer` 参照ゾーン (retention-buffer.ts)
+
+- `RetentionBufferOptions` に `referenceWindowMs`/`thinningRatio` を追加。**両方セット
+  or 両方省略のみ許可** (片方だけは RangeError) — デフォルトは完全にオフで、既存の全呼び出し元・
+  全テストはバイト同一のまま (opt-in)
+- `evict()` が鮮度ゾーンから追い出すイベントを、以前は捨てるだけだったのを
+  `absorbIntoReference()` に渡す。カウンタを**エビクション呼び出しをまたいで**回す
+  (1回のエビクションが N の倍数でなくても、全体として正確に 1/N が残る — バッチ末尾に
+  偏らせない)。残した1つに `weight: thinningRatio` を設定
+- 参照ゾーン自身にも `evictReference()` — 鮮度ゾーンの `evict()` と**同じアンカリング**
+  (自分自身の最新保持イベントを基準)。無制限に溜めない、というこのファイルの一貫した哲学を
+  参照ゾーンにも適用
+- `segment(fromTs, toTs)` が鮮度ゾーン+参照ゾーンを**透過的に**結合。「既存呼び出し元を
+  変えずに後付けできるAPI」という当初からのコメント通り、`replay()`/`index.ts`/`dashboard.ts`
+  は無変更のまま、範囲が鮮度ゾーンより過去に及ぶと自動的に疎化データが返る
+- `size()` は鮮度ゾーンのみ (既存テストの契約を維持)。診断用に `referenceSize()` を新設
+- テスト7件追加 (retention-buffer.test.ts): デフォルトオフでイベントが本当に消えること、
+  設定バリデーション (片方だけ/ratio<2 を拒否)、1/N保持と重みの検証、`segment()` の
+  透過結合、参照ゾーン自身が無制限に育たないこと、**`applyLens` までの end-to-end** —
+  参照ゾーンのみで構成された窓が正しい (小さい)`count` と `weights` を両方持つこと。
+  テスト 347→354件、`npx tsc` 通過、全 green
+
+### 残っている部分
+
+- **本番配線が未着手** — `index.ts` の `new RetentionBuffer(...)` は今も
+  `referenceWindowMs`/`thinningRatio` を渡していない (=参照ゾーンは実運用ではまだ無効)。
+  具体的な数値 (参照ゾーンの幅・間引き比率N) は較正が必要な判断で、今回は行っていない
+- `$Q` 経由の動的設定 (`q-retention-binding.ts` は今のところ `retention_window_ms` のみ配線) —
+  参照ゾーンのパラメータを実行中に変更できるようにするかは別途判断
+- 較正測定 (誤警報率が疎化で変わらないことの実測) は未実施。ROADMAP 2026-08-18 (5) §B が
+  「格子検出は加重で一般化済みなので連続性補正は切れない」と**設計上は**予測しているが、
+  decay の時と同様、疎化particularでも calibration.test.ts 相当の実測は別途要る
