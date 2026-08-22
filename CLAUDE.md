@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1/L2/L3/L4 完了 (agg_func は throw ガードのみ、median 本体は保留)・L5 前提条件のみ着手 (疎化本体は未着手) (テスト341件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1/L2/L3/L4 完了 (agg_func は throw ガードのみ、median 本体は保留)・L5 本体 (疎化レイヤー) 実装・較正測定・本番配線まで完了 (テスト357件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -382,8 +382,21 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     3 箇所が同じ述語を呼ぶようにした。実害を再現するテスト追加: 全windowが100%passの
     agent (event数は十分、分散のみゼロ) が `unscoredGroups` ではなく無言のスコア対象に
     なっていたケースを固定。テスト 339→341件。詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §B
-  - **L5 本体 (疎化レイヤー) は依然未着手** — 上記は前提条件のみ。retention-buffer.ts への
-    疎化ロジック本体・`WindowStat.weights` への配線は次段
+  - **L5 本体 実装・較正・本番配線 完了 (2026-08-22)**: 疎化の形状は固定比率 (N個に1個、
+    残した1個の `weight` に N)。`LensEvent` に `weight?: number` を追加し、`lens.ts` の
+    `aggregate()` で decay の `weightOf(ts)` と**掛け算で合成** (どちらかがどちらかを上書きしない)。
+    `count` は無変更のまま (疎化1個は `count:1`)。`retention-buffer.ts` に参照ゾーンを新設 —
+    鮮度ゾーンの `evict()` が捨てていたイベントを `absorbIntoReference()` で1/N保持し、
+    参照ゾーン自身も鮮度ゾーンと同じアンカリングで無制限に育たないよう bound。`segment()` が
+    両ゾーンを透過的に結合するので `index.ts`/`dashboard.ts` の呼び出し側は無変更。
+    デフォルトは完全オフ (opt-in)、既存の全呼び出し元・全テストはバイト同一のまま。
+    **較正測定** (calibration.ts に retention オプションを配線): x2 (実効n≈500) は誤警報4.0%
+    (設計4.55%近傍) で安全域、x5以降は実効n低下による**既知の「薄い窓」残差**
+    (decayの短いτ・無疎化の低密度と同じ現象) に合流し悪化。疎化固有の新しい誤較正メカニズムは
+    見つからなかった。**本番配線**: `index.ts` に `REFERENCE_WINDOW_MS = 鮮度ゾーン×10`
+    (丸め数字)・`REFERENCE_THINNING_RATIO = 2` (較正で安全域と実測された値をそのまま採用)。
+    `$Q` 経由の動的再設定はまだ (setter未実装)。テスト 341→357件。詳細は
+    ROADMAP_BRIEF.md 2026-08-22 (2)〜(4)
 - **分業アーキテクチャ (未実装)** — 判定は curator に既にある。足りないのは配線で、
   ゲートは Brain の中ではなく**決定が返ってきた後**に置く (`meta.snapshotTs` が照合先の
   package を既に名乗っている)。`renderBrainPrompt` に σ / タイル判定を**入れないこと**は

@@ -162,16 +162,19 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       **median/percentile 本体は未実装** — 十分統計量からプールできず、downsample・参照レンズが
       依存する分解可能性と噛み合わないため、`WindowStat` の構造変更 (生値保持 or sketch) が要る。
       着手前に ROADMAP_BRIEF.md 2026-08-18 (5) §C を読むこと
-- [ ] **L5** retention 参照ゾーン — 鮮度ゾーンの上に疎化レイヤー (長期稼働で効く層)。
-      **疎化は「加重」であって新しい統計ではない** — exp decay で実装・較正済みの
-      `weights`/`effectiveN`/加重 `poolStats` をそのまま使う。**前提条件は締め直し済み
-      (2026-08-18)**: `referenceUsable` の床を `effectiveN >= 2` から `effectiveN >= MIN_VALID_COUNT`
-      に上げ、`referenceUsable` フラグ・`buildScoringUnits`・`detectSteps` の3箇所に分かれていた
-      判定 (実は既にズレていた — グループ/step 側は分散ゼロの参照を採点可能扱いしていた) を
-      `isReferenceUsable` 1個に統一。**疎化ロジック本体は未実装**。ヒントは ROADMAP_BRIEF.md
-      2026-08-18 (5) §B
+- [x] **L5** retention 参照ゾーン — 鮮度ゾーンの上の疎化レイヤー (2026-08-22 完了)。
+      形状は固定比率 (N個に1個、`LensEvent.weight = N`)。**疎化は「加重」であって新しい統計
+      ではない** — exp decay で実装・較正済みの `weights`/`effectiveN`/加重 `poolStats` を
+      そのまま使う (`aggregate()` で decay の重みと掛け算で合成)。`count` は無変更 (代表数を
+      入れない)。`retention-buffer.ts` に参照ゾーンを新設し、`segment()` が鮮度+参照ゾーンを
+      透過的に結合するので既存呼び出し元は無変更。デフォルトはオフ (opt-in)。
+      **較正測定**: x2 (実効n≈500) は誤警報4.0%(設計4.55%近傍)で安全域、x5以降は実効n低下による
+      既知の「薄い窓」残差に合流し悪化 (疎化固有の新規メカニズムは無し)。**本番配線**:
+      `index.ts` に `REFERENCE_WINDOW_MS=鮮度ゾーン×10`・`REFERENCE_THINNING_RATIO=2`
+      (較正で実測した安全域の値)。`$Q` 経由の動的再設定は未着手 (setter未実装)。
+      詳細は ROADMAP_BRIEF.md 2026-08-22 (2)〜(4)
 
-現在テスト計 341 件、全 green。
+現在テスト計 357 件、全 green。
 
 ## BRAIN_MODE
 
