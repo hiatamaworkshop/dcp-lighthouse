@@ -3748,7 +3748,43 @@ Step 3b で言う「動的データ追加」寄りの配線の穴の可能性) �
 
 ### 残っている部分
 
-- 参照ゾーンへ実際に読みに行くrequestを発生させる経路がまだ無い (RuleBrain/ClaudeBrainの
-  replayRequestは今のところ鮮度ゾーン内に収まる区間しか要求しない)。宣言はしたが、
-  実運用で「疎化データが実際に使われた」ケースはまだ観測されていない
+- ~~参照ゾーンへ実際に読みに行く経路が無い~~ → 下記で実装・実地確認済み
 - `$Q` 経由の動的設定 (setter新設含む) は引き続き未着手
+
+## 2026-08-22 (5) — L5: 参照ゾーンへの初の実読み手 `/control/replay`
+
+前段の残課題「宣言はしたが実際に読みに行く経路が無い」を埋めた。ユーザ判断: 手動トリガーの
+制御エンドポイントを新設する方向 (Brain側のreplayRequest拡張ではなく)。
+
+### やったこと
+
+- `dashboard.ts` に `replaySpanWithReference(buffer, curator, lens, fromTs, toTs)` を export。
+  「観測区間 + その直前の等長区間を参照として score する」という式 (2026-07-25 参照レンズ設計)
+  は元々 `index.ts` のBrain駆動replayパスに1箇所だけあったが、これをエクスポートして
+  `index.ts` 側もこの関数を呼ぶよう置き換えた — **2箇所目の呼び手を追加する前に、
+  既存の1箇所を先に共通化した** (`isScorable`/`isReferenceUsable` で3回踏んだ「コピーが
+  ズレる」パターンを、2箇所目を作る前に閉じておく判断)
+- `GET /control/replay?fromTs=&toTs=&window_ms=` を新設。`fromTs`/`toTs`必須・`toTs>fromTs`
+  検証、`window_ms`省略時1000ms。`replaySpanWithReference`が投げるRangeError
+  (`validateObserveParams`由来) は`/control/coarse-downsample`と同じ「ルールブックのメッセージを
+  そのまま400で返す」パターン。結果は`broadcastReplay`でdecisionsチャンネルにも流しつつ、
+  呼び出し元にJSONでも返す (SSE購読なしでも直接検証できるように)
+- テスト3件追加 (dashboard.test.ts): 参照ゾーン未設定なら120秒より過去の区間は盲目
+  (`referenceUsable:false`)・参照ゾーンを設定した**全く同じイベント列・同じ区間**なら
+  `referenceUsable:true`で答えが返る (これが今回の核心 — 設定の有無だけを変数にして、
+  実際に参照ゾーンが読まれていることを対照実験で示す)・不正な区間は400。
+  テスト 357→360件
+- **実サーバでの実地確認**: 本番構成 (`REFERENCE_WINDOW_MS`=1,200,000ms・`thinningRatio`=2) の
+  まま起動し、約140秒待って実イベントが実際に120秒の鮮度ゾーンを退出するのを待ってから、
+  125〜130秒前を指す区間で `/control/replay` を実行。`referenceUsable:true` が返ることを確認 —
+  ユニットテストの bespoke buffer ではなく、**index.tsの本番配線・実タイマー駆動の
+  MockStreamGenerator・実RetentionBufferを通した実地検証**
+- `npx tsc` 通過、`npm test` 360/360 green
+
+### 残っている部分
+
+- `$Q` 経由の動的設定 (setter新設含む) は引き続き未着手
+- RuleBrain/ClaudeBrain自体はまだ120秒を超えるreplayRequestを自発的に出さない —
+  `/control/replay`は人間 (または将来のBrain) が明示的に呼ぶ手動経路であって、
+  Brainが自律的に「もっと古いデータを見たい」と判断して参照ゾーンへ読みに行く経路ではない。
+  これは意図的にスコープ外にした (§Aの分業アーキテクチャや将来のBrain拡張の領分)

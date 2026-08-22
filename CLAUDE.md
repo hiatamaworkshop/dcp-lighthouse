@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1/L2/L3/L4 完了 (agg_func は throw ガードのみ、median 本体は保留)・L5 本体 (疎化レイヤー) 実装・較正測定・本番配線まで完了 (テスト357件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1/L2/L3/L4 完了 (agg_func は throw ガードのみ、median 本体は保留)・L5 完了 (実装・較正・本番配線・実読み手 `/control/replay` の実地確認まで) (テスト360件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -395,8 +395,16 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     (decayの短いτ・無疎化の低密度と同じ現象) に合流し悪化。疎化固有の新しい誤較正メカニズムは
     見つからなかった。**本番配線**: `index.ts` に `REFERENCE_WINDOW_MS = 鮮度ゾーン×10`
     (丸め数字)・`REFERENCE_THINNING_RATIO = 2` (較正で安全域と実測された値をそのまま採用)。
-    `$Q` 経由の動的再設定はまだ (setter未実装)。テスト 341→357件。詳細は
-    ROADMAP_BRIEF.md 2026-08-22 (2)〜(4)
+    `$Q` 経由の動的再設定はまだ (setter未実装)。テスト 341→357件。
+  - **参照ゾーンへの初の実読み手 `/control/replay` 実装・実地確認済 (2026-08-22)**:
+    手動トリガーの制御エンドポイント (ユーザ判断で、Brain側のreplayRequest拡張ではなくこちら)。
+    `replaySpanWithReference()` を `dashboard.ts` に export し、`index.ts` のBrain駆動replay
+    パスもこれを呼ぶよう統一 (2箇所目の呼び手を作る前に既存1箇所を共通化)。
+    ユニットテストだけでなく**本番構成のまま起動した実サーバで約140秒待ち、125〜130秒前
+    (120秒鮮度ゾーンを超えた区間) を指定して `referenceUsable:true` が実際に返る**ことを
+    確認済み。RuleBrain/ClaudeBrain自体はまだ自発的に120秒超のreplayを要求しない
+    (手動経路のみ、意図的にスコープ外)。テスト 357→360件。詳細は
+    ROADMAP_BRIEF.md 2026-08-22 (2)〜(5)
 - **分業アーキテクチャ (未実装)** — 判定は curator に既にある。足りないのは配線で、
   ゲートは Brain の中ではなく**決定が返ってきた後**に置く (`meta.snapshotTs` が照合先の
   package を既に名乗っている)。`renderBrainPrompt` に σ / タイル判定を**入れないこと**は
