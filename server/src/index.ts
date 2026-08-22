@@ -38,6 +38,30 @@ const registry = new QRegistry();
  */
 const RETENTION_WINDOW_MS = 120_000;
 
+/**
+ * Reference-zone width and thinning ratio (ROADMAP L5, 2026-08-22). Extends how
+ * far a reference/replay request can reach past RETENTION_WINDOW_MS before
+ * hitting referenceUsable:false, at reduced resolution instead of nothing.
+ *
+ * thinningRatio: 2 is the calibration-measured safe choice, not a round-number
+ * guess (calibration.test.ts "under retention thinning" 2026-08-22) — at x2 the
+ * false-alarm rate measured 4.0% against a 4.55% design target and power barely
+ * moved; x5 already read 9.0% and x10 11.5%, because thinning trades reference
+ * event count for weight and a small effective count overshoots design for the
+ * same already-documented "thin windows" reason a small eventsPerSpan does
+ * un-thinned. x2 was the ratio actually measured to sit near design, so it is
+ * the one shipped — this is not extrapolated from the other rows.
+ *
+ * REFERENCE_WINDOW_MS: 10x the freshness zone (round number, not measured) —
+ * generous enough to matter for a Brain reference request that reaches back
+ * further than 120s, still time-bounded per this file's "nothing accumulates
+ * unbounded" philosophy. No $Q binding yet: RetentionBuffer has no
+ * setReferenceWindowMs()/setThinningRatio() (unlike retention_window_ms below),
+ * so these are construction-time only for now.
+ */
+const REFERENCE_WINDOW_MS = RETENTION_WINDOW_MS * 10;
+const REFERENCE_THINNING_RATIO = 2;
+
 // Default observe params: coarse live view + fine view for replay.
 //
 // Both declare align:"epoch" (ROADMAP L4 `origin` stage). The grid is then a
@@ -58,7 +82,11 @@ registry.set("schema:test_result:v1", { baseline_delta: 0.10 });
 
 const generator  = new MockStreamGenerator();
 const adapter    = new TestorAdapter({ windowMs: 5_000 });
-const buffer     = new RetentionBuffer<TestEvent>(testEventExtractor, { retentionWindowMs: RETENTION_WINDOW_MS });
+const buffer     = new RetentionBuffer<TestEvent>(testEventExtractor, {
+  retentionWindowMs: RETENTION_WINDOW_MS,
+  referenceWindowMs: REFERENCE_WINDOW_MS,
+  thinningRatio: REFERENCE_THINNING_RATIO,
+});
 const overlay    = new ObservationOverlay(registry);
 const curator    = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
 const ruleBrain  = new RuleBrain(registry);

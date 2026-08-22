@@ -128,6 +128,75 @@ describe("curator calibration — under a weighting lens", () => {
   });
 });
 
+describe("curator calibration — under retention thinning (ROADMAP L5)", () => {
+  // The reason calibration takes retention options at all: thinning replaces
+  // the reference's raw sample count with a smaller SURVIVOR count carrying
+  // weight (LensEvent.weight -> WindowStat.weights -> effectiveN), the same
+  // plumbing decay's calibration above measures, so its false-alarm rate is a
+  // measurement of THIS mechanism, not an inheritance from either figure.
+  //
+  // ROADMAP_BRIEF.md 2026-08-18 (5) §B predicted the continuity correction
+  // would survive thinning (the binary lattice identity holds for total
+  // weight, the way it does for decay's weights). Measured here: that holds —
+  // there is no NEW miscalibration mechanism — but it does not mean thinning
+  // is free. A 1-in-N keep collapses N raw samples to 1 survivor, so the
+  // reference's EFFECTIVE count drops to eventsPerSpan/N, and a small effective
+  // count overshoots design for the same already-documented reason a small
+  // eventsPerSpan does un-thinned ("thin windows" residual above, and decay's
+  // short-τ residual). Thinning does not evade that residual; it is simply
+  // another way to arrive at a small effective reference count.
+  const design = familyWiseAlpha(2.0);
+  const spanMs = 10_000;
+  // retentionWindowMs = spanMs pushes the WHOLE reference span (which ends
+  // right before the observation span starts) out of the freshness zone by
+  // the time the last observation event lands, so the reference comes
+  // entirely from the thinned zone while the observation stays full-resolution
+  // — isolating what thinning alone does. referenceWindowMs is generous so no
+  // trial goes blind for a reason unrelated to the ratio being measured.
+  const retentionFor = (thinningRatio: number) =>
+    ({ retentionWindowMs: spanMs, referenceWindowMs: spanMs * 4, thinningRatio });
+
+  it("stays near the design target at a gentle ratio (effective reference count still in the hundreds)", () => {
+    const r = measureFalseAlarmRate({ seeds: SEEDS, shape: { spanMs }, retention: retentionFor(2) });
+    const summary = formatCalibration("thinned x2", r);
+    assert.ok(r.trials > SEEDS * 0.9, `most trials must be scorable — ${summary}`);
+    assert.ok(Math.abs(r.rate - design) < 0.02, `gentle thinning should sit near design — ${summary}`);
+  });
+
+  it("keeps its power at a gentle ratio — thinning must not buy calibration by going blind", () => {
+    const thinned = measureDetectionRate(0.9, { seeds: SEEDS, shape: { spanMs }, retention: retentionFor(2) });
+    const plain = measureDetectionRate(0.9, { seeds: SEEDS, shape: { spanMs } });
+    assert.ok(
+      Math.abs(thinned.rate - plain.rate) < 0.08,
+      `x2 thinning should not move power much — ${formatCalibration("thinned", thinned)} vs ${formatCalibration("plain", plain)}`,
+    );
+    assert.ok(measureDetectionRate(0.6, { seeds: SEEDS, shape: { spanMs }, retention: retentionFor(2) }).rate > 0.95,
+      "a strong burst must still fire");
+  });
+
+  it("overshoots at a heavier ratio, and it is the SAME thin-sample regime decay's short τ shows — not a new mechanism", () => {
+    // MEASURED, NOT DESIRED. x10 thinning on eventsPerSpan=1000 leaves the
+    // reference ~100 effective survivors — the same regime the unweighted
+    // "documents where the correction still does NOT close the gap" test above
+    // pins at eventsPerSpan=200 (~20/window, 13.5%→6.9%). This one reads ~11%.
+    const heavy = measureFalseAlarmRate({ seeds: SEEDS, shape: { spanMs }, retention: retentionFor(10) });
+    assert.ok(heavy.rate > design, `x10 thinning should still overshoot — ${formatCalibration("thinned x10", heavy)}`);
+    assert.ok(heavy.rate < 0.16, `x10 thinning regressed past its measured level — ${formatCalibration("thinned x10", heavy)}`);
+
+    // The relief check that tells the two residuals apart from a coincidence:
+    // quadrupling the source density at the SAME ratio restores the SAME
+    // effective count density relief buys for an unweighted thin window
+    // (decay's "quadrupling density: 6.6% -> 4.0%" finding above).
+    const dense = measureFalseAlarmRate({
+      seeds: SEEDS,
+      shape: { spanMs, eventsPerSpan: 4_000 },
+      retention: retentionFor(10),
+    });
+    assert.ok(dense.rate < heavy.rate, `density must relieve it — ${formatCalibration("dense x10", dense)}`);
+    assert.ok(Math.abs(dense.rate - design) < 0.02, `restored effective count should land back near design — ${formatCalibration("dense x10", dense)}`);
+  });
+});
+
 describe("curator calibration — power", () => {
   it("still detects a strong burst", () => {
     // The cheapest way to pass a false-alarm bound is to stop detecting
