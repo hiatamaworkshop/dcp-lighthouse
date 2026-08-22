@@ -336,12 +336,13 @@ import { ObservationOverlay } from "./lens-view.js";
 async function startTestServer(
   generator: unknown,
   brainDiagnostics?: () => unknown,
+  brain: unknown = { reset: () => {} },
 ): Promise<{ base: string; close: () => Promise<void> }> {
   const registry = new QRegistry();
   const server = new DashboardServer(
     generator as never,
     null as never,
-    null as never,
+    brain as never,
     registry,
     null as never,
     new ObservationOverlay(registry),
@@ -426,6 +427,29 @@ test("a rejected lens is a 400 carrying the rulebook's own message", async () =>
     const ok = await fetch(`${base}/control/coarse-downsample?factor=3`);
     assert.equal(ok.status, 200);
     assert.equal((await ok.json()).downsample_factor, 3);
+  } finally {
+    await close();
+  }
+});
+
+test("/demo/start revives the generator's tick timer after a prior /demo/stop", async () => {
+  // Found 2026-08-22 by hand while verifying RC dashboard output: MockStreamGenerator's
+  // tick timer is created once, at process boot (index.ts), and stop() clears it with
+  // nothing that ever restarts it. Calling /demo/stop then /demo/start left every
+  // downstream collector permanently starved of events (agents:[] forever, not just
+  // during the stopped scenario) — contradicting CLAUDE.md's "baseline keeps flowing
+  // between scenarios" invariant. The fix is /demo/start calling generator.start()
+  // (a no-op if the timer is already running); this pins that call happens.
+  const calls: string[] = [];
+  const generator = {
+    getCurrentLoad: () => ({}),
+    start: () => calls.push("start"),
+    runScenario: async () => calls.push("runScenario"),
+  };
+  const { base, close } = await startTestServer(generator);
+  try {
+    await fetch(`${base}/demo/start?scenario=RC`);
+    assert.deepEqual(calls, ["start", "runScenario"], "start() must run before runScenario()");
   } finally {
     await close();
   }

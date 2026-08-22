@@ -492,6 +492,12 @@ export class DashboardServer {
       }
       // Reset brain state so each scenario run starts fresh
       this.brain.reset();
+      // /demo/stop clears the generator's tick timer entirely (baseline
+      // included) and nothing else restarts it — a prior stop would
+      // otherwise leave every downstream collector permanently starved of
+      // events. start() is a no-op if the timer is already running.
+      // ROADMAP_BRIEF.md 2026-08-22.
+      this.generator.start();
       this.generator.runScenario(scenario).catch(console.error);
       jsonHeaders(res);
       res.end(JSON.stringify({ started: scenario }));
