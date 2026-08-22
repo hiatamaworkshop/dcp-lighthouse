@@ -432,6 +432,93 @@ test("a rejected lens is a 400 carrying the rulebook's own message", async () =>
   }
 });
 
+// ── /control/replay: the reference zone's first real reader (ROADMAP L5, 2026-08-22) ──
+
+/** Start a real DashboardServer (not startTestServer's null curator/buffer stubs). */
+async function startReplayServer(
+  buf: RetentionBuffer<{ ts: number; value: number }>,
+): Promise<{ base: string; close: () => Promise<void> }> {
+  const registry = new QRegistry();
+  const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+  const server = new DashboardServer(
+    { getCurrentLoad: () => ({}) } as never,
+    null as never,
+    { reset: () => {} } as never,
+    registry,
+    curator,
+    new ObservationOverlay(registry),
+    buf,
+  ).start({ port: 0 });
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const addr = server.address();
+  const port = typeof addr === "object" && addr !== null ? addr.port : 0;
+  return {
+    base: `http://127.0.0.1:${port}`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
+
+// 400 events at ts=0,10,...,3990. With retentionWindowMs=1000 and the newest
+// event at ts=3990, the freshness cutoff sits at ts=2990 — an observation span
+// starting at 3000 makes its "equal-length span immediately before it"
+// (2010..3000, ROADMAP_BRIEF.md 2026-07-25 "参照レンズ設計") reach back to
+// 2010, mostly below the cutoff: exactly the span the reference zone alone can
+// answer for.
+const seedOldStream = (buf: RetentionBuffer<{ ts: number; value: number }>): void => {
+  for (let i = 0; i < 400; i++) buf.observe({ ts: i * 10, value: i % 2 }, "s");
+};
+const OLD_SPAN_QUERY = "fromTs=3000&toTs=3990&window_ms=1000000";
+
+test("/control/replay: without a reference zone, a span older than the freshness window is blind", async () => {
+  const buf = new RetentionBuffer<{ ts: number; value: number }>((raw) => raw, {
+    retentionWindowMs: 1_000,
+  });
+  seedOldStream(buf);
+  const { base, close } = await startReplayServer(buf);
+  try {
+    const res = await fetch(`${base}/control/replay?${OLD_SPAN_QUERY}`);
+    assert.equal(res.status, 200);
+    const pkg = await res.json();
+    assert.equal(pkg.referenceUsable, false, "the reference span aged out with nowhere to survive");
+  } finally {
+    await close();
+  }
+});
+
+test("/control/replay: WITH a reference zone, the same old span is answered from thinned data", async () => {
+  // The point of this whole increment: prove a real request path — not a unit
+  // test against a bespoke buffer — actually reads the reference zone. Same
+  // event stream and same span as the blind case above; only the buffer's
+  // configuration differs.
+  const buf = new RetentionBuffer<{ ts: number; value: number }>((raw) => raw, {
+    retentionWindowMs: 1_000, referenceWindowMs: 1_000_000, thinningRatio: 2,
+  });
+  seedOldStream(buf);
+  const { base, close } = await startReplayServer(buf);
+  try {
+    const res = await fetch(`${base}/control/replay?${OLD_SPAN_QUERY}`);
+    assert.equal(res.status, 200);
+    const pkg = await res.json();
+    assert.equal(pkg.referenceUsable, true, "the reference zone must answer where the freshness zone alone could not");
+    assert.ok(pkg.tiles.length > 0, "a scored comparison must produce at least a baseline tile");
+  } finally {
+    await close();
+  }
+});
+
+test("/control/replay rejects a malformed span before touching the buffer", async () => {
+  const buf = new RetentionBuffer<{ ts: number; value: number }>((raw) => raw, { retentionWindowMs: 1_000 });
+  const { base, close } = await startReplayServer(buf);
+  try {
+    for (const q of ["fromTs=abc&toTs=100", "fromTs=100&toTs=100", "fromTs=200&toTs=100"]) {
+      const res = await fetch(`${base}/control/replay?${q}`);
+      assert.equal(res.status, 400, q);
+    }
+  } finally {
+    await close();
+  }
+});
+
 test("/demo/start revives the generator's tick timer after a prior /demo/stop", async () => {
   // Found 2026-08-22 by hand while verifying RC dashboard output: MockStreamGenerator's
   // tick timer is created once, at process boot (index.ts), and stop() clears it with

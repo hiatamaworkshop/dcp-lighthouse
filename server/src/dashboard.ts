@@ -10,6 +10,7 @@
  *   GET /demo/stop          — stop the generator
  *   GET /control/baseline-delta?value=N — write $Q[schema].baseline_delta
  *   GET /control/coarse-downsample?factor=N — write $Q[observe:...#coarse].downsample_factor
+ *   GET /control/replay?fromTs=&toTs=&window_ms= — manual replay + reference score
  *   GET /status             — current load
  *   GET /brain              — Brain diagnostics (shadow tally, LLM counters)
  *
@@ -194,6 +195,28 @@ function sseWrite(res: ServerResponse, data: unknown): void {
 
 function parseQuery(url: string): URLSearchParams {
   return new URL(url, "http://x").searchParams;
+}
+
+/**
+ * Replay [fromTs, toTs] and score it against the equal-length span immediately
+ * before it (the same declared, bounded reference index.ts's Brain-triggered
+ * replay path has used since the 2026-07-25 "参照レンズ設計"). Extracted so
+ * that path and `/control/replay` below (ROADMAP L5, 2026-08-22 — the first
+ * caller able to name a fromTs older than the freshness zone, exercising the
+ * reference-zone thinning that shipped with nothing reading it yet) share one
+ * formula instead of two copies that can drift the way `isScorable`'s three
+ * did (ROADMAP_BRIEF.md 2026-08-17).
+ */
+export function replaySpanWithReference(
+  buffer: ReplaySource,
+  curator: SnapshotCurator,
+  lens: QObserveParams,
+  fromTs: number,
+  toTs: number,
+): SnapshotPackage {
+  const observation = buffer.replay(lens, fromTs, toTs);
+  const reference = buffer.replay(lens, fromTs - (toTs - fromTs), fromTs);
+  return curator.curate(observation, reference);
 }
 
 // ── DashboardServer ──────────────────────────────────────────────────────────
@@ -553,6 +576,40 @@ export class DashboardServer {
       this.registry.set("observe:test_result:v1#coarse", { ...current, downsample_factor: factor });
       jsonHeaders(res);
       res.end(JSON.stringify({ scope: "observe:test_result:v1#coarse", downsample_factor: factor }));
+      return;
+    }
+
+    if (url.startsWith("/control/replay")) {
+      // Manual replay trigger (ROADMAP L5, 2026-08-22). Everything else that
+      // calls replaySpanWithReference is Brain-driven and has so far only ever
+      // asked for a span inside the freshness zone (RC's replayRequest looks
+      // back tens of seconds, not RETENTION_WINDOW_MS=120s+) — the reference
+      // zone shipped in index.ts with no caller exercising it. This endpoint
+      // lets fromTs/toTs be picked explicitly, including older than the
+      // freshness zone, so the thinned reference zone actually gets read.
+      const q = parseQuery(url);
+      const fromTs = Number(q.get("fromTs"));
+      const toTs = Number(q.get("toTs"));
+      const windowRaw = q.get("window_ms");
+      const window_ms = windowRaw === null ? 1_000 : Number(windowRaw);
+      if (!Number.isFinite(fromTs) || !Number.isFinite(toTs) || toTs <= fromTs) {
+        jsonHeaders(res, 400);
+        res.end(JSON.stringify({ error: "fromTs and toTs must be numbers with toTs > fromTs" }));
+        return;
+      }
+      let pkg: SnapshotPackage;
+      try {
+        pkg = replaySpanWithReference(this.buffer, this.curator, { window_ms }, fromTs, toTs);
+      } catch (err) {
+        // validateObserveParams (lens.ts) rejects an unusable lens; same
+        // rulebook-message-not-restated pattern as /control/coarse-downsample.
+        jsonHeaders(res, 400);
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        return;
+      }
+      this.broadcastReplay(pkg);
+      jsonHeaders(res);
+      res.end(JSON.stringify(pkg));
       return;
     }
 

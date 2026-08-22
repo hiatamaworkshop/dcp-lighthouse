@@ -23,7 +23,7 @@ import { RuleBrain } from "./rule-brain.js";
 import { ClaudeBrain } from "./claude-brain.js";
 import { ShadowBrain } from "./shadow-brain.js";
 import { makeAnthropicAsk } from "./anthropic-ask.js";
-import { DashboardServer } from "./dashboard.js";
+import { DashboardServer, replaySpanWithReference } from "./dashboard.js";
 import type { ResettableBrain } from "./brain-adapter.js";
 import type { TestEvent } from "./mock-stream-generator.js";
 
@@ -252,7 +252,6 @@ setInterval(() => {
         // literal here would silently drop the rest of the chain once L4 adds
         // group_by and the later stages.
         const { fromTs, toTs, ...lens } = proposedParams;
-        const fineResult = buffer.replay(lens, fromTs, toTs);
         // Explicit reference lens (ROADMAP_BRIEF.md 2026-07-25 "参照レンズ設計"):
         // score the flagged interval against the equal-length interval
         // immediately before it, replayed through the same lens — a declared,
@@ -260,18 +259,21 @@ setInterval(() => {
         // that drifted as more history accumulated (the "late-firing coarse
         // dip" finding — an old burst window would retroactively re-cross the
         // threshold as quiet windows piled up and shrank the population stdDev).
-        const referenceResult =
+        // Shared with /control/replay (dashboard.ts) so the formula has one
+        // copy (ROADMAP L5, 2026-08-22). No proposal has ever omitted
+        // fromTs/toTs in practice, but a malformed one could, so that case
+        // keeps its own fallback rather than handing NaN to the shared helper.
+        const pkg =
           fromTs !== undefined && toTs !== undefined
-            ? buffer.replay(lens, fromTs - (toTs - fromTs), fromTs)
-            : fineResult;
-        const pkg = curator.curate(fineResult, referenceResult);
+            ? replaySpanWithReference(buffer, curator, lens, fromTs, toTs)
+            : curator.curate(buffer.replay(lens, fromTs, toTs), buffer.replay(lens, fromTs, toTs));
         if (!pkg.referenceUsable) {
           // Blindness, not quiet: the preceding interval fell outside retention
           // (or was empty), so no comparison was possible. Without this line an
           // empty tile list would read as "the replay found nothing wrong".
           console.warn(
             `[brain] replay reference UNUSABLE (no comparison possible) — ` +
-            `requested [${fromTs}, ${toTs}], reference windows: ${referenceResult.windows.length}`,
+            `requested [${fromTs}, ${toTs}]`,
           );
         }
         console.log(`[brain] replay snapshot: ${pkg.tiles.length} tiles, span ${JSON.stringify(pkg.spanMs)}`);
