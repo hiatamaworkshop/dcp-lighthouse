@@ -219,6 +219,54 @@ export function replaySpanWithReference(
   return curator.curate(observation, reference);
 }
 
+/**
+ * Does the curator's own judgment back a claim that `agentId` is anomalous
+ * around `atTs`? (ROADMAP_BRIEF.md 2026-08-18 (5) §A — the division-of-labor
+ * gate for the assertive channel.)
+ *
+ * Scoped to rerouteSchema/quarantine only: those are the decision types that
+ * name one agentId, and the curator already judges per-agent pass-rate shape
+ * (dip/spike/step) once grouped by agentId. schemaUpdate names a domain and
+ * asks about area-bit coverage, a different signal the curator does not
+ * compute at all (2026-08-23 finding) — gating it would need new judgment
+ * logic, not just a new caller of this one, so it stays out of scope here.
+ *
+ * Deliberately does NOT reuse the always-on, ungrouped live coarse view
+ * (DashboardServer.broadcast()'s `snapshotPkg`): a 2026-08-23 multi-trial
+ * RC run showed that ungrouped view's own detection is inconsistent (fired
+ * in 1 of 3 trials at the injected agent, absent in another) precisely
+ * because mixing four agents together dilutes one agent's dip — the same
+ * reason RuleBrain's replayRequest asks for group_by:["agentId"] at all.
+ * Grouping on demand here, at gate-check time, is the same fix applied to
+ * the same problem in the same place it already works.
+ *
+ * `atTs` is `meta.snapshotTs` — the tick whose data the decision is actually
+ * about, not the (later) tick decide() drained it on (ROADMAP L3). Building
+ * a fresh grouped replay/curate at that ts, on demand, needs no new held
+ * state — RetentionBuffer already answers arbitrary [fromTs, toTs] within
+ * its retained span, the same pattern liveSpans()/replaySpanWithReference
+ * above already use.
+ */
+export function isReroutedAgentBacked(
+  buffer: ReplaySource,
+  curator: SnapshotCurator,
+  coarseLens: QObserveParams,
+  agentId: string,
+  atTs: number,
+): boolean {
+  const windowMs = effectiveWindowMs(coarseLens, 10_000);
+  const { observation, reference } = liveSpans(atTs, windowMs, LIVE_REFERENCE_WINDOW_COUNT, coarseLens.origin ?? 0);
+  const groupedLens: QObserveParams = { ...coarseLens, group_by: ["agentId"] };
+  const observed = buffer.replay(groupedLens, observation.fromTs, observation.toTs);
+  const referenced = buffer.replay(groupedLens, reference.fromTs, reference.toTs);
+  const pkg = curator.curate(observed, referenced);
+  // Blind (no comparison possible) must not read as "backed" — that would
+  // let a claim through on the strength of a yardstick that was never there,
+  // the same silence-vs-blindness confusion SnapshotPackage exists to avoid.
+  if (!pkg.referenceUsable) return false;
+  return pkg.tiles.some((t) => t.group === agentId && t.shapeTag !== "baseline");
+}
+
 // ── DashboardServer ──────────────────────────────────────────────────────────
 
 export class DashboardServer {

@@ -19,6 +19,7 @@ import {
   liveLookbackMs,
   liveSpans,
   maxCoarseWindowMs,
+  isReroutedAgentBacked,
 } from "./dashboard.js";
 import { RetentionBuffer } from "./retention-buffer.js";
 import { SnapshotCurator } from "./snapshot-curator.js";
@@ -540,4 +541,60 @@ test("/demo/start revives the generator's tick timer after a prior /demo/stop", 
   } finally {
     await close();
   }
+});
+
+// ── isReroutedAgentBacked: the §A division-of-labor gate (ROADMAP_BRIEF.md 2026-08-18 (5) §A, 2026-08-23) ──
+
+type AgentEvent = { ts: number; value: number; agentId: string };
+const agentExtractor = (raw: AgentEvent) => ({ ts: raw.ts, value: raw.value, keys: { agentId: raw.agentId } });
+const COARSE_LENS = { window_ms: 10_000, align: "epoch" as const };
+const GATE_NOW = 100_000; // multiple of window_ms, so it sits on the grid liveSpans snaps to
+
+/**
+ * 100000 events/sec worth of density isn't needed — the curator only needs
+ * enough count per window to be scorable. One event every 50ms (20/s) over
+ * two agents across [0, 100000) gives ~10 events/window per agent, well past
+ * MIN_VALID_COUNT.
+ *
+ * agent-C dips to all-fail for the last 10s of the observation span
+ * ([90000, 100000)); agent-D stays flat-pass throughout, so it should never
+ * back a claim naming it. agent-C's PRE-dip pass rate carries a small amount
+ * of natural failure (~1 in 20) rather than a flat 100% — a reference group
+ * with zero variance is (correctly) unscorable, so a flat fixture would leave
+ * agent-C's own group silently unscored instead of testing what this gate
+ * actually needs: a real, scorable dip.
+ */
+function seedGateFixture(buf: RetentionBuffer<AgentEvent>): void {
+  let i = 0;
+  for (let ts = 0; ts < GATE_NOW; ts += 50, i++) {
+    const cDips = ts >= 90_000;
+    const cValue = cDips ? 0 : i % 20 === 0 ? 0 : 1;
+    buf.observe({ ts, value: cValue, agentId: "agent-C" }, "s");
+    buf.observe({ ts, value: 1, agentId: "agent-D" }, "s");
+  }
+}
+
+test("isReroutedAgentBacked: backed when the named agent has a curator-flagged tile at snapshotTs", () => {
+  const buf = new RetentionBuffer<AgentEvent>(agentExtractor, { retentionWindowMs: 120_000 });
+  seedGateFixture(buf);
+  const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+  assert.equal(isReroutedAgentBacked(buf, curator, COARSE_LENS, "agent-C", GATE_NOW), true);
+});
+
+test("isReroutedAgentBacked: NOT backed when the named agent has no flagged tile (wrong target)", () => {
+  const buf = new RetentionBuffer<AgentEvent>(agentExtractor, { retentionWindowMs: 120_000 });
+  seedGateFixture(buf);
+  const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+  // agent-D never dips in this fixture — a claim naming it must be rejected
+  // even though agent-C's real dip did produce a package with real tiles.
+  assert.equal(isReroutedAgentBacked(buf, curator, COARSE_LENS, "agent-D", GATE_NOW), false);
+});
+
+test("isReroutedAgentBacked: blind (no comparison possible) never reads as backed", () => {
+  // retentionWindowMs too small to hold the reference span liveSpans asks for
+  // (needs 60s of history at window_ms=10_000, count=3; this buffer keeps 1s).
+  const buf = new RetentionBuffer<AgentEvent>(agentExtractor, { retentionWindowMs: 1_000 });
+  seedGateFixture(buf);
+  const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+  assert.equal(isReroutedAgentBacked(buf, curator, COARSE_LENS, "agent-C", GATE_NOW), false);
 });

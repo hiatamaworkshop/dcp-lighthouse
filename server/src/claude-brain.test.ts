@@ -322,6 +322,29 @@ describe("ClaudeBrain — deliberation is detached from the tick", () => {
     assert.deepEqual(brain.decide(), []);
   });
 
+  test("recordGateRejection() is a separate counter from rejectedProposals (ROADMAP §A, 2026-08-23)", async () => {
+    // rejectedProposals counts malformed requests (bad type/lens) caught
+    // inside this class. gateRejected counts a DIFFERENT finding — a
+    // well-formed rerouteSchema/quarantine the external §A gate (index.ts)
+    // found unbacked by the curator at the decision's own snapshotTs. This
+    // class never runs that gate itself (it never sees curated packages —
+    // see isReroutedAgentBacked's doc comment), it only exposes the counter
+    // the gate's caller reports into.
+    const brain = new ClaudeBrain({
+      askFn: async () => `{"decisions":[{"type":"rerouteSchema","reason":"looks off","agentId":"agent-C"}]}`,
+      minIntervalMs: 0,
+    });
+    brain.observe(snap(1000));
+    await settle();
+
+    assert.equal(brain.getStats().rejectedProposals, 0, "a well-formed proposal is not a malformed one");
+    assert.equal(brain.getStats().gateRejected, 0, "nothing has called the gate yet");
+
+    brain.recordGateRejection();
+    assert.equal(brain.getStats().gateRejected, 1);
+    assert.equal(brain.getStats().rejectedProposals, 0, "the two counters must not bleed into each other");
+  });
+
   test("history is bounded, and the prompt reflects the most recent ticks", async () => {
     const brain = new ClaudeBrain({
       askFn: async () => `{"decisions":[]}`,

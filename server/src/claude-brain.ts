@@ -112,6 +112,17 @@ export interface ClaudeBrainStats {
   /** Decisions dropped because their type or their proposed lens was invalid. */
   rejectedProposals: number;
   /**
+   * rerouteSchema/quarantine decisions dropped because the curator found no
+   * matching per-agent tile at the decision's snapshotTs — the model named
+   * an agent but the data didn't back it. A different kind of finding than
+   * `rejectedProposals` (malformed request vs. unsubstantiated claim): the
+   * former says the model can't write JSON, the latter says its aim was off.
+   * Recorded by the caller that runs the gate (index.ts), not by this class —
+   * ClaudeBrain never sees curated packages (ROADMAP_BRIEF.md 2026-08-18 (5)
+   * §A point 2, the transcription-trap precedent from §12).
+   */
+  gateRejected: number;
+  /**
    * Answers the model DECLINED to give (`stop_reason: "refusal"`), which arrive
    * as an empty string and would otherwise land in `unparseable` — reading as
    * "the model cannot write JSON" when it is "the model would not answer". Not
@@ -389,6 +400,7 @@ export class ClaudeBrain implements BrainAdapter {
     failures: 0,
     unparseable: 0,
     rejectedProposals: 0,
+    gateRejected: 0,
     refusals: 0,
     truncated: 0,
     discarded: 0,
@@ -458,6 +470,11 @@ export class ClaudeBrain implements BrainAdapter {
 
   getStats(): ClaudeBrainStats {
     return { ...this.stats, inFlight: this.inFlight };
+  }
+
+  /** Called by the §A gate (index.ts) when it drops an unbacked assertion. */
+  recordGateRejection(): void {
+    this.stats.gateRejected++;
   }
 
   /**

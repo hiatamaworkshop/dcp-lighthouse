@@ -23,7 +23,7 @@ import { RuleBrain } from "./rule-brain.js";
 import { ClaudeBrain } from "./claude-brain.js";
 import { ShadowBrain } from "./shadow-brain.js";
 import { makeAnthropicAsk } from "./anthropic-ask.js";
-import { DashboardServer, replaySpanWithReference } from "./dashboard.js";
+import { DashboardServer, replaySpanWithReference, isReroutedAgentBacked } from "./dashboard.js";
 import type { ResettableBrain } from "./brain-adapter.js";
 import type { TestEvent } from "./mock-stream-generator.js";
 
@@ -110,6 +110,12 @@ const CLAUDE_BRAIN_MODEL = process.env.CLAUDE_BRAIN_MODEL ?? "claude-sonnet-5";
 const CLAUDE_BRAIN_INTERVAL_MS = Number(process.env.CLAUDE_BRAIN_INTERVAL_MS ?? 15_000);
 
 let shadowBrain: ShadowBrain | undefined;
+/**
+ * Hoisted out of the BRAIN_MODE=claude block below so the §A gate in the tick
+ * loop's shadow-log block can report gate rejections back onto this Brain's
+ * own stats (ClaudeBrainStats.gateRejected) — see recordGateRejection().
+ */
+let claudeBrainRef: ClaudeBrain | undefined;
 let brain: ResettableBrain = ruleBrain;
 /** Backs GET /brain. Left undefined under BRAIN_MODE=rule (see dashboard.ts). */
 let brainDiagnostics: (() => unknown) | undefined;
@@ -138,6 +144,7 @@ if (BRAIN_MODE === "claude") {
     minIntervalMs: CLAUDE_BRAIN_INTERVAL_MS,
     onError: (err) => console.warn(`[shadow] deliberation failed: ${err.message}`),
   });
+  claudeBrainRef = claudeBrain;
   shadowBrain = new ShadowBrain(ruleBrain, claudeBrain, {
     onShadowError: (err) => console.warn(`[shadow] ${err.message}`),
   });
@@ -292,7 +299,33 @@ setInterval(() => {
     for (const e of shadowBrain.getLog()) {
       if (e.seq <= shadowLogCursor || e.source !== "shadow") continue;
       const q = e.decision.qProposal ? ` ${JSON.stringify(e.decision.qProposal.params)}` : "";
-      console.log(`[shadow] (not applied) ${e.decision.type}${q}: ${e.decision.reason}`);
+
+      // §A division-of-labor gate (ROADMAP_BRIEF.md 2026-08-18 (5) §A):
+      // rerouteSchema/quarantine name one agentId, and the curator already
+      // judges per-agent shape once grouped — so check whether the data at
+      // the decision's own snapshotTs actually backs the claim. Diagnostic
+      // only here (shadow decisions are never applied), but it is exactly
+      // the measurement needed before ever considering ClaudeBrain primary.
+      const d = e.decision;
+      const agentId = d.meta?.agentId;
+      const snapshotTs = d.meta?.snapshotTs;
+      if (
+        (d.type === "rerouteSchema" || d.type === "quarantine") &&
+        typeof agentId === "string" &&
+        typeof snapshotTs === "number"
+      ) {
+        const coarseLens = registry.getObserve("test_result:v1", "coarse") ?? {};
+        const backed = isReroutedAgentBacked(buffer, curator, coarseLens, agentId, snapshotTs);
+        if (!backed) {
+          claudeBrainRef?.recordGateRejection();
+          console.log(`[shadow] (not applied, GATE REJECTED — unbacked) ${d.type}${q}: ${d.reason}`);
+          continue;
+        }
+        console.log(`[shadow] (not applied, gate: backed) ${d.type}${q}: ${d.reason}`);
+        continue;
+      }
+
+      console.log(`[shadow] (not applied) ${d.type}${q}: ${d.reason}`);
     }
     const newest = shadowBrain.getLog().at(-1);
     if (newest !== undefined) shadowLogCursor = newest.seq;
