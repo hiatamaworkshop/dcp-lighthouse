@@ -3788,3 +3788,41 @@ Step 3b で言う「動的データ追加」寄りの配線の穴の可能性) �
   `/control/replay`は人間 (または将来のBrain) が明示的に呼ぶ手動経路であって、
   Brainが自律的に「もっと古いデータを見たい」と判断して参照ゾーンへ読みに行く経路ではない。
   これは意図的にスコープ外にした (§Aの分業アーキテクチャや将来のBrain拡張の領分)
+
+## 2026-08-23 — RC 粗窓dip: 複数試行 (3回) での再検証
+
+07-25 findingの「粗窓dipタイルが24〜38秒遅れて発火し2.0σ境界で明滅する」が
+referenceUsable締め直し (2026-08-18) 後どう変わったか、単発サンプルではなく3試行で確認した
+(`run-lighthouse`スキルのSSEキャプチャ手順、各試行100秒)。
+
+**主目的 (遅延・明滅) は改善が確認できた**: 3試行中、粗窓dipが出た2試行 (下記) とも
+バースト終了から8〜11秒で発火し、07-25 findingの24〜38秒より明確に早い。
+trial 1はt+11.2s〜39.4sの間 σ が4.6→4.2→3.8と単調減衰しながら**タイルは連続して出続け**、
+2.0σ境界での明滅 (on/off) は観測されなかった — 旧findingが指摘した「静穏窓が溜まってσが縮み
+過去のバースト窓が事後的に閾値を再越える」パターンとは異なる、単調な減衰のみ。
+
+**ただし粗窓 (10s窓・ungrouped) 自体の検出は3試行で不安定だった**:
+- trial 1: dip 4.6σ→3.8σ (t+11〜39s)、その後 t+60〜69s に spike 2.6σ (実差0.046、後述)
+- trial 2: dip 3.1σ (t+8〜17sのみ、短く1回)
+- trial 3: **dip が一度も発火しなかった** (referenceUsable=trueのまま終始baselineタイルのみ)
+
+一方 **細窓replay (Brain駆動、group_by:[agentId]) は3試行とも一貫してagent-Cのバーストを
+確実に捉えた** (5.0σ〜12.6σ、referenceUsable:true)。粗窓ungrouped viewの検出安定性は
+グループ化されたreplayパスに比べて明確に劣る — これはRCが機構レベルで壊れていることを
+意味しない (§10の検証基準は細窓replayでの復元を要求しており、それは3/3で満たされている)。
+**粗窓 (ungrouped, dashboard.ts:348の常設ライブpackage) はagent-C単独のバーストを
+他agentの雑音で希釈しやすい** という前段の理解と整合する挙動。
+
+**副次的な新規finding**: RuleBrainのrerouteSchemaはRC実行中、**agent-C以外
+(agent-A・agent-D) に対しても発火した** (trial 2: agent-A 79.3%<baseline94.0%,
+agent-D 78.6%/76.9%<baseline90.8%/90.3%。trial 3: agent-D 81.5%<baseline91.6%)。
+これらは各々fine-window replayで実際にdipが確認されており (agent-D 5.0σ等)、
+**RuleBrain側の誤検出ではない** — baseline自体に自然変動があり、RCの注入バースト
+(agent-C) と無関係に他agentが一時的に閾値を割ることがある、という素の挙動。
+§Aのゲート設計 (rerouteSchemaをcuratorで裏取り) が効くのはClaudeBrain (LLM) の
+断定のみで、RuleBrainのこの挙動はスコープ外 (RuleBrainは実測passRateから直接算出する
+決定論的判断であり、curatorのタイル判定を経由しない — ゲート不要)。
+
+**結論**: 遅延・明滅は改善。粗窓ungrouped viewの検出安定性そのものは別の残課題として
+新規に浮上した (grouping前提の細窓replayが本命の検出経路であることを裏付ける結果とも読める)。
+深追いはせず記録のみに留める — 3試行はRC dip明滅検証の完了条件を満たしたと判断。
