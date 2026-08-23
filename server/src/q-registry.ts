@@ -149,6 +149,15 @@ export interface QObserveParams {
 export interface QPipelineParams {
   stream_rate_cap?: number;
   retention_window_ms?: number;
+  /**
+   * Reference-zone width and thinning ratio (ROADMAP L5 dynamic config,
+   * 2026-08-23). Only takes effect on a buffer whose reference zone was
+   * already opted in at construction (RetentionBufferOptions.referenceWindowMs
+   * / thinningRatio) — a $Q write cannot turn the zone on from cold, same
+   * boundary RetentionBuffer.setReferenceWindowMs()/setThinningRatio() draw.
+   */
+  reference_window_ms?: number;
+  reference_thinning_ratio?: number;
 }
 
 /** $Q[schema] — measurement-defining thresholds. */

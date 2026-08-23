@@ -55,9 +55,11 @@ const RETENTION_WINDOW_MS = 120_000;
  * REFERENCE_WINDOW_MS: 10x the freshness zone (round number, not measured) —
  * generous enough to matter for a Brain reference request that reaches back
  * further than 120s, still time-bounded per this file's "nothing accumulates
- * unbounded" philosophy. No $Q binding yet: RetentionBuffer has no
- * setReferenceWindowMs()/setThinningRatio() (unlike retention_window_ms below),
- * so these are construction-time only for now.
+ * unbounded" philosophy. These two only SEED the buffer's constructor (the
+ * reference zone must be opted in there, or a later $Q write cannot turn it
+ * on — see q-retention-binding.ts); once seeded, $Q[pipeline]'s
+ * reference_window_ms/reference_thinning_ratio are the live authority, same
+ * as retention_window_ms below (ROADMAP L5 dynamic config, 2026-08-23).
  */
 const REFERENCE_WINDOW_MS = RETENTION_WINDOW_MS * 10;
 const REFERENCE_THINNING_RATIO = 2;
@@ -72,7 +74,16 @@ const REFERENCE_THINNING_RATIO = 2;
 // to this same grid via lens.ts's floorToWindow.
 registry.set("observe:test_result:v1#coarse", { window_ms: 10_000, align: "epoch" });
 registry.set("observe:test_result:v1#fine",   { window_ms: 1_000, align: "epoch" });
-registry.set("pipeline:*", { retention_window_ms: RETENTION_WINDOW_MS });
+// reference_window_ms/reference_thinning_ratio (ROADMAP L5 dynamic config,
+// 2026-08-23): declared here too, not just passed to the buffer's
+// constructor, so the $Q row is the live authority the same way
+// retention_window_ms already is — bindPipelineRetention below keeps the
+// buffer's reference zone in sync with whatever this scope says at runtime.
+registry.set("pipeline:*", {
+  retention_window_ms: RETENTION_WINDOW_MS,
+  reference_window_ms: REFERENCE_WINDOW_MS,
+  reference_thinning_ratio: REFERENCE_THINNING_RATIO,
+});
 // AR/RC regression threshold delta (ROADMAP L2-1, "Brain write surface" demo,
 // PILOT_DATA.md §11). RuleBrain reads this live via QRegistry.getSchema — a
 // write to this scope reconfigures its threshold without a restart.

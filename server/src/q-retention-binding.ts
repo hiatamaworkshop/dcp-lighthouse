@@ -12,6 +12,13 @@
  * parameters are Brain-writable at runtime: retention is exactly the kind of
  * parameter a Brain wants to widen ("keep more, I am about to re-observe") and
  * narrow again.
+ *
+ * Extended (ROADMAP L5 dynamic config, 2026-08-23) to also wire the reference
+ * zone's width and thinning ratio — same binding, same "accepted-value store,
+ * not a validated one" refusal pattern, but a stricter boundary underneath:
+ * this binding can resize an EXISTING reference zone, never create one. A
+ * buffer that did not opt in at construction (RetentionBufferOptions) stays
+ * without a reference zone no matter what $Q says.
  */
 
 import type { QRegistry, QPipelineParams } from "./q-registry.js";
@@ -20,6 +27,16 @@ import type { QRegistry, QPipelineParams } from "./q-registry.js";
 export interface RetentionControllable {
   getRetentionWindowMs(): number;
   setRetentionWindowMs(ms: number): void;
+  /**
+   * Reference-zone accessors (ROADMAP L5 dynamic config, 2026-08-23). Optional
+   * because a target's buffer may not have opted the reference zone in at
+   * construction — this binding only ever resizes/reconfigures an EXISTING
+   * zone, never creates one, mirroring RetentionBuffer's own boundary.
+   */
+  getReferenceWindowMs?(): number | undefined;
+  setReferenceWindowMs?(ms: number): void;
+  getThinningRatio?(): number | undefined;
+  setThinningRatio?(ratio: number): void;
 }
 
 /**
@@ -60,14 +77,59 @@ export function bindPipelineRetention(
 
 function applyRetention(buffer: RetentionControllable, params: QPipelineParams | undefined): void {
   const ms = params?.retention_window_ms;
+  if (ms !== undefined) {
+    if (!Number.isFinite(ms) || ms <= 0) {
+      console.warn(
+        `[q] refusing $Q[pipeline].retention_window_ms=${ms} (must be a positive number); ` +
+          `retention stays at ${buffer.getRetentionWindowMs()}ms`,
+      );
+    } else if (buffer.getRetentionWindowMs() !== ms) {
+      buffer.setRetentionWindowMs(ms); // already-there case: no eviction pass
+    }
+  }
+
+  applyReferenceWindow(buffer, params?.reference_window_ms);
+  applyThinningRatio(buffer, params?.reference_thinning_ratio);
+}
+
+function applyReferenceWindow(buffer: RetentionControllable, ms: number | undefined): void {
   if (ms === undefined) return; // no opinion in $Q → leave the buffer as-is
-  if (!Number.isFinite(ms) || ms <= 0) {
+  if (buffer.setReferenceWindowMs === undefined || buffer.getReferenceWindowMs === undefined) return;
+  if (buffer.getReferenceWindowMs() === undefined) {
     console.warn(
-      `[q] refusing $Q[pipeline].retention_window_ms=${ms} (must be a positive number); ` +
-        `retention stays at ${buffer.getRetentionWindowMs()}ms`,
+      `[q] refusing $Q[pipeline].reference_window_ms=${ms}: this buffer's reference zone ` +
+        `was not configured at construction — a $Q write cannot turn it on`,
     );
     return;
   }
-  if (buffer.getRetentionWindowMs() === ms) return; // already there → no eviction pass
-  buffer.setRetentionWindowMs(ms);
+  if (!Number.isFinite(ms) || ms <= 0) {
+    console.warn(
+      `[q] refusing $Q[pipeline].reference_window_ms=${ms} (must be a positive number); ` +
+        `reference zone stays at ${buffer.getReferenceWindowMs()}ms`,
+    );
+    return;
+  }
+  if (buffer.getReferenceWindowMs() === ms) return;
+  buffer.setReferenceWindowMs(ms);
+}
+
+function applyThinningRatio(buffer: RetentionControllable, ratio: number | undefined): void {
+  if (ratio === undefined) return;
+  if (buffer.setThinningRatio === undefined || buffer.getThinningRatio === undefined) return;
+  if (buffer.getThinningRatio() === undefined) {
+    console.warn(
+      `[q] refusing $Q[pipeline].reference_thinning_ratio=${ratio}: this buffer's reference ` +
+        `zone was not configured at construction — a $Q write cannot turn it on`,
+    );
+    return;
+  }
+  if (!Number.isInteger(ratio) || ratio < 2) {
+    console.warn(
+      `[q] refusing $Q[pipeline].reference_thinning_ratio=${ratio} (must be an integer >= 2); ` +
+        `thinning ratio stays at ${buffer.getThinningRatio()}`,
+    );
+    return;
+  }
+  if (buffer.getThinningRatio() === ratio) return;
+  buffer.setThinningRatio(ratio);
 }

@@ -68,8 +68,8 @@ export class RetentionBuffer<T = unknown> {
   private readonly referenceEvents: LensEvent[] = [];
   private readonly extract: EventExtractor<T>;
   private retentionWindowMs: number;
-  private readonly referenceWindowMs?: number;
-  private readonly thinningRatio?: number;
+  private referenceWindowMs?: number;
+  private thinningRatio?: number;
   private thinCounter = 0;
   private readonly now: () => number;
 
@@ -167,6 +167,54 @@ export class RetentionBuffer<T = unknown> {
     if (ms <= 0) throw new RangeError("retentionWindowMs must be positive");
     this.retentionWindowMs = ms;
     this.evict();
+  }
+
+  /** Current reference-zone width, or undefined if this buffer was not opted in at construction. */
+  getReferenceWindowMs(): number | undefined {
+    return this.referenceWindowMs;
+  }
+
+  /**
+   * Resize the reference zone at runtime ($Q[pipeline].reference_window_ms,
+   * ROADMAP L5 dynamic config). Mirrors setRetentionWindowMs, but only for a
+   * buffer that opted the reference zone in at construction — this setter
+   * resizes an existing zone, it does not turn one on from cold. Widening it
+   * past what a prior thinningRatio has actually kept doesn't manufacture
+   * data: evictReference() only ever removes, so a widen is a no-op until new
+   * events age in under the new width, same as retention_window_ms's setter.
+   */
+  setReferenceWindowMs(ms: number): void {
+    if (this.referenceWindowMs === undefined) {
+      throw new RangeError("cannot set referenceWindowMs: reference zone was not configured at construction");
+    }
+    if (ms <= 0) throw new RangeError("referenceWindowMs must be positive");
+    this.referenceWindowMs = ms;
+    this.evictReference();
+  }
+
+  /** Current thinning ratio, or undefined if this buffer was not opted in at construction. */
+  getThinningRatio(): number | undefined {
+    return this.thinningRatio;
+  }
+
+  /**
+   * Change the thinning ratio at runtime ($Q[pipeline].reference_thinning_ratio,
+   * ROADMAP L5 dynamic config). Only for a buffer that opted the reference zone
+   * in at construction. Takes effect for events that age out of the freshness
+   * zone AFTER this call — already-thinned reference events keep the `weight`
+   * they were given under the old ratio; re-weighting retained history would
+   * mean the reference zone's own stats depend on WHEN a $Q write landed, not
+   * just what it is, which is the anchor-slide class of bug this project has
+   * repeatedly had to close (liveSpans' grid, decay_anchor).
+   */
+  setThinningRatio(ratio: number): void {
+    if (this.thinningRatio === undefined) {
+      throw new RangeError("cannot set thinningRatio: reference zone was not configured at construction");
+    }
+    if (!Number.isInteger(ratio) || ratio < 2) {
+      throw new RangeError("thinningRatio must be an integer >= 2");
+    }
+    this.thinningRatio = ratio;
   }
 
   /**

@@ -149,6 +149,67 @@ describe("RetentionBuffer — reference zone (ROADMAP L5 thinning, 2026-08-22)",
   });
 });
 
+describe("RetentionBuffer — reference zone dynamic config (ROADMAP L5, 2026-08-23)", () => {
+  it("getters report undefined when the reference zone was never configured", () => {
+    const buf = new RetentionBuffer<RawRec>(extractor, { retentionWindowMs: 1000 });
+    assert.equal(buf.getReferenceWindowMs(), undefined);
+    assert.equal(buf.getThinningRatio(), undefined);
+  });
+
+  it("setReferenceWindowMs/setThinningRatio throw on a buffer that never opted in", () => {
+    const buf = new RetentionBuffer<RawRec>(extractor, { retentionWindowMs: 1000 });
+    assert.throws(() => buf.setReferenceWindowMs(5000), /not configured at construction/);
+    assert.throws(() => buf.setThinningRatio(3), /not configured at construction/);
+  });
+
+  it("setReferenceWindowMs resizes an existing zone and evicts what no longer fits", () => {
+    const buf = new RetentionBuffer<RawRec>(extractor, {
+      retentionWindowMs: 100, referenceWindowMs: 1_000_000, thinningRatio: 2,
+    });
+    for (let i = 0; i < 200; i++) buf.observe({ ts: i * 10, v: i, $schema: "s" }, "s");
+    const before = buf.referenceSize();
+    assert.ok(before > 0);
+
+    buf.setReferenceWindowMs(500);
+    assert.equal(buf.getReferenceWindowMs(), 500);
+    assert.ok(buf.referenceSize() < before, "narrowing must evict what no longer fits the new width");
+  });
+
+  it("setReferenceWindowMs rejects a non-positive width", () => {
+    const buf = new RetentionBuffer<RawRec>(extractor, {
+      retentionWindowMs: 100, referenceWindowMs: 1000, thinningRatio: 2,
+    });
+    assert.throws(() => buf.setReferenceWindowMs(0), /must be positive/);
+  });
+
+  it("setThinningRatio changes the ratio for events that age out AFTER the call, not retroactively", () => {
+    const buf = new RetentionBuffer<RawRec>(extractor, {
+      retentionWindowMs: 100, referenceWindowMs: 1_000_000, thinningRatio: 5,
+    });
+    for (let i = 0; i < 30; i++) buf.observe({ ts: i * 10, v: i, $schema: "s" }, "s");
+    // Everything thinned so far was kept under ratio 5.
+    for (const e of buf.segment(-Infinity, Infinity)) {
+      if (e.weight !== undefined) assert.equal(e.weight, 5);
+    }
+
+    buf.setThinningRatio(2);
+    assert.equal(buf.getThinningRatio(), 2);
+    for (let i = 30; i < 60; i++) buf.observe({ ts: i * 10, v: i, $schema: "s" }, "s");
+
+    const weights = new Set(buf.segment(-Infinity, Infinity).map((e) => e.weight).filter((w) => w !== undefined));
+    assert.ok(weights.has(5), "events thinned before the change keep their old weight");
+    assert.ok(weights.has(2), "events thinned after the change use the new ratio");
+  });
+
+  it("setThinningRatio rejects a ratio below 2 or a non-integer", () => {
+    const buf = new RetentionBuffer<RawRec>(extractor, {
+      retentionWindowMs: 100, referenceWindowMs: 1000, thinningRatio: 2,
+    });
+    assert.throws(() => buf.setThinningRatio(1), /integer >= 2/);
+    assert.throws(() => buf.setThinningRatio(2.5), /integer >= 2/);
+  });
+});
+
 describe("RetentionBuffer — retroactive re-observation (RC criterion)", () => {
   const truth: InjectedTruth = {
     baselineValue: 0.5,
