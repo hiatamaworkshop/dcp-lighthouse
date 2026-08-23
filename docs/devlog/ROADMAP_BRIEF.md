@@ -3878,3 +3878,51 @@ shadow logブロックにゲート呼び出し。テスト7件追加
 今回は見送り (`gateRejected`との分離のみ実施)。ClaudeBrainがprimaryに昇格する前提の
 実測 (「gateRejectedが実際にどれくらいの比率になるか」) はまだ行っていない —
 BRAIN_MODE=claudeでの実走測定が必要。
+
+## 2026-08-23 (3) — 参照ゾーンの`$Q`動的設定
+
+L5完了時点 (2026-08-22) で残っていた「`$Q`経由の動的設定 (setter新設含む) は
+引き続き未着手」を埋めた。`RetentionBuffer`に`getReferenceWindowMs()`/
+`setReferenceWindowMs()`/`getThinningRatio()`/`setThinningRatio()`を新設し、
+`setRetentionWindowMs()` (既存の`retention_window_ms`用setter) と同型のパターンで
+`q-retention-binding.ts`に配線した。
+
+**opt-inの境界を保つ判断**: 参照ゾーンは構築時 (`RetentionBufferOptions.referenceWindowMs`
++ `thinningRatio`のペア) にしか新設できない、という既存の不変条件を、動的setterでも
+維持することにした。つまり`setReferenceWindowMs()`/`setThinningRatio()`は
+「既に構築時にopt-inされているゾーンのリサイズ」専用で、未設定のバッファに対して
+呼ぶと`RangeError`を投げる。$Q側 (`q-retention-binding.ts`)はこれを検知して
+warnのみで握りつぶす (`retention_window_ms`の不正値と同じ「拒否は言うが投げない」
+パターン)。$Qが「冷たい状態からゾーンを新設する」経路を持たないのは意図的 —
+構築時のopt-inが崩れると「このバッファは参照ゾーンを持つか」という前提を
+$Qの書き込みタイミング次第にしてしまい、`isReferenceUsable`等の判定が
+依存している「持っていない証拠を持っている」の罠 (2026-08-18 (5) §B) を
+新しい形で再発させかねない。
+
+**thinningRatioの変更は前向き適用のみ**: 比率を変更しても、変更前に既に
+参照ゾーンへ疎化・保持されたイベントの`weight`は古い比率のまま — 新しい比率が
+効くのは、この呼び出し**後**に鮮度ゾーンから老化して出ていくイベントから。
+遡って再重み付けしないのは、`liveSpans`の格子や`decay_anchor`が閉じてきた
+anchor-slide系のバグ (「壁時計や書き込みタイミング次第で同じ過去データの答えが
+変わる」) と同じクラスの罠を再発させないため。
+
+**本番配線**: `index.ts`の起動時`registry.set("pipeline:*", ...)`に
+`reference_window_ms`/`reference_thinning_ratio`を明示的に追加し、バッファの
+constructorに渡すだけでなく$Q行自体を「生きた正本」にした
+(`retention_window_ms`が過去に「書かれたが誰も読まない飾り」だった教訓と同じ形の修正、
+`q-retention-binding.ts`冒頭のコメント参照)。実サーバを起動して警告なしに
+ブートすることを確認済み。
+
+**実装箇所**: `retention-buffer.ts`に4メソッド、`q-registry.ts`の`QPipelineParams`に
+2フィールド、`q-retention-binding.ts`に`applyReferenceWindow`/`applyThinningRatio`、
+`index.ts`の起動時$Q行とコメント更新。テスト15件追加 (retention-buffer.test.ts 6件:
+未設定時のRangeError・リサイズ+eviction・非前向き適用の検証込み、
+q-retention-binding.test.ts 9件: 初期適用・再設定・無効値拒否・冷たい状態からの
+拒否・実RetentionBufferでの統合)。テスト 364→379件、`npx tsc`通過、全green。
+
+**残っている部分**: HTTP経由の手動コントロールエンドポイント
+(`/control/baseline-delta`や`/control/coarse-downsample`と同型のもの) は
+今回作らなかった — 今回のスコープは「$Qの配線」であって「人間が触るUI」ではなく、
+既存の$Qシステム経由 (`registry.set`) で十分だったため。必要になれば
+既存パターンをそのまま複製できる。ClaudeBrain/RuleBrainがこのパラメータを
+自発的に書く経路もまだ無い (§Aや将来のBrain拡張の領分、L5完了時から変わらず)。

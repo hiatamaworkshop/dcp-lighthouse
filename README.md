@@ -187,8 +187,14 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       ブロック。`ClaudeBrainStats.gateRejected`を新設し`rejectedProposals`と分離、
       `/brain`で実走中に見える。テスト 360→364件。
       詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §A, 2026-08-23
+- [x] **参照ゾーンの`$Q`動的設定** (2026-08-23)。`RetentionBuffer.setReferenceWindowMs()`/
+      `setThinningRatio()`を新設 (既存のオプトイン境界は維持 — 構築時に参照ゾーンを
+      opt-inしていたバッファのリサイズ専用、$Q書き込みでは冷たい状態からゾーンを
+      新設できない)。`q-retention-binding.ts`に`reference_window_ms`/
+      `reference_thinning_ratio`を配線、`index.ts`の起動時$Q行にも明示。
+      テスト 364→379件。
 
-現在テスト計 364 件、全 green。
+現在テスト計 379 件、全 green。
 
 ## BRAIN_MODE
 

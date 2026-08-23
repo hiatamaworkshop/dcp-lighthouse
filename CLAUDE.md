@@ -395,7 +395,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     (decayの短いτ・無疎化の低密度と同じ現象) に合流し悪化。疎化固有の新しい誤較正メカニズムは
     見つからなかった。**本番配線**: `index.ts` に `REFERENCE_WINDOW_MS = 鮮度ゾーン×10`
     (丸め数字)・`REFERENCE_THINNING_RATIO = 2` (較正で安全域と実測された値をそのまま採用)。
-    `$Q` 経由の動的再設定はまだ (setter未実装)。テスト 341→357件。
+    `$Q` 経由の動的再設定は2026-08-23に実装 (下記)。テスト 341→357件。
   - **参照ゾーンへの初の実読み手 `/control/replay` 実装・実地確認済 (2026-08-22)**:
     手動トリガーの制御エンドポイント (ユーザ判断で、Brain側のreplayRequest拡張ではなくこちら)。
     `replaySpanWithReference()` を `dashboard.ts` に export し、`index.ts` のBrain駆動replay
@@ -420,6 +420,20 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
   (前者=形式不正、後者=断定したがcuratorの裏が取れなかった)、`/brain`で実走中に見える。
   `renderBrainPrompt`にσ/タイル判定は入れていない (§12の転写の罠、不変条件のまま)。
   テスト 360→364件。詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §A, 2026-08-23
+- **参照ゾーンの`$Q`動的設定 実装済み (2026-08-23)** — `RetentionBuffer`に
+  `getReferenceWindowMs()`/`setReferenceWindowMs()`/`getThinningRatio()`/`setThinningRatio()`
+  を新設。**既存のオプトイン境界を維持** — これらのsetterは構築時に参照ゾーンを
+  opt-inしていたバッファのリサイズ専用で、`$Q`書き込みで冷たい状態からゾーンを
+  新設することはできない (未設定なら`RangeError`)。`q-retention-binding.ts`が
+  `QPipelineParams`に`reference_window_ms`/`reference_thinning_ratio`を追加し、
+  同じ「拒否はwarnのみ・throwしない」パターンで配線。`index.ts`の起動時
+  `registry.set("pipeline:*", ...)`にも両値を明示的に含め、`retention_window_ms`
+  と同じく「$Qの行が生きた正本」にした (以前はconstructorに渡すだけで$Q行は
+  飾りだった、というretention_window_msの過去の教訓と同じ形の修正)。
+  `setThinningRatio`は**リアクティブ** — 変更前に既に疎化済みのイベントは
+  古い比率の`weight`を保持したまま (再重み付けするとanchor-slide系のバグに
+  なる、`decay_anchor`/`liveSpans`の格子と同じ理由)。テスト 364→379件
+  (retention-buffer.test.ts 6件、q-retention-binding.test.ts 9件)。
 - 常設: 実データ派生 (非公開の姉妹プロジェクト) からの還元フィルタ — 「機構を行使/変更する or ドメイン非依存知見を生む」もののみ灯台の実証に数える
 
 ---
