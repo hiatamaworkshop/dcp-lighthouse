@@ -49,6 +49,25 @@ function renderSnapshot(data) {
   renderDomains(data.domains ?? []);
   renderTiles(data.snapshot);
   renderQHistory(data.qHistory ?? []);
+  renderActiveScenario(data.activeScenario ?? null);
+}
+
+// ── Active scenario indicator ────────────────────────────────────────────────
+
+let lastActiveScenario;
+
+function renderActiveScenario(activeScenario) {
+  if (activeScenario === lastActiveScenario) return;
+  lastActiveScenario = activeScenario;
+
+  for (const btn of document.querySelectorAll("button[data-scenario]")) {
+    btn.classList.toggle("active", btn.dataset.scenario === activeScenario);
+  }
+
+  badge.textContent = activeScenario ? `live · ${activeScenario} running` : "live";
+  badge.classList.toggle("running", true);
+
+  if (!activeScenario) stopReminder.hidden = true;
 }
 
 // ── Agent bars ──────────────────────────────────────────────────────────────
@@ -162,8 +181,24 @@ function runScenario(id) {
   fetch(`${API}/demo/start?scenario=${id}`).catch(console.error);
 }
 
+const stopBtn = document.getElementById("stop-btn");
+const stopReminder = document.getElementById("stop-reminder");
+
 function stopGen() {
-  fetch(`${API}/demo/stop`).catch(console.error);
+  // /demo/stop only clears the generator's tick timer — if a scenario is
+  // still running its activeScenario flag doesn't clear until the scenario's
+  // own async run finishes naturally, so the RC/AR/CG button can stay
+  // highlighted after Stop. Give immediate feedback here rather than leaving
+  // the click looking like it did nothing.
+  stopBtn.disabled = true;
+  stopBtn.textContent = "Stopping…";
+  stopReminder.hidden = false;
+  fetch(`${API}/demo/stop`)
+    .catch(console.error)
+    .finally(() => {
+      stopBtn.disabled = false;
+      stopBtn.textContent = "Stop";
+    });
 }
 
 // ── $Q[schema] write surface (ROADMAP L2-1) ──────────────────────────────────

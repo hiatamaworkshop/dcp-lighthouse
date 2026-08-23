@@ -403,6 +403,7 @@ export class DashboardServer {
       domains: snapshot.domains,
       snapshot: snapshotPkg,
       qHistory: this.registry.rows().slice(-20),
+      activeScenario: this.generator.getCurrentLoad().activeScenario,
     };
 
     for (const res of this.snapshotSubs) sseWrite(res, payload);
