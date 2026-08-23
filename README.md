@@ -177,8 +177,18 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       実地確認済み (bespoke bufferでのユニットテストではなく、本番配線を通した検証)。
       `$Q` 経由の動的再設定は未着手 (setter未実装)。
       詳細は ROADMAP_BRIEF.md 2026-08-22 (2)〜(5)
+- [x] **分業アーキテクチャ** — `rerouteSchema`/`quarantine`分を実装 (2026-08-23)。
+      `schemaUpdate` (domain coverage) はcuratorに対応する判定概念が無いためスコープ外
+      (pass率のdip/spikeとarea bitカバレッジは別指標)。`dashboard.ts`の
+      `isReroutedAgentBacked()`が、ClaudeBrainの決定が名指ししたagentIdを
+      `meta.snapshotTs`の時点で`group_by:["agentId"]`付きのon-demand replayで裏取りする
+      (常設のungrouped粗窓ビューは検出が不安定と判明済みのため使わない)。ClaudeBrainは
+      現状shadowのみ (primary未昇格) なので、配線は`index.ts`のtick loopのshadow log
+      ブロック。`ClaudeBrainStats.gateRejected`を新設し`rejectedProposals`と分離、
+      `/brain`で実走中に見える。テスト 360→364件。
+      詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §A, 2026-08-23
 
-現在テスト計 360 件、全 green。
+現在テスト計 364 件、全 green。
 
 ## BRAIN_MODE
 

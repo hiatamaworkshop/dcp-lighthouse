@@ -3826,3 +3826,55 @@ agent-D 78.6%/76.9%<baseline90.8%/90.3%。trial 3: agent-D 81.5%<baseline91.6%)�
 **結論**: 遅延・明滅は改善。粗窓ungrouped viewの検出安定性そのものは別の残課題として
 新規に浮上した (grouping前提の細窓replayが本命の検出経路であることを裏付ける結果とも読める)。
 深追いはせず記録のみに留める — 3試行はRC dip明滅検証の完了条件を満たしたと判断。
+
+## 2026-08-23 (2) — 分業アーキテクチャ: rerouteSchema分を実装
+
+2026-08-18 (5) §Aで設計だけ書いていた分業アーキテクチャ (「断定チャネルはcuratorがゲート」)
+を、直前のRC複数試行検証で得た知見を反映して実装した。
+
+**スコープを`rerouteSchema`/`quarantine`のみに絞った** (AskUserQuestionでユーザ確認済み)。
+`schemaUpdate`はdomain coverage (area bit充足) の主張だが、curatorが判定しているのは
+pass率のdip/spike/step/gap(=時間欠落) であって、area bitのカバレッジ不足を判定する
+概念がcurator側にそもそも存在しない。gatingするには新しい判定ロジック一式が要る —
+「既存の判定を配線するだけ」という§Aの前提が`schemaUpdate`には成立しないため、
+今回は明示的にスコープ外とし、将来必要になったときの課題として残した。
+
+**裏取りの実装方針を設計時の想定から変更した**: §Aの原文は「その ts の package と照合すればよい」
+と書いており、常設のungrouped粗窓package (`dashboard.ts`の`broadcast()`が毎tick作る
+`snapshotPkg`) をそのまま使う想定だった。しかし直前 (2026-08-23 (1)) のRC複数試行検証で
+「ungrouped粗窓viewの検出は3試行中1試行でしか出ない」ことが分かったばかりだったため、
+これをそのまま裏取りの根拠にするのは弱いと判断し、`isReroutedAgentBacked()` (dashboard.ts)
+を新設: `meta.snapshotTs`をもとに`buffer.replay()`を`group_by:["agentId"]`付きで
+その場で再実行し、`curator.curate()`で該当agentIdのタイルが`baseline`以外かを判定する。
+新しい保持機構 (ts→package ring) は作らず、既存の`replaySpanWithReference`
+(2026-08-22, L5) や`liveSpans`と同型のon-demand replayパターンを再利用しただけ
+— RetentionBufferは任意の`[fromTs,toTs]`にオンデマンドで答えられるので、
+「小さな保持」すら不要だった。`referenceUsable:false` (盲目) は常に「裏取りできず」
+として扱う (silence-vs-blindnessの原則をゲートにもそのまま適用)。
+
+**ClaudeBrainは現状shadowのみ (primary未昇格)** — `brain.decide()`の出力には
+ClaudeBrainの決定が乗らないため (「Only RuleBrain's decisions are applied」)、
+ゲートの配線先は`index.ts`のtick loopにある**shadow logブロック**
+(`shadowBrain.getLog()`を毎tick消費してprintしている箇所)。shadow決定は元々
+registry.setに届かないので、ここでのゲートは診断専用 — 「もしprimaryに昇格したら
+何割が裏取りされるか」を実走中に観測できるようにする位置づけ。
+
+**棄却カウンタを分離**: `ClaudeBrainStats`に`gateRejected`を新設。既存の
+`rejectedProposals` (型・レンズが不正) とは性質が違う finding
+(「断定したがcuratorの裏が取れなかった」) なので混ぜない。`ClaudeBrain`自体は
+curated packageを一切見ないので (§Aで維持すべきとされた不変条件)、ゲートの
+判定はindex.ts側で行い、`claudeBrain.recordGateRejection()`で結果だけを
+Brain側の統計に書き戻す。`/brain`エンドポイントは既存の`llm.getStats()`を
+そのまま返しているので、追加配線なしで`gateRejected`が実走中に見える。
+
+**実装箇所**: `dashboard.ts`に`isReroutedAgentBacked()`、`claude-brain.ts`に
+`ClaudeBrainStats.gateRejected`+`recordGateRejection()`、`index.ts`のtick loop
+shadow logブロックにゲート呼び出し。テスト7件追加
+(dashboard.test.ts 3件: backed/not-backed/blind、claude-brain.test.ts 1件:
+カウンタ分離、既存境界確認込み)。テスト 360→364件、`npx tsc`通過、全green。
+
+**残っている部分**: `schemaUpdate`のゲートは未着手 (curator側に新しい判定ロジックが要る)。
+`rejectedProposals`を「型不正」と「レンズ不正」でさらに細分する話は§A原文にあったが
+今回は見送り (`gateRejected`との分離のみ実施)。ClaudeBrainがprimaryに昇格する前提の
+実測 (「gateRejectedが実際にどれくらいの比率になるか」) はまだ行っていない —
+BRAIN_MODE=claudeでの実走測定が必要。

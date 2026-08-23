@@ -405,12 +405,21 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     確認済み。RuleBrain/ClaudeBrain自体はまだ自発的に120秒超のreplayを要求しない
     (手動経路のみ、意図的にスコープ外)。テスト 357→360件。詳細は
     ROADMAP_BRIEF.md 2026-08-22 (2)〜(5)
-- **分業アーキテクチャ (未実装)** — 判定は curator に既にある。足りないのは配線で、
-  ゲートは Brain の中ではなく**決定が返ってきた後**に置く (`meta.snapshotTs` が照合先の
-  package を既に名乗っている)。`renderBrainPrompt` に σ / タイル判定を**入れないこと**は
-  維持すべき不変条件 (§12 の転写の罠)。`stats.rejectedProposals` は
-  「形式が不正」と「断定の裏が取れない」で割る (性質の違う findings)。
-  詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §A
+- **分業アーキテクチャ — rerouteSchema分 実装済み (2026-08-23)** — スコープは
+  `rerouteSchema`/`quarantine` のみ。`schemaUpdate` (domain coverage) はcuratorが
+  判定する概念自体が無い (pass率のdip/spike/gapとarea bitカバレッジは別指標、
+  2026-08-23の複数試行検証で判明) ためスコープ外に明示的に残した。
+  `dashboard.ts`に`isReroutedAgentBacked()`を新設 — ClaudeBrainの決定が名指しした
+  agentIdを、`meta.snapshotTs`の時点で`buffer.replay()`を`group_by:["agentId"]`
+  付きでオンデマンド再実行しcuratorで裏取りする。常設のungrouped粗窓ビューは
+  使わない (2026-08-23のRC複数試行で検出が不安定と判明済み)。新しい保持機構は
+  追加せず、既存の`replaySpanWithReference`と同型のon-demand replayパターンを再利用。
+  配線は`index.ts`のtick loopのshadow logブロック (ClaudeBrainは現状shadowのみで
+  primaryには昇格していないため、decide()の出力ではなくshadow log側で判定・診断)。
+  `ClaudeBrainStats`に`gateRejected`を新設し`rejectedProposals`と分離
+  (前者=形式不正、後者=断定したがcuratorの裏が取れなかった)、`/brain`で実走中に見える。
+  `renderBrainPrompt`にσ/タイル判定は入れていない (§12の転写の罠、不変条件のまま)。
+  テスト 360→364件。詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §A, 2026-08-23
 - 常設: 実データ派生 (非公開の姉妹プロジェクト) からの還元フィルタ — 「機構を行使/変更する or ドメイン非依存知見を生む」もののみ灯台の実証に数える
 
 ---
