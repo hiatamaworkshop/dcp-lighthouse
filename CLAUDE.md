@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1/L2/L3/L4 完了 (agg_func は throw ガードのみ、median 本体は保留)・L5 完了 (実装・較正・本番配線・実読み手 `/control/replay` の実地確認まで) (テスト360件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmedian本体まで実装、percentileのみ未着手)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了 (テスト390件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -361,10 +361,29 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     ゲート (`validateObserveParams` を再利用) も自動的にこの値を拒否するようになった
     (`claude-brain.test.ts` の「REJECTS a replayRequest whose lens the rulebook refuses」に
     `agg_func: median` を追加、`lens.test.ts` に専用 describe を追加)。テスト 336→339件。
-    **median/percentile 本体・curator 側の `unscoredGroups` 相当の申告は依然未着手** —
-    生値保持/sketch を要する `WindowStat` の構造変更なので、着手前に
-    `LensResult` 構造変化の curator 影響を先に設計する (2026-06-11 から一貫した警告と同じ)。
-    詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §C
+  - **`agg_func: "median"` 本体 実装済み (2026-08-23)** — 十分統計量からのプールという当初の
+    前提を外し、**生値保持** (`WindowStat.values?: number[]`) で実装。sketch (t-digest 等) の
+    近似プーリングと違い**厳密**なので、疎化の加重で1度踏んだ「測らずに較正が狂う」罠を踏まない
+    (再較正不要)。`downsample_factor` は窓をまたいで`values`を連結してから中央値を再計算する
+    ことで median でも厳密に成立する — §C原文が「数学的に整合しない」としていたのは
+    十分統計量プーリング前提の話であり、生値保持ならその制約自体が外れる、という認識の
+    修正が実装の核。**スコープは非加重 median のみ** — `decay`との組合せは
+    `validateObserveParams`で静的に拒否 (レンズ自体が加重を宣言)、L5の参照ゾーン疎化
+    (レンズではなくイベント側の`weight`) は`aggregate()`のflush()で動的に拒否
+    (静的検査が見えない加重源のための2枚目のガード)。percentile は未実装のまま
+    (どのパーセンタイルかを指定するフィールドがスキーマに無い、別作業)。
+    curator側は`SnapshotPackage.aggFuncUnscored`を新設し、observation/referenceの
+    どちらかがmedianなら**全体を採点拒否** (`tiles:[]`、z検定はガウス仮定前提で
+    median窓には適用不能・新しい統計モデルは作らない、という§C原文の設計方針どおり)。
+    grouped lensでは`unscoredGroups`ではなく**package全体のフラグに一本化**
+    (グループ単位の「参照が無い」とpackage単位の「この統計量自体を採点できない」は
+    別の性質のfindingsなので混ぜない)。raw LensResultの`values`/`mean`(実際の中央値)は
+    そのまま残る — curatorは**判断を拒否するが値は隠さない**。
+    ダッシュボード/ClaudeBrainプロンプトへの配線は行っていない
+    (curatorが常にtiles:[]を返すため実利用の受け皿がまだ無い、L5の「実読み手」と同種の
+    別作業として意図的に見送り)。テスト 339→390件
+    (lens.test.ts 7件、snapshot-curator.test.ts 4件、既存の固定テスト2件を新挙動に更新)。
+    詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §C, 2026-08-23
 - **L5** retention 参照ゾーン (疎化) — **疎化は「加重」であって新しい統計ではない**。
   exp decay で実装・較正済みの `weights{sumW,sumW2}` / `effectiveN` (Kish) / 加重 `poolStats` を
   そのまま使う (並行の統計パスを新設しない)。踏んではいけないのは **`count` に代表数を入れること** —

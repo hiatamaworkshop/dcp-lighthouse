@@ -3926,3 +3926,88 @@ q-retention-binding.test.ts 9件: 初期適用・再設定・無効値拒否・�
 既存の$Qシステム経由 (`registry.set`) で十分だったため。必要になれば
 既存パターンをそのまま複製できる。ClaudeBrain/RuleBrainがこのパラメータを
 自発的に書く経路もまだ無い (§Aや将来のBrain拡張の領分、L5完了時から変わらず)。
+
+## 2026-08-23 (4) — `agg_func: "median"` 本体を実装
+
+§Cが「未着手」として残していたmedian/percentile本体に着手した。着手前に
+§C原文を読み直し、当時の結論の**前提そのものを検証し直した**ところ、
+より狭いスコープで実装できることが分かった。
+
+**当時の結論を再検討した**: 2026-08-17時点の結論は「median/percentileは
+十分統計量からプールできない (2窓のmedianをマージしてもmerged medianにならない)、
+これはdownsample_factorや参照レンズのプーリングが依存する分解可能性と数学的に
+整合しない」というものだった。この結論は**十分統計量のみでプールする前提**では
+正しい。しかし**生値保持**という選択肢を取れば前提自体が変わる — 窓をまたいで
+生の値そのものを連結してから中央値を再計算すればよく、これは近似ではなく厳密に
+正しい (元々1つの大きな窓で計算した場合と完全に同じ答えになる)。§C原文が
+懸念していた「sketch (t-digest等) を使うとプーリングが近似になり較正を測り直す
+必要がある」という警告は、生値保持を選ぶ限り**該当しない** — 近似誤差そのものが
+存在しないので、疎化の加重で1度踏んだ「測らずに正しそうな理屈を採用して較正が
+狂った」罠 (2026-08-17) を再演する心配がない。代償はメモリ (窓の生値配列を
+保持する) だが、パイロット規模では許容範囲。
+
+**スコープを非加重medianに絞った**: 加重median (重み付き中央値) は数学的に
+well-definedだが別のアルゴリズムであり、今回は実装しなかった。ガードは2段:
+- **静的** — `validateObserveParams`が`agg_func:"median"`+`decay`の組合せを
+  即座に拒否 (レンズ自体が加重を宣言している以上、静的に判定できる)
+- **動的** — `aggregate()`のflush()が、窓に加重イベント (`LensEvent.weight !== 1`)
+  が実際に混入した場合に`RangeError`を投げる。これは静的ガードが見えない
+  加重源 — L5の参照ゾーン疎化 (`weight`はイベント側の性質であり、レンズの
+  性質ではない) — をカバーするための2枚目の防御線。「静的検査で捕まえられない
+  組合せは実行時に拒否する」という構図は、`decay: exp`が未実装だった頃の
+  「パースするがthrowする」前例と同じ判断
+
+**実装箇所** (`lens.ts`):
+- `WindowStat`に`aggFunc?: "median"`と`values?: number[]`を追加。`mean`フィールドを
+  そのまま再利用し、`aggFunc:"median"`の時は`mean`が中央値そのものを表す
+  (別名のフィールドを増やすより、既存の読み手が触る唯一のフィールドを
+  一貫して読めば済むようにした)
+- `aggregate()`が`agg_func:"median"`の時だけ`values`配列を収集 (無指定/`"mean"`時は
+  一切割り当てないので既存の全呼び出しはバイト同一)。flush()で中央値を計算し
+  `mean`に上書き、`aggFunc`/`values`を付与
+- `downsample()`に`downsampleMedian()`分岐を新設 — バケツごとに`values`を連結し、
+  連結後の配列から中央値を再計算 (厳密、上記のとおり)
+- `validateObserveParams`が`agg_func`の許容値を`"mean"`のみから`"mean"|"median"`に拡張。
+  percentileは依然未実装 (どのパーセンタイルかを指定するフィールドがスキーマに
+  まだ無いという、medianとは別の理由で見送り)
+
+**curator側 (`snapshot-curator.ts`)**: §C原文の「採点できないと申告する形にする」
+という設計方針どおり、新しい統計モデルは作らず**拒否**を実装した。
+`SnapshotPackage.aggFuncUnscored?: boolean`を新設。`curate()`の冒頭で
+observation/referenceどちらかが`aggFunc:"median"`の窓を持てば、
+`poolStats`/`isScorable`等の既存z検定機構に一切触れさせず即座に
+`{tiles:[], referenceUsable:false, aggFuncUnscored:true, ...}`を返す。
+grouped lensの場合も**package全体のフラグに一本化** — 既存の`unscoredGroups`
+(「参照が無いグループ」) とは性質が違うfinding (「この統計量自体を
+採点する手段がない」) なので混ぜない。raw `LensResult`の`values`/`mean`
+(実際の中央値) はcurate()を経由せず直接読めば残っている —
+**curatorは判断を拒否するが値を隠しはしない**、という線引きを明示した。
+
+**実利用の受け皿は今回作らなかった**: ダッシュボードの粗窓/細窓ビューは
+どちらも`agg_func`を指定しておらず (=mean固定)、ClaudeBrainのプロンプトにも
+`agg_func`は載せていない。理由: curatorがmedianレンズを常に`tiles:[]`で
+拒否する以上、ClaudeBrainに`agg_func:median`を提案させても異常検知の
+役には立たない (プロンプトを複雑にするだけで見返りがない)。`/control/replay`
+も`agg_func`パラメータを受け付けない — 受け付けても返る`SnapshotPackage`は
+常に空なので、直接の中央値表示が欲しければエンドポイントの応答形状自体を
+変える必要があり、それはL5の「実読み手」と同種の**別作業**として意図的に
+見送った (実装 → 較正/検証 → 実利用配線、を1回で全部やらない、という
+L5でも踏襲したのと同じ分割)。
+
+**修正した既存テスト2件**: `lens.test.ts`の「median/percentileはすべて拒否」
+テストと`claude-brain.test.ts`のbad-lens表 (`{"agg_func":"median"}`) は
+2026-08-18時点の「medianは常に拒否」という古い挙動を固定していたテストだった。
+新しい挙動 (非加重medianは通る、decay併用のみ拒否) に合わせて更新した —
+これは実装の後退ではなく、当初の「全面拒否」が「より正確な部分許可」に
+置き換わったことの反映。
+
+**実装箇所まとめ**: `lens.ts`(WindowStat/aggregate/downsample/validateObserveParams)、
+`snapshot-curator.ts`(aggFuncUnscored + hasMedianWindows)。
+テスト11件追加・2件更新 (lens.test.ts 7件、snapshot-curator.test.ts 4件)。
+テスト 379→390件、`npx tsc`通過、全green。
+
+**残っている部分**: percentile (p50以外) 本体は未着手。加重median
+(decay/疎化との組合せ) も未着手 — 実装するなら重み付き中央値の定義
+(累積重みが総重みの半分を超える点、が標準的) を採用することになるが、
+現時点でそれを要求する具体的なユースケースは無い。ダッシュボード/Brainへの
+実配線も未着手 (上記のとおり意図的)。

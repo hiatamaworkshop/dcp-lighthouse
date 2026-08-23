@@ -156,12 +156,15 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       exp 形は窓を**加重**にするので較正を測り直した結果、**加重レンズが連続性補正を黙って
       切っていた**ことが判明 (誤警報 7.1% = 補正導入前の値に逆戻り)。二値性の恒等式は
       count を総重みに置き換えれば加重でも成立するので、格子検出を一般化して 4.5% に復帰。
-      無加重の数値は 1 つも動いていない。`agg_func` は throw ガードのみ実装済 (2026-08-18) —
-      `validateObserveParams` が `"mean"`(既定と同じ) 以外の値を RangeError で拒否する。
-      `"mean"` は `WindowStat` が既に `{mean, count, sumSq}` そのものなので別コードパスは不要。
-      **median/percentile 本体は未実装** — 十分統計量からプールできず、downsample・参照レンズが
-      依存する分解可能性と噛み合わないため、`WindowStat` の構造変更 (生値保持 or sketch) が要る。
-      着手前に ROADMAP_BRIEF.md 2026-08-18 (5) §C を読むこと
+      無加重の数値は 1 つも動いていない。`agg_func` は throw ガードを経て (2026-08-18)、
+      **`"median"` 本体を実装済み (2026-08-23)** — 十分統計量プールではなく**生値保持**
+      (`WindowStat.values`) で、downsample_factor 併用でも厳密 (sketch の近似ではない)。
+      非加重のみ対応 (`decay`併用は静的拒否、参照ゾーン疎化併用は動的拒否)。
+      curator は observation/reference どちらかが median なら `SnapshotPackage.aggFuncUnscored`
+      を立てて全体を採点拒否 (z検定はガウス仮定前提のため)。percentile は未実装
+      (どのパーセンタイルかを指定するフィールドがスキーマに無い)。実利用の受け皿
+      (ダッシュボード/ClaudeBrainプロンプト) はまだ配線していない。
+      詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §C, 2026-08-23
 - [x] **L5** retention 参照ゾーン — 鮮度ゾーンの上の疎化レイヤー (2026-08-22 完了)。
       形状は固定比率 (N個に1個、`LensEvent.weight = N`)。**疎化は「加重」であって新しい統計
       ではない** — exp decay で実装・較正済みの `weights`/`effectiveN`/加重 `poolStats` を
@@ -194,7 +197,7 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       `reference_thinning_ratio`を配線、`index.ts`の起動時$Q行にも明示。
       テスト 364→379件。
 
-現在テスト計 379 件、全 green。
+現在テスト計 390 件、全 green。
 
 ## BRAIN_MODE
 
