@@ -140,6 +140,28 @@ export interface SnapshotPackage {
    */
   unscoredGroups?: string[];
   /**
+   * True when this package's observation or reference lens declared
+   * agg_func:"median" — the whole-package form of `unscoredGroups`
+   * (ROADMAP_BRIEF.md 2026-08-18 (5) §C / 2026-08-23). A median window's
+   * `mean` field holds a median, not a mean, and carries no `sumSq`/`weights`
+   * that mean anything to a normal-approximation z-test — there is no
+   * Gaussian reference model to score against, by design, not because no one
+   * got around to it yet (median/percentile cannot be pooled from the
+   * sufficient statistics this comparator's whole model depends on).
+   *
+   * Set this instead of quietly running the z-test machinery over numbers it
+   * was never derived for. `tiles` is always empty and `referenceUsable` is
+   * left `false` when this is `true` — read this flag FIRST: a median
+   * package was never eligible for scoring, independent of what the data
+   * looked like, which is exactly the distinction `referenceUsable` draws
+   * for a missing yardstick, applied here to an incompatible statistic
+   * instead of an absent one. `observation.windows`/`.groups` (the raw
+   * LensResult, not part of this package) still carry every window's actual
+   * median in `mean` for direct inspection — this curator declines to judge
+   * it, it does not withhold it.
+   */
+  aggFuncUnscored?: boolean;
+  /**
    * How this package was selected — the multiple-comparisons context behind
    * every tile in it.
    *
@@ -347,6 +369,36 @@ export class SnapshotCurator {
   curate(observation: LensResult, reference: LensResult = observation): SnapshotPackage {
     const { windows, window_ms } = observation;
     const now = Date.now();
+
+    // agg_func:"median" windows carry no Gaussian sufficient statistics for
+    // this comparator's z-test to read — refuse before poolStats/isScorable
+    // ever touch one, rather than letting mean/sumSq/weights (meaningless on
+    // a median window) silently produce a number (ROADMAP_BRIEF.md
+    // 2026-08-18 (5) §C / 2026-08-23, aggFuncUnscored's doc comment). Checked
+    // on both observation and reference: a median window can reach this
+    // comparator from either side (e.g. a mean observation scored against a
+    // median reference would be just as meaningless).
+    if (hasMedianWindows(observation) || hasMedianWindows(reference)) {
+      const spanMs =
+        windows.length > 0
+          ? { start: windows[0].windowStart, end: windows[windows.length - 1].windowEnd }
+          : undefined;
+      return {
+        generatedAt: now,
+        window_ms,
+        spanMs,
+        globalStats: { mean: 0, stdDev: 0, windowCount: 0, eventCount: 0 },
+        referenceUsable: false,
+        aggFuncUnscored: true,
+        selection: {
+          scoredWindowCount: 0,
+          baseZThreshold: this.opts.spikeZThreshold,
+          effectiveZThreshold: this.opts.spikeZThreshold,
+        },
+        unreachableTails: [],
+        tiles: [],
+      };
+    }
 
     const refStats = poolStats(reference.windows);
     // A reference with no variance to offer cannot ground any comparison. Say so
@@ -726,6 +778,19 @@ function isReferenceUsable(ref: RefStats): boolean {
  */
 function isScorable(w: WindowStat): boolean {
   return w.count >= MIN_VALID_COUNT && effectiveN(w) > 0;
+}
+
+/**
+ * Does any window in this LensResult carry agg_func:"median"? A single
+ * applyLens() call produces windows under one agg_func uniformly (lens.ts),
+ * so checking the mixed `windows` array is enough — a grouped lens's
+ * `groups[*].windows` are built by the same call and carry the same tag, but
+ * every path that can reach this (both `curate()` call sites) starts from
+ * `windows`, so there is no case where `windows` says "mean" while a group
+ * secretly says "median".
+ */
+function hasMedianWindows(result: LensResult): boolean {
+  return result.windows.some((w) => w.aggFunc === "median");
 }
 
 /**

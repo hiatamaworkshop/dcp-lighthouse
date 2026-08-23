@@ -157,6 +157,41 @@ export interface WindowStat {
    * is that `value` is an arbitrary number.
    */
   range?: { min: number; max: number };
+  /**
+   * Set to "median" when this window's `mean` field actually holds the
+   * MEDIAN of its raw values, not their mean (ROADMAP_BRIEF.md 2026-08-18
+   * (5) §C / 2026-08-23). Absent (undefined) means `mean` is the ordinary
+   * weighted mean, which is what every consumer written before this field
+   * existed already assumes — that is the point of reusing `mean` rather
+   * than adding a same-shaped-but-differently-named field.
+   *
+   * A window tagged this way carries no statistical meaning in `sumSq`/
+   * `weights` for the purposes SnapshotCurator uses them (a normal-
+   * approximation z-test against a Gaussian reference) — median/percentile
+   * have no such model here, by design, not by oversight. SnapshotCurator
+   * checks this tag and refuses to score anything it is set on
+   * (`SnapshotPackage.aggFuncUnscored`) rather than silently running mean/
+   * variance machinery over a summary statistic it was never derived for.
+   */
+  aggFunc?: "median";
+  /**
+   * The raw values a median window was computed from, in the order they were
+   * observed. Present only when `aggFunc === "median"`.
+   *
+   * Median/percentile cannot be pooled from sufficient statistics — two
+   * windows' medians do not merge into the merged window's median, the way
+   * count/sum/sumSq do for mean (ROADMAP_BRIEF.md 2026-08-18 (5) §C). Raw
+   * value retention sidesteps that: downsample_factor's window-merging stays
+   * EXACT for median too, by concatenating `values` across the windows being
+   * merged and recomputing the median from the union — not an approximation,
+   * because nothing was ever summarized away. The cost is real (this array
+   * grows with the window's event count instead of staying three numbers),
+   * which is the accepted tradeoff for exactness over a sketch (t-digest
+   * etc.), whose pooling would be approximate and require its own
+   * calibration pass before shipping (§C's warning, and the exact precedent
+   * this project already paid for once with weighted continuity correction).
+   */
+  values?: number[];
 }
 
 /**
@@ -466,18 +501,43 @@ export function validateObserveParams(lens: QObserveParams): void {
       throw new RangeError(`decay "${lens.decay}" — tau must be greater than zero`);
     }
   }
-  if (lens.agg_func !== undefined && lens.agg_func !== "mean") {
+  if (
+    lens.agg_func !== undefined &&
+    lens.agg_func !== "mean" &&
+    lens.agg_func !== "median"
+  ) {
     // Same precedent as decay's exp form before it was implemented: parse but
-    // throw, rather than silently reporting mean/sumSq numbers under a
+    // throw, rather than silently reporting mean/sumSq numbers under an
     // agg_func the lens never actually applied. "mean" needs no separate code
-    // path — WindowStat already IS mean/sum/sumSq — but median/percentile
-    // cannot be pooled from those sufficient statistics (two windows' medians
-    // do not merge into the merged window's median), so they are mathematically
-    // incompatible with downsample_factor's and the reference lens's pooling,
-    // not merely unimplemented. See ROADMAP_BRIEF.md 2026-08-18 (5) §C.
+    // path — WindowStat already IS mean/sum/sumSq. "median" is implemented via
+    // raw-value retention (WindowStat.values), which keeps downsample_factor's
+    // pooling EXACT for it too (ROADMAP_BRIEF.md 2026-08-18 (5) §C / 2026-08-23)
+    // — the sufficient-statistic argument above only ruled out pooling
+    // count/sum/sumSq into a median, not pooling raw values. Percentile is not
+    // implemented: it needs a parameter (which percentile) this schema does
+    // not carry yet, a smaller but separate piece of work.
     throw new RangeError(
       `agg_func "${lens.agg_func}" is not implemented — only "mean" (the default) ` +
-        `is poolable from this module's sufficient statistics`,
+        `and "median" are supported`,
+    );
+  }
+  if (lens.agg_func === "median" && lens.decay !== undefined) {
+    // Weighted median is a well-defined thing but a DIFFERENT algorithm from
+    // the plain sorted-values median this module implements, and it has not
+    // been built. A decay lens always produces weighted events (`exp`) or
+    // could in principle (`step` does not, but the field can't tell them
+    // apart without parsing), so refuse the combination outright rather than
+    // silently computing an unweighted median over data the lens asked to be
+    // weighted — the same "parse but throw on an incompatible combination"
+    // judgment as agg_func itself.
+    //
+    // This is the STATIC half of the guard: it catches a decay declared on
+    // THIS lens. It cannot see the other weight producer — reference-zone
+    // thinning (ROADMAP L5), which lives on the retained events, not the
+    // lens — so aggregate() in this file carries a second, dynamic check for
+    // that case (see its flush()).
+    throw new RangeError(
+      `agg_func "median" cannot be combined with "decay" — weighted median is not implemented`,
     );
   }
 }
@@ -539,9 +599,10 @@ export function applyLens(events: readonly LensEvent[], lens: QObserveParams = {
   if (kept.length === 0) return { window_ms: outputWindowMs, windows: [] };
 
   const origin = resolveAlign(lens) === "epoch" ? (lens.origin ?? 0) : kept[0].ts;
+  const aggFunc = lens.agg_func === "median" ? "median" : undefined;
 
   const windows = downsample(
-    aggregate(kept, window_ms, origin, weightOf),
+    aggregate(kept, window_ms, origin, weightOf, aggFunc),
     window_ms,
     downsampleFactor,
     origin,
@@ -567,7 +628,7 @@ export function applyLens(events: readonly LensEvent[], lens: QObserveParams = {
       key: b.key,
       label,
       windows: downsample(
-        aggregate(b.events, window_ms, origin, weightOf),
+        aggregate(b.events, window_ms, origin, weightOf, aggFunc),
         window_ms,
         downsampleFactor,
         origin,
@@ -595,6 +656,16 @@ function downsample(
   origin: number,
 ): WindowStat[] {
   if (factor <= 1 || windows.length === 0) return [...windows];
+
+  // A median window is unweighted by construction (aggregate()'s flush()
+  // throws before one is ever produced under a weighting lens), so this
+  // branch never needs the sufficient-statistic weighted-mean math below —
+  // it merges by concatenating raw values instead, which is EXACT for
+  // median (unlike sufficient-stat pooling, nothing was ever summarized
+  // away to approximate). A single applyLens() call produces windows under
+  // one agg_func, so checking the first window is enough to know the mode
+  // for the whole array.
+  if (windows[0].aggFunc === "median") return downsampleMedian(windows, window_ms, factor, origin);
 
   const bucketMs = window_ms * factor;
   interface Bucket {
@@ -647,6 +718,61 @@ function downsample(
     }));
 }
 
+/** Middle value of a sorted-in-place copy; average of the two middles when even. */
+function median(values: readonly number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+/** downsample()'s median-mode branch — see its call site for why this is exact. */
+function downsampleMedian(
+  windows: readonly WindowStat[],
+  window_ms: number,
+  factor: number,
+  origin: number,
+): WindowStat[] {
+  const bucketMs = window_ms * factor;
+  interface MedianBucket {
+    count: number;
+    values: number[];
+    min: number;
+    max: number;
+  }
+  const buckets = new Map<number, MedianBucket>();
+  for (const w of windows) {
+    const bucketStart = floorToWindow(w.windowStart, bucketMs, origin);
+    let b = buckets.get(bucketStart);
+    if (b === undefined) {
+      b = { count: 0, values: [], min: Infinity, max: -Infinity };
+      buckets.set(bucketStart, b);
+    }
+    b.count += w.count;
+    b.values.push(...(w.values ?? []));
+    if (w.range !== undefined) {
+      b.min = Math.min(b.min, w.range.min);
+      b.max = Math.max(b.max, w.range.max);
+    }
+  }
+
+  return [...buckets.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([bucketStart, b]) => {
+      const sumSq = b.values.reduce((s, v) => s + v * v, 0);
+      return {
+        windowStart: bucketStart,
+        windowEnd: bucketStart + bucketMs,
+        count: b.count,
+        mean: median(b.values),
+        sumSq,
+        valid: b.count >= MIN_VALID_COUNT,
+        aggFunc: "median" as const,
+        values: b.values,
+        ...(Number.isFinite(b.min) ? { range: { min: b.min, max: b.max } } : {}),
+      };
+    });
+}
+
 /**
  * Window one already-ts-sorted event list onto the grid anchored at `origin`.
  * Shared by the ungrouped pass and every group so all of them land on one grid.
@@ -671,6 +797,7 @@ function aggregate(
   window_ms: number,
   origin: number,
   weightOf: ((ts: number) => number) | null,
+  aggFunc?: "median",
 ): WindowStat[] {
   const windows: WindowStat[] = [];
   let curIdx = -1;
@@ -682,6 +809,10 @@ function aggregate(
   let weighted = false;
   let min = Infinity;
   let max = -Infinity;
+  // Only collected under agg_func:"median" — an unweighted, non-median lens
+  // never allocates this, which is why every existing caller's output stays
+  // byte-identical.
+  let values: number[] = [];
 
   const flush = (): void => {
     // A window whose weights all underflowed to zero has no weighted mean to
@@ -693,23 +824,40 @@ function aggregate(
       weighted = false;
       min = Infinity;
       max = -Infinity;
+      values = [];
       return;
+    }
+    if (aggFunc === "median" && weighted) {
+      // The DYNAMIC half of the guard validateObserveParams' static check
+      // (agg_func:"median" + decay) cannot reach: an event can arrive here
+      // pre-weighted by reference-zone thinning (LensEvent.weight, ROADMAP
+      // L5) even though THIS lens declares no decay — thinning is a property
+      // of which events the retention buffer handed over, not of the lens.
+      // Computing an unweighted median over data the lens's own weighting
+      // asked to be weighted would silently misreport, which is exactly what
+      // this project's "parse but throw" precedent exists to prevent.
+      throw new RangeError(
+        `agg_func "median" cannot be computed over weighted events (a thinned ` +
+          `reference-zone event, or a decayed one) — weighted median is not implemented`,
+      );
     }
     const windowStart = origin + curIdx * window_ms;
     windows.push({
       windowStart,
       windowEnd: windowStart + window_ms,
       count,
-      mean: sum / sumW,
+      mean: aggFunc === "median" ? median(values) : sum / sumW,
       sumSq,
       valid: count >= MIN_VALID_COUNT,
       ...(weighted ? { weights: { sumW, sumW2 } } : {}),
       range: { min, max },
+      ...(aggFunc === "median" ? { aggFunc: "median" as const, values } : {}),
     });
     sum = sumSq = sumW = sumW2 = count = 0;
     weighted = false;
     min = Infinity;
     max = -Infinity;
+    values = [];
   };
 
   for (const ev of sorted) {
@@ -727,6 +875,7 @@ function aggregate(
     sumW += w;
     sumW2 += w * w;
     count++;
+    if (aggFunc === "median") values.push(ev.value);
     // The range bounds the RAW values, not the weighted ones: a weighted mean
     // is still a convex combination of the values, so min/max bound it exactly
     // as they do unweighted (collectUnreachableTails depends on that).

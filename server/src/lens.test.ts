@@ -283,27 +283,110 @@ describe("applyLens — agg_func (ROADMAP L4 residual chain stage, throw-before-
     assert.equal(explicit.windows[0].mean, 2);
   });
 
-  it("rejects any agg_func other than mean, rather than silently ignoring it", () => {
-    assert.throws(
-      () => applyLens([ev(0, 1)], { window_ms: 1000, agg_func: "median" }),
-      /agg_func/,
-    );
+  it("rejects any agg_func other than mean/median, rather than silently ignoring it", () => {
     assert.throws(
       () => applyLens([ev(0, 1)], { window_ms: 1000, agg_func: "p95" }),
       /agg_func/,
     );
+    assert.throws(
+      () => applyLens([ev(0, 1)], { window_ms: 1000, agg_func: "nonsense" }),
+      /agg_func/,
+    );
   });
 
-  it("rejects agg_func: median even combined with downsample_factor, closing the pooling mismatch at the source", () => {
+  it("rejects agg_func: median combined with decay — weighted median is not implemented", () => {
     assert.throws(
       () =>
         applyLens([ev(0, 1), ev(1000, 3)], {
           window_ms: 1000,
-          downsample_factor: 2,
           agg_func: "median",
+          decay: "step(cutoff=now-60s)",
+          decay_anchor: "now",
         }),
-      /agg_func/,
+      /median.*decay|decay.*median/,
     );
+  });
+});
+
+// ── agg_func: "median" (ROADMAP_BRIEF.md 2026-08-18 (5) §C / 2026-08-23) ────
+
+describe("applyLens — agg_func: median (§C body, raw-value retention)", () => {
+  it("computes the median, not the mean, and tags the window", () => {
+    // Deliberately skewed so mean and median disagree: values 1,2,3,4,100.
+    const r = applyLens(
+      [ev(0, 1), ev(0, 2), ev(0, 3), ev(0, 4), ev(0, 100)],
+      { window_ms: 1000, agg_func: "median" },
+    );
+    assert.equal(r.windows.length, 1);
+    const w = r.windows[0];
+    assert.equal(w.mean, 3, "the field holds the MEDIAN under agg_func:median");
+    assert.equal(w.aggFunc, "median");
+    assert.deepEqual(w.values, [1, 2, 3, 4, 100]);
+    assert.equal(w.count, 5);
+  });
+
+  it("averages the two middle values for an even count", () => {
+    const r = applyLens([ev(0, 1), ev(0, 2), ev(0, 3), ev(0, 4)], {
+      window_ms: 1000,
+      agg_func: "median",
+    });
+    assert.equal(r.windows[0].mean, 2.5);
+  });
+
+  it("an implicit/explicit mean lens never carries aggFunc or values (byte-identical to before this feature)", () => {
+    const events = [ev(0, 1), ev(100, 3)];
+    const implicit = applyLens(events, { window_ms: 1000 });
+    const explicit = applyLens(events, { window_ms: 1000, agg_func: "mean" });
+    assert.equal(implicit.windows[0].aggFunc, undefined);
+    assert.equal(implicit.windows[0].values, undefined);
+    assert.deepEqual(implicit, explicit);
+  });
+
+  it("downsample_factor pools medians EXACTLY via concatenated raw values, not approximately", () => {
+    // Window A: [1, 2, 3] (median 2). Window B: [10, 20, 30, 40] (median 25).
+    // Pooled median of all seven values is NOT derivable from the two
+    // per-window medians (2, 25) — this only works because raw values survive.
+    const events = [
+      ev(0, 1), ev(0, 2), ev(0, 3),
+      ev(1000, 10), ev(1000, 20), ev(1000, 30), ev(1000, 40),
+    ];
+    const r = applyLens(events, { window_ms: 1000, downsample_factor: 2, align: "epoch", agg_func: "median" });
+    assert.equal(r.windows.length, 1);
+    const pooled = [1, 2, 3, 10, 20, 30, 40].sort((a, b) => a - b);
+    const expectedMedian = pooled[3]; // 7 values, middle index 3 → 10
+    assert.equal(r.windows[0].mean, expectedMedian);
+    assert.equal(r.windows[0].count, 7);
+    assert.deepEqual([...r.windows[0].values!].sort((a, b) => a - b), pooled);
+  });
+
+  it("group_by carries median through per-group aggregation independently", () => {
+    const events = [
+      kev(0, 1, { agentId: "A" }), kev(0, 5, { agentId: "A" }), kev(0, 9, { agentId: "A" }),
+      kev(0, 100, { agentId: "B" }), kev(0, 200, { agentId: "B" }), kev(0, 300, { agentId: "B" }),
+    ];
+    const r = applyLens(events, { window_ms: 1000, group_by: ["agentId"], agg_func: "median" });
+    const a = r.groups!.find((g) => g.label === "A")!;
+    const b = r.groups!.find((g) => g.label === "B")!;
+    assert.equal(a.windows[0].mean, 5);
+    assert.equal(b.windows[0].mean, 200);
+  });
+
+  it("throws at aggregate time when a reference-zone-thinned event (weight!==1) reaches a median window, even though the LENS itself declares no decay", () => {
+    // The static validateObserveParams check only sees the lens, not the
+    // events — this is the dynamic half of the guard, covering thinning
+    // (ROADMAP L5), which lives on LensEvent.weight, not on the lens.
+    const thinned = { ts: 0, value: 1, weight: 5 };
+    assert.throws(
+      () => applyLens([thinned, ev(0, 2)], { window_ms: 1000, agg_func: "median" }),
+      /median.*weight|weight.*median/,
+    );
+  });
+
+  it("a window with too few events to be 'valid' still reports a real median, just valid:false", () => {
+    const r = applyLens([ev(0, 7)], { window_ms: 1000, agg_func: "median" });
+    assert.equal(r.windows[0].count, 1);
+    assert.equal(r.windows[0].valid, false);
+    assert.equal(r.windows[0].mean, 7);
   });
 });
 

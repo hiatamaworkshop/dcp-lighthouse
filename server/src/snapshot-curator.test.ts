@@ -1181,3 +1181,55 @@ describe("SnapshotCurator — group_by: a single group falling silent is a gap",
     assert.equal(flatPkg.tiles.filter((t) => t.shapeTag === "gap").length, 0);
   });
 });
+
+// ── agg_func: median — curator refuses to score it (ROADMAP_BRIEF.md 2026-08-18 (5) §C / 2026-08-23) ──
+
+describe("SnapshotCurator — agg_func: median is unscorable, not silently scored", () => {
+  const medEvents = (n: number, fromTs: number): LensEvent[] =>
+    Array.from({ length: n }, (_, i) => ({ ts: fromTs + i * 10, value: i % 5 }));
+
+  it("sets aggFuncUnscored and never produces a tile, even for an obviously anomalous median observation", () => {
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+    const observation = applyLens(medEvents(50, 0), { window_ms: 1000, agg_func: "median" });
+    const reference = applyLens(medEvents(50, 0), { window_ms: 1000, agg_func: "median" });
+    const pkg = curator.curate(observation, reference);
+
+    assert.equal(pkg.aggFuncUnscored, true);
+    assert.deepEqual(pkg.tiles, []);
+    assert.equal(pkg.referenceUsable, false, "median means no z-test model, not merely no yardstick");
+  });
+
+  it("also refuses when only the REFERENCE lens is median (a mean observation scored against it would be meaningless)", () => {
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+    const observation = applyLens(medEvents(50, 0), { window_ms: 1000 }); // plain mean
+    const reference = applyLens(medEvents(50, 0), { window_ms: 1000, agg_func: "median" });
+    const pkg = curator.curate(observation, reference);
+
+    assert.equal(pkg.aggFuncUnscored, true);
+    assert.deepEqual(pkg.tiles, []);
+  });
+
+  it("a plain mean lens is entirely unaffected: no aggFuncUnscored field at all", () => {
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+    const observation = applyLens(medEvents(50, 0), { window_ms: 1000 });
+    const pkg = curator.curate(observation);
+    assert.equal(pkg.aggFuncUnscored, undefined);
+  });
+
+  it("group_by: a median lens is refused even though groups carry their own real medians in `mean`", () => {
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+    const events: LensEvent[] = [
+      { ts: 0, value: 1, keys: { agentId: "A" } },
+      { ts: 10, value: 5, keys: { agentId: "A" } },
+      { ts: 20, value: 9, keys: { agentId: "A" } },
+    ];
+    const observation = applyLens(events, { window_ms: 1000, group_by: ["agentId"], agg_func: "median" });
+    // The raw LensResult still carries the real median — the curator declines to JUDGE it, not to compute it.
+    assert.equal(observation.groups![0].windows[0].mean, 5);
+
+    const pkg = curator.curate(observation);
+    assert.equal(pkg.aggFuncUnscored, true);
+    assert.deepEqual(pkg.tiles, []);
+    assert.equal(pkg.unscoredGroups, undefined, "the whole-package flag replaces the group-level one here, not alongside it");
+  });
+});

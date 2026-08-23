@@ -141,7 +141,10 @@ describe("parseBrainAnswer — content is not", () => {
       `{"decay": "exp(tau=0s)"}`,
       `{"decay": "wobble(3)"}`,
       `{"group_by": "agentId"}`,
-      `{"agg_func": "median"}`,
+      `{"agg_func": "p95"}`,
+      // median is implemented on its own (2026-08-23), but weighted median is
+      // not — combined with decay it must still be refused.
+      `{"agg_func": "median", "decay": "step(cutoff=now-60s)"}`,
     ];
     for (const lens of bad) {
       const out = parseBrainAnswer(
