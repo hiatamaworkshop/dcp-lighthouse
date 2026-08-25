@@ -57,17 +57,27 @@ function renderSnapshot(data) {
 let lastActiveScenario;
 
 function renderActiveScenario(activeScenario) {
+  // Retracting the Stop banner is NOT part of the "did the scenario change?"
+  // diff: pressing Stop while nothing is running leaves activeScenario at null
+  // on both sides of the comparison, so a banner hidden only after the early
+  // return below would stay up until a page reload. It answers "is a scenario
+  // still running", which every tick can restate cheaply.
+  if (!activeScenario) stopReminder.hidden = true;
+  // Restated every tick for the same reason, plus one of its own: the SSE
+  // open handler resets this text to a bare "live" on every reconnect, so a
+  // label written only on CHANGE would lose the running scenario's name for
+  // the rest of that scenario. Only the TEXT is ours — the `running` class is
+  // the connection indicator, owned by the open/error handlers above.
+  badge.textContent = activeScenario ? `live · ${activeScenario} running` : "live";
+
+  // The button repaint below is a real diff: it walks the DOM, and nothing
+  // else writes `active`, so restating it every tick would be pure cost.
   if (activeScenario === lastActiveScenario) return;
   lastActiveScenario = activeScenario;
 
   for (const btn of document.querySelectorAll("button[data-scenario]")) {
     btn.classList.toggle("active", btn.dataset.scenario === activeScenario);
   }
-
-  badge.textContent = activeScenario ? `live · ${activeScenario} running` : "live";
-  badge.classList.toggle("running", true);
-
-  if (!activeScenario) stopReminder.hidden = true;
 }
 
 // ── Agent bars ──────────────────────────────────────────────────────────────

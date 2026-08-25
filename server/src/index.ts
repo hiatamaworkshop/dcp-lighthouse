@@ -18,6 +18,8 @@ import { TestorAdapter, testEventExtractor } from "./testor-adapter.js";
 import { RetentionBuffer } from "./retention-buffer.js";
 import { bindPipelineRetention } from "./q-retention-binding.js";
 import { ObservationOverlay } from "./lens-view.js";
+import { validateObserveParams } from "./lens.js";
+import type { QObserveParams } from "./q-registry.js";
 import { SnapshotCurator } from "./snapshot-curator.js";
 import { RuleBrain } from "./rule-brain.js";
 import { ClaudeBrain } from "./claude-brain.js";
@@ -120,6 +122,36 @@ const CLAUDE_BRAIN_MODEL = process.env.CLAUDE_BRAIN_MODEL ?? "claude-sonnet-5";
 /** Floor between deliberations. 15s at TICK_MS=1000 is one call per 15 ticks. */
 const CLAUDE_BRAIN_INTERVAL_MS = Number(process.env.CLAUDE_BRAIN_INTERVAL_MS ?? 15_000);
 
+/**
+ * lens.ts's static rulebook plus the one refusal only this file can make.
+ *
+ * `agg_func:"median"` is a legal DECLARATION (unweighted median is
+ * implemented, ROADMAP §C) that throws at aggregation time the moment the
+ * events it aggregates carry a weight — and in this process they do, because
+ * REFERENCE_THINNING_RATIO above opts the buffer's reference zone in, so any
+ * replay reaching past RETENTION_WINDOW_MS is handed thinned events. lens.ts
+ * cannot see that: thinning is a property of which events the buffer hands
+ * over, not of the lens, which is exactly why it carries a dynamic guard as
+ * well as a static one.
+ *
+ * Making the refusal HERE keeps ROADMAP L3's invariant that the decision log
+ * lists only actions the pipeline could really have taken — the gate is the
+ * 関所, and index.ts's catch blocks are the last resort behind it, not the
+ * screen in front. Refused outright rather than per-interval: a proposal
+ * confined to the freshness zone would in fact run, but "would this particular
+ * span reach the reference zone" is not knowable when the lens is judged, and
+ * a gate that sometimes passes an unrunnable lens is not a gate.
+ */
+function refuseUnrunnableLens(lens: QObserveParams): void {
+  validateObserveParams(lens);
+  if (lens.agg_func === "median" && buffer.getThinningRatio() !== undefined) {
+    throw new RangeError(
+      `agg_func "median" is unavailable in this process: its retention buffer thins the ` +
+        `reference zone (ratio ${buffer.getThinningRatio()}), and weighted median is not implemented`,
+    );
+  }
+}
+
 let shadowBrain: ShadowBrain | undefined;
 /**
  * Hoisted out of the BRAIN_MODE=claude block below so the §A gate in the tick
@@ -152,6 +184,7 @@ if (BRAIN_MODE === "claude") {
   });
   claudeBrain = new ClaudeBrain({
     askFn,
+    lensGate: refuseUnrunnableLens,
     minIntervalMs: CLAUDE_BRAIN_INTERVAL_MS,
     onError: (err) => console.warn(`[shadow] deliberation failed: ${err.message}`),
   });
@@ -281,10 +314,29 @@ setInterval(() => {
         // copy (ROADMAP L5, 2026-08-22). No proposal has ever omitted
         // fromTs/toTs in practice, but a malformed one could, so that case
         // keeps its own fallback rather than handing NaN to the shared helper.
-        const pkg =
-          fromTs !== undefined && toTs !== undefined
-            ? replaySpanWithReference(buffer, curator, lens, fromTs, toTs)
-            : curator.curate(buffer.replay(lens, fromTs, toTs), buffer.replay(lens, fromTs, toTs));
+        //
+        // APPLYING the lens is inside the guard too, not just writing it
+        // (2026-08-25 review). registry.set runs lens.ts's STATIC rulebook,
+        // which by construction cannot see every reason a lens will fail:
+        // agg_func:"median" over reference-zone-thinned events is legal to
+        // declare and throws at aggregation time, because the weighting comes
+        // from which events the buffer handed over, not from the lens. A throw
+        // here still reaches uncaughtException from inside setInterval and
+        // still takes the server down — the exact outcome the narrower guard
+        // was written to prevent, one call further along.
+        let pkg;
+        try {
+          pkg =
+            fromTs !== undefined && toTs !== undefined
+              ? replaySpanWithReference(buffer, curator, lens, fromTs, toTs)
+              : curator.curate(buffer.replay(lens, fromTs, toTs), buffer.replay(lens, fromTs, toTs));
+        } catch (err) {
+          console.warn(
+            `[brain] replay FAILED for ${JSON.stringify(lens)} over [${fromTs}, ${toTs}]: ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+          continue;
+        }
         if (!pkg.referenceUsable) {
           // Blindness, not quiet: the preceding interval fell outside retention
           // (or was empty), so no comparison was possible. Without this line an
@@ -326,7 +378,22 @@ setInterval(() => {
         typeof snapshotTs === "number"
       ) {
         const coarseLens = registry.getObserve("test_result:v1", "coarse") ?? {};
-        const backed = isReroutedAgentBacked(buffer, curator, coarseLens, agentId, snapshotTs);
+        // Same reasoning as the replay guard above: this re-aggregates the
+        // buffer through whatever lens $Q[observe]#coarse currently holds, so
+        // a lens that only fails at aggregation time would take the tick down.
+        // A gate that cannot run is not a gate that says "backed" — an
+        // unevaluable claim is left un-gated and logged as such, rather than
+        // being scored either way on no evidence.
+        let backed: boolean;
+        try {
+          backed = isReroutedAgentBacked(buffer, curator, coarseLens, agentId, snapshotTs);
+        } catch (err) {
+          console.warn(
+            `[shadow] (not applied, gate UNAVAILABLE) ${d.type}${q}: gate threw — ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          );
+          continue;
+        }
         if (!backed) {
           claudeBrainRef?.recordGateRejection();
           console.log(`[shadow] (not applied, GATE REJECTED — unbacked) ${d.type}${q}: ${d.reason}`);

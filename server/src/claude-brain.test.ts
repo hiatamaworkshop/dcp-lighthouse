@@ -10,6 +10,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { ClaudeBrain, parseBrainAnswer, renderBrainPrompt } from "./claude-brain.js";
+import { validateObserveParams } from "./lens.js";
 import type { STSnapshot } from "./testor-adapter.js";
 
 const SCOPE = "observe:test_result:v1#fine";
@@ -154,6 +155,47 @@ describe("parseBrainAnswer — content is not", () => {
       assert.equal(out.decisions.length, 0, `should have rejected lens ${lens}`);
       assert.equal(out.rejected, 1);
     }
+  });
+
+  test("an injected lensGate can refuse what the static rulebook allows", () => {
+    // The 2026-08-25 review's finding: agg_func:"median" is a legal
+    // DECLARATION that throws at aggregation time over weighted events, and
+    // whether this process produces weighted events (reference-zone thinning)
+    // is runtime wiring the static rulebook cannot see. The owner of that
+    // wiring composes the extra refusal; the gate stays on the Brain side so
+    // the decision log keeps listing only runnable actions.
+    const answer = `{"decisions":[{"type":"replayRequest","reason":"look closer","lens":{"window_ms":1000,"agg_func":"median"}}]}`;
+
+    // Default gate (validateObserveParams alone): median is fine.
+    const permissive = parseBrainAnswer(answer, SCOPE);
+    assert.equal(permissive.decisions.length, 1);
+    assert.equal(permissive.rejected, 0);
+
+    // Composed gate: same answer, no decision, counted as a rejection rather
+    // than lost — an unrunnable proposal is a finding about the model.
+    const strict = parseBrainAnswer(answer, SCOPE, (lens) => {
+      validateObserveParams(lens);
+      if (lens.agg_func === "median") throw new RangeError("this process thins its reference zone");
+    });
+    assert.equal(strict.decisions.length, 0);
+    assert.equal(strict.rejected, 1);
+  });
+
+  test("an injected lensGate still lets the other decisions through", () => {
+    const out = parseBrainAnswer(
+      `{"decisions":[
+         {"type":"replayRequest","reason":"unrunnable here","lens":{"window_ms":1000,"agg_func":"median"}},
+         {"type":"rerouteSchema","reason":"agent-C dropped to 0.70","agentId":"agent-C"}
+       ]}`,
+      SCOPE,
+      (lens) => {
+        validateObserveParams(lens);
+        if (lens.agg_func === "median") throw new RangeError("this process thins its reference zone");
+      },
+    );
+    assert.equal(out.decisions.length, 1);
+    assert.equal(out.decisions[0].type, "rerouteSchema");
+    assert.equal(out.rejected, 1);
   });
 
   test("a rejected proposal does not cost the other decisions in the same answer", () => {

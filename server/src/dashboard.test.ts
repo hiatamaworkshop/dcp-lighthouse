@@ -598,3 +598,21 @@ test("isReroutedAgentBacked: blind (no comparison possible) never reads as backe
   const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
   assert.equal(isReroutedAgentBacked(buf, curator, COARSE_LENS, "agent-C", GATE_NOW), false);
 });
+
+test("isReroutedAgentBacked: an unscorable statistic never reads as backed (2026-08-25 review)", () => {
+  // A coarse lens carrying agg_func:"median" makes the curator refuse to score
+  // the package at all (aggFuncUnscored). That must deny the claim like
+  // blindness does — and for a reason the caller can tell apart, since a run
+  // configured this way would mark EVERY assertion unbacked regardless of what
+  // the model said. This fixture is unweighted, so the median lens itself is
+  // legal here; what it produces is a package with no judgment in it.
+  const buf = new RetentionBuffer<AgentEvent>(agentExtractor, { retentionWindowMs: 120_000 });
+  seedGateFixture(buf);
+  const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+  const medianLens = { ...COARSE_LENS, agg_func: "median" as const };
+  assert.equal(isReroutedAgentBacked(buf, curator, medianLens, "agent-C", GATE_NOW), false);
+  // Same fixture, same agent, mean lens: backed. The difference is the lens,
+  // not the data — which is exactly what makes the false above a misattribution
+  // if it were reported as "the model's aim was off".
+  assert.equal(isReroutedAgentBacked(buf, curator, COARSE_LENS, "agent-C", GATE_NOW), true);
+});

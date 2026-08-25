@@ -263,6 +263,17 @@ export function isReroutedAgentBacked(
   // Blind (no comparison possible) must not read as "backed" — that would
   // let a claim through on the strength of a yardstick that was never there,
   // the same silence-vs-blindness confusion SnapshotPackage exists to avoid.
+  //
+  // An unscorable package (aggFuncUnscored — the coarse lens declares a
+  // statistic this curator has no model for) is a third state and lands the
+  // same way, for a different reason: not "the data says no" but "no judgment
+  // was available at all". Both deny the claim, because this gate only ever
+  // grants one on positive curator evidence — but a caller counting
+  // gateRejected should know the difference exists, since a run configured
+  // this way would score every assertion as unbacked no matter what the
+  // model said. Checked FIRST: referenceUsable is left false on such a
+  // package without the reference ever having been consulted.
+  if (pkg.aggFuncUnscored === true) return false;
   if (!pkg.referenceUsable) return false;
   return pkg.tiles.some((t) => t.group === agentId && t.shapeTag !== "baseline");
 }
@@ -275,6 +286,8 @@ export class DashboardServer {
   private readonly dashboardDir = resolve(import.meta.dirname, "../../dashboard");
   /** Edge-trigger state for reportReferenceBlindness(). */
   private referenceBlind = false;
+  /** Edge-trigger state for reportReferenceBlindness()'s aggFuncUnscored branch. */
+  private aggFuncUnscored = false;
   /** Edge-trigger state for checkRetentionBudget(): "<window_ms>/<retention_ms>". */
   private budgetCheckedFor = "";
   /** Edge-trigger state for checkGridAlignment(); starts true so only a lapse speaks. */
@@ -394,7 +407,7 @@ export class DashboardServer {
       const observed = this.buffer.replay(lens, observation.fromTs, observation.toTs);
       const referenced = this.buffer.replay(lens, reference.fromTs, reference.toTs);
       snapshotPkg = this.curator.curate(observed, referenced);
-      this.reportReferenceBlindness(snapshotPkg.referenceUsable, windowMs, reference);
+      this.reportReferenceBlindness(snapshotPkg, windowMs, reference);
     }
 
     const payload = {
@@ -428,9 +441,37 @@ export class DashboardServer {
    * shipped 120s / 3 — puts the reference outside what the buffer still
    * holds. Edge-triggered so a sustained blind period is one line, not one
    * line per tick.
+   *
+   * `aggFuncUnscored` is a THIRD reading of an empty tile list and gets its
+   * own branch, read before `referenceUsable` (2026-08-25 review). The curator
+   * leaves referenceUsable false on a median package because it returns before
+   * ever looking at the reference — so without this branch, a coarse lens
+   * carrying agg_func:"median" reports a missing yardstick when the yardstick
+   * is fine and the STATISTIC is the thing that cannot be scored. Same
+   * silence-vs-blindness discipline, one more state to keep apart.
    */
-  private reportReferenceBlindness(usable: boolean, windowMs: number, reference: SpanRequest): void {
-    if (usable) {
+  private reportReferenceBlindness(
+    pkg: SnapshotPackage,
+    windowMs: number,
+    reference: SpanRequest,
+  ): void {
+    if (pkg.aggFuncUnscored === true) {
+      // Not blindness: hold referenceBlind where it is rather than clearing it
+      // (this package never asked the reference question) so the latch still
+      // reflects the last package that actually did.
+      if (this.aggFuncUnscored) return;
+      this.aggFuncUnscored = true;
+      console.warn(
+        `[dashboard] live coarse view is UNSCORABLE — its lens declares an agg_func ` +
+          `the curator has no statistical model for (window_ms=${windowMs}). Empty tiles ` +
+          `now mean "not judged", not quiet and not blind; the raw per-window values are ` +
+          `still in the snapshot.`,
+      );
+      return;
+    }
+    this.aggFuncUnscored = false;
+
+    if (pkg.referenceUsable) {
       this.referenceBlind = false;
       return;
     }

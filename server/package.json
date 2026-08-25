@@ -6,7 +6,7 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc && node dist/index.js",
-    "test": "tsc && node --test dist/"
+    "test": "tsc && node --test \"dist/*.test.js\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",

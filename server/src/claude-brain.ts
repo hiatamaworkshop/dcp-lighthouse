@@ -88,6 +88,21 @@ export interface ClaudeBrainOptions {
   observationTicks?: number;
   /** $Q scope a replayRequest is proposed against. */
   replayScope?: string;
+  /**
+   * The rulebook a proposed lens must pass to become a BrainDecision at all
+   * (the "関所 on the Brain side" principle, ROADMAP L3). Defaults to
+   * lens.ts's `validateObserveParams`.
+   *
+   * Injectable because that default is STATIC and some reasons a lens cannot
+   * run are not (2026-08-25 review): agg_func:"median" is a legal declaration
+   * that throws at aggregation time if the retention buffer hands over
+   * reference-zone-thinned — i.e. weighted — events, and whether it does is
+   * runtime wiring this class has no business knowing. The owner of that
+   * wiring (index.ts) composes the extra refusal and passes it here, so the
+   * decision log keeps its invariant: everything in it is something the
+   * pipeline could actually have done.
+   */
+  lensGate?: (lens: QObserveParams) => void;
   clockFn?: () => number;
   /**
    * Called when a deliberation throws. Failures must be loud: a Brain that
@@ -291,7 +306,11 @@ function asLens(raw: unknown): QObserveParams | null {
  * have, or carrying a lens lens.ts would refuse, is not a decision; letting it
  * through would put an unexecutable proposal in the log next to real ones.
  */
-export function parseBrainAnswer(text: string, replayScope: string): ParseOutcome {
+export function parseBrainAnswer(
+  text: string,
+  replayScope: string,
+  lensGate: (lens: QObserveParams) => void = validateObserveParams,
+): ParseOutcome {
   const start = text.indexOf("{");
   const end = text.lastIndexOf("}");
   if (start < 0 || end <= start) return { decisions: [], rejected: 0, unparseable: true };
@@ -341,7 +360,7 @@ export function parseBrainAnswer(text: string, replayScope: string): ParseOutcom
       const lens = asLens(rec.lens);
       if (lens === null) { rejected++; continue; }
       try {
-        validateObserveParams(lens);
+        lensGate(lens);
       } catch {
         // The rulebook refused this lens. Counting it and moving on keeps a
         // bad proposal from costing the other decisions in the same answer.
@@ -372,6 +391,8 @@ export class ClaudeBrain implements BrainAdapter {
   private readonly historySize: number;
   private readonly observationTicks: number;
   private readonly replayScope: string;
+  /** See ClaudeBrainOptions.lensGate. */
+  private readonly lensGate: (lens: QObserveParams) => void;
   private readonly clockFn: () => number;
   private readonly onError?: (err: Error) => void;
 
@@ -413,6 +434,7 @@ export class ClaudeBrain implements BrainAdapter {
     this.historySize = opts.historySize ?? DEFAULT_HISTORY_SIZE;
     this.observationTicks = opts.observationTicks ?? DEFAULT_OBSERVATION_TICKS;
     this.replayScope = opts.replayScope ?? DEFAULT_REPLAY_SCOPE;
+    this.lensGate = opts.lensGate ?? validateObserveParams;
     this.clockFn = opts.clockFn ?? Date.now;
     this.onError = opts.onError;
   }
@@ -529,7 +551,7 @@ export class ClaudeBrain implements BrainAdapter {
         this.stats.discarded++;
         return;
       }
-      const { decisions, rejected, unparseable } = parseBrainAnswer(answer, this.replayScope);
+      const { decisions, rejected, unparseable } = parseBrainAnswer(answer, this.replayScope, this.lensGate);
 
       this.stats.deliberations++;
       this.stats.rejectedProposals += rejected;
