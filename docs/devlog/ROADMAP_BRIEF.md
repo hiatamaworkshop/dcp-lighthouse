@@ -4011,3 +4011,124 @@ L5でも踏襲したのと同じ分割)。
 (累積重みが総重みの半分を超える点、が標準的) を採用することになるが、
 現時点でそれを要求する具体的なユースケースは無い。ダッシュボード/Brainへの
 実配線も未着手 (上記のとおり意図的)。
+
+---
+
+## 2026-08-25 — 直近実装 (L4/L5/§A/§C) のレビューと欠陥4件の修正
+
+median本体・参照ゾーンの`$Q`動的設定・§Aゲート・ダッシュボードのシナリオ可視化と
+密度の高い実装が続いたので、直近4コミット (`5339c3a` → `61cc0ac` → `ac60a02` →
+`585d94a`) をまとめてレビューした。テストは390件全green・`tsc`も通過していたが、
+**テストが緑であることと配線が正しいことは別**という、このプロジェクトが
+2026-07に一度踏んでいる構図の欠陥が4件出た。修正後393件。
+
+### 欠陥1 (最重要) — medianの書込ゲートと実行時ガードが食い違う
+
+**症状**: §Cの2段ガード (静的=`validateObserveParams`、動的=`aggregate()`のflush())
+は個々には正しいが、**その2つの間に本番配線が挟まると穴になる**。
+
+- `validateObserveParams`が素の`agg_func:"median"`を**通す**ようになった (§Cの正しい変更)
+- ClaudeBrainの`replayRequest`ゲートは`validateObserveParams`の再利用なので、
+  `{"agg_func":"median"}`単体が決定ログに載るようになった
+- しかし本番は`REFERENCE_THINNING_RATIO = 2`で参照ゾーンを有効化済み = 鮮度ゾーン
+  (120s) より古いイベントは**必ず`weight`付き**。そこに届くreplayは動的ガードで`throw`する
+- `index.ts`の`try/catch`は**`registry.set`だけ**を包んでいた。その先の
+  `replaySpanWithReference()`は素通りで、しかもそこは`setInterval`の中 =
+  `uncaughtException`で**サーバごと落ちる**
+
+つまり **`registry.set`のcatchが「Brainが不正レンズを提案してもプロセス全体を
+巻き添えにしない」と明言して防いだはずの経路が、1コール先で再び開いていた**。
+§Aの`isReroutedAgentBacked()`も同じ形で無防備だった。
+
+**修正 (a)(b) 両方**:
+- **(a) 関所側** — `ClaudeBrainOptions.lensGate`を新設 (既定は`validateObserveParams`
+  のまま、既存の挙動は不変)。`index.ts`の`refuseUnrunnableLens()`が
+  「このプロセスのbufferが疎化opt-in済みなら`median`を拒否」を合成して渡す。
+  **ランタイム配線を知っているのは`index.ts`だけ**なので、判定もそこに置く —
+  `lens.ts`の静的ルールブックに疎化の知識を持ち込むと、レンズの性質と
+  イベントの性質を混ぜることになる (§Cが2段ガードに分けた理由そのもの)。
+  L3の不変条件「決定ログには実際に取れる行動だけが並ぶ」を維持するための修正であって、
+  クラッシュ対策は(b)の役目
+- **(b) 最後の砦側** — `try`を「レンズの**適用**」まで拡張。§Aゲート呼び出しも包み、
+  ゲートが実行できなかった場合は`backed=false`ではなく**un-gatedとして別ログ**に
+  した。「評価できなかった主張」を「モデルの狙いが外れた」(`gateRejected`) に
+  混ぜると、§12で一度踏んだ「計測器が未検証の照合規則を焼き込む」に戻る
+
+**調査で確定した事実** (穴の範囲): `DEFAULT_REPLAY_SCOPE`は`#fine`で、live broadcastが
+読むのは`#coarse`。`$Q[observe]`に任意パラメータを書けるHTTP経路も存在しない
+(`/control/*`は baseline-delta / coarse-downsample / replay の3つだけで、いずれも
+`agg_func`を受けない)。**クラッシュ面は上記2箇所に限られていた**。
+
+### 欠陥2 — `aggFuncUnscored`に読み手がゼロで、既存の読み手が嘘をつく
+
+`aggFuncUnscored`のproduction参照は0件だった。対して兄弟フラグ`referenceUsable`は
+5箇所が読んでいる。curatorのmedian分岐は`referenceUsable:false`を返すので、
+`dashboard.ts`の`reportReferenceBlindness()`が**「参照がretention外に落ちた=盲目」と
+誤診断してログに出す**状態だった。実際には物差しは健在で「その統計量は採点対象外」
+なだけ。
+
+**このプロジェクトが繰り返し閉じてきた「沈黙 vs 盲目」の区別が、1段ずれた形で再発した** —
+2026-08-18に「shadowの証拠に読み手がいなかった」を`GET /brain`で閉じたのと同型。
+フラグを増やしたら読み手も同時に作る、が守れていなかった。
+
+**修正**: `reportReferenceBlindness()`に第3の状態として分岐を追加し、
+**`referenceUsable`より先に読む** (curatorは参照を見る前にreturnするので、
+median packageの`referenceUsable:false`は「参照を問うたが駄目だった」ではなく
+「問うてすらいない」)。§Aゲートにも明示分岐を入れた。
+
+### 欠陥3 — `npm test`が本番エントリポイントを起動する
+
+```
+"test": "tsc && node --test dist/"
+```
+ディレクトリ指定なので`dist/index.js`も実行対象に入り、**実サーバ・50 evt/sの
+ジェネレータ・tickの`setInterval`が起動していた**。今回まさに
+`EADDRINUSE: :::3001`で**テストが1件も走らずにコケた** (dev サーバが立っていたため)。
+今まで気付かれなかったのは、ポートがたまたま空いていたから。
+
+`BRAIN_MODE=claude`をenvに置いたまま`npm test`を叩くと**実課金のAPI呼び出しが走る**
+経路でもあった。`node --test "dist/*.test.js"`に変更。dev サーバ稼働中に
+`npm test`が通ることを実測確認。
+
+### 欠陥4 — ダッシュボードのStopバナーが消えない
+
+`renderActiveScenario()`の`stopReminder.hidden = true`が
+「`activeScenario`が変化したか」の早期returnより**後ろ**にあった。シナリオ非稼働時に
+Stopを押すと`activeScenario`は`null`のまま変化しないので、バナーが**リロードするまで
+消えない**。ついでに、バッジ文言も変化時にしか書かないので**SSE再接続のたびに
+走行中シナリオ名が失われる**ことも分かった。
+
+**修正**: バナーのretractとバッジ文言は毎tick再記述 (どちらも「今シナリオが走っているか」
+を答えるだけで、DOMを歩かない)。ボタンの再描画だけは`querySelectorAll`を伴う本物の
+差分なのでガードに残した。`badge.classList.toggle("running", true)`は第2引数が定数
+`true` = 実質`add()`で、接続インジケータ`.running`の所有者がSSEハンドラと2箇所に
+なっていたので削除。
+
+### 実地確認 (2026-08-25)
+
+本番構成のままサーバを起動しRCを実走。`index.ts`のtry/catch再構成が
+replay経路を壊していないことの回帰確認になった:
+
+```
+[decision] replayRequest {"window_ms":1000,"group_by":["agentId"],"fromTs":…,"toTs":…}
+[replay] referenceUsable=true aggFuncUnscored=undefined tiles=5
+    dip 13.06σ agent-C  mean 0.182 vs baseline 0.961
+    dip  8.69σ agent-C  mean 0.000 vs baseline 0.961
+```
+
+新設のcatchは一度も発火せず。起動直後の`reference UNUSABLE`1行は履歴60秒が
+溜まる前の**本物の盲目**で、`aggFuncUnscored`分岐に吸われず従来どおり報告された
+(欠陥2の修正が正しい側を選んでいることの確認)。SSEペイロードの`activeScenario`が
+`null → RC → null`と遷移することも確認。
+
+**確認できていないこと**: 欠陥1の`lensGate`はliveでは踏めない。`BRAIN_MODE=rule`が
+既定で、medianを`$Q[observe]`に書けるHTTP経路が存在しないため (上記の調査結果)。
+ユニットテスト4件でのみ担保している。実走で踏むには`BRAIN_MODE=claude`で課金が要る。
+
+### この4件に共通する形
+
+**1と2は「ガードやフラグを正しく作ったが、その読み手/呼び出し側が追随していない」**、
+**3と4は「動く経路しか試していない」**。特に1は、§Cが2段ガードに分けた判断自体は
+正しく、**分けたことで生まれた隙間に本番配線が挟まった**という形をしている。
+`isScorable` (3コピーがズレていた) や`isReferenceUsable` (3箇所が別々にコピー) で
+繰り返してきた「述語を1つにする」という教訓の、**呼び出し側版**と言える。

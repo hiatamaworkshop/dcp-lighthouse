@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmedian本体まで実装、percentileのみ未着手)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了 (テスト390件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmedian本体まで実装、percentileのみ未着手)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済 (テスト393件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -453,6 +453,29 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
   古い比率の`weight`を保持したまま (再重み付けするとanchor-slide系のバグに
   なる、`decay_anchor`/`liveSpans`の格子と同じ理由)。テスト 364→379件
   (retention-buffer.test.ts 6件、q-retention-binding.test.ts 9件)。
+- **レビューで出た欠陥 4 件 (2026-08-25、同日修正。テスト 390→393 件)** — 直近 4 コミットをまとめてレビューしたもの。
+  共通の形は **1/2 が「ガードやフラグを正しく作ったが、読み手/呼び出し側が追随していない」**、
+  **3/4 が「動く経路しか試していない」**。詳細は ROADMAP_BRIEF.md 2026-08-25
+  - **median の書込ゲートと実行時ガードが食い違っていた** — §C の 2 段ガードは個々には正しいが、
+    `validateObserveParams` が素の `median` を通す一方で本番は `REFERENCE_THINNING_RATIO=2` =
+    参照ゾーンのイベントは必ず加重。`index.ts` の `try` は **`registry.set` だけ**を包んでいたので、
+    `replaySpanWithReference` の throw が `setInterval` から uncaughtException に抜けていた。
+    **(a) 関所側** = `ClaudeBrainOptions.lensGate` を新設し `index.ts` の `refuseUnrunnableLens` が
+    「このプロセスの buffer が疎化 opt-in 済なら median を拒否」を合成 (ランタイム配線を知るのは
+    `index.ts` だけだから、判定もそこに置く)。**(b) 最後の砦側** = `try` をレンズの**適用**まで拡張、
+    §A ゲートも包み「ゲートが実行できなかった」を `gateRejected` と混ぜず別ログにした
+  - **`aggFuncUnscored` に読み手が 0 件だった** — curator の median 分岐が `referenceUsable:false` を返すので、
+    `reportReferenceBlindness` が**「物差しが無い=盲目」と誤診断**していた。「沈黙 vs 盲目」の区別が
+    1 段ずれた形で再発したもの (`GET /brain` で閉じた shadow ログの件と同型)。
+    第 3 の状態として分岐を追加し、**`referenceUsable` より先に読む** (curator は参照を見る前に return する)
+  - **`npm test` が `dist/index.js` を起動していた** — `node --test dist/` はディレクトリ指定なので
+    実サーバと 50 evt/s ジェネレータが走る。dev サーバ稼働中は `EADDRINUSE` で**1 件も走らずにコケる**し、
+    `BRAIN_MODE=claude` を env に置いたままだと**実課金の API 呼び出し**が走る経路でもあった。
+    `node --test "dist/*.test.js"` に変更
+  - **dashboard の Stop バナーが消えなかった** — retract が「変化したか」の早期 return より後ろにあった。
+    併せて SSE 再接続でバッジのシナリオ名が失われる件も修正。実地確認で RC 回帰なし
+    (agent-C dip 8.7〜13.1σ、新設 catch は未発火)。**`lensGate` は live では踏めない** —
+    `BRAIN_MODE=rule` が既定で median を `$Q[observe]` に書ける HTTP 経路が存在しないため、ユニットテストのみで担保
 - 常設: 実データ派生 (非公開の姉妹プロジェクト) からの還元フィルタ — 「機構を行使/変更する or ドメイン非依存知見を生む」もののみ灯台の実証に数える
 
 ---
