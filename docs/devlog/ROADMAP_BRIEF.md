@@ -4132,3 +4132,73 @@ replay経路を壊していないことの回帰確認になった:
 正しく、**分けたことで生まれた隙間に本番配線が挟まった**という形をしている。
 `isScorable` (3コピーがズレていた) や`isReferenceUsable` (3箇所が別々にコピー) で
 繰り返してきた「述語を1つにする」という教訓の、**呼び出し側版**と言える。
+
+---
+
+## 2026-09-17 — 予定: 高速分類器 (TypeSafe AI / Jev) の配置 (利用可能になり次第着手)
+
+外部サービスをユーザ依頼で調査し、**予定として登録**するもの。Jev は waitlist 制の
+early access で現時点ではアクセスが無いため**未着手・着手条件待ち**。コード変更なし。
+出典: [typesafe.ai](https://typesafe.ai/) / [docs](https://docs.typesafe.ai/llms.txt)
+
+### 対象の要点 (2026-09-17 時点の公開情報)
+
+- TypeSafe AI の **Jev** ("System One Model"、RLCD = Reinforcement Learning for Calibrated
+  Decisions で学習)。文字列を生成せず、`state` (文字列/object/array) に対する**型付きの問い**に
+  確率つきで答える。問いは 3 種で、1 呼び出しに混在でき並列・独立に評価される:
+  - **Noul** — 命題が真である確率のみ (`confidence` は無い)
+  - **Choice** — 最大 255 択。`choice` + `probabilities` + `confidence`
+  - **Score** — 順序付き rubric。段番号の期待値 `score` + `probabilities` + `confidence`
+- 70〜500ms、入力 $0.042/MTok、出力無料。JS/TS SDK あり
+- docs の設計原則が **L3 の 2×2×2 実測の結論と同じ所に着地している** — 制御フローと答えの
+  合成はコード、モデルは狭い判断だけ、確信度で「実行 / 確認 / 高価なモデルへ escalate」を分ける
+- **公開証拠の穴**: 較正の数字 (ECE・reliability diagram) が無く、`confidence` の式も非公開。
+  consistency cookbook が示すのは**再現性** (保険請求 1 件に 15 回試行、確率の標準偏差 0.0102)
+  であって**較正ではない**。docs 自身も閾値は「例示であり保証ではない」と明記
+
+### 配置案
+
+**案1 (推奨): Brain 層。発火はコード、分類器は応答とレンズを選ぶ**
+
+- curator のタイル / RuleBrain の条件を発火点にしたまま、分類器には応答種別
+  (`none`/`rerouteSchema`/`quarantine`/`replayRequest`) と `window_ms`/`group_by` を
+  **Choice** で選ばせる。確信度が低ければ ClaudeBrain に escalate (System 1 / System 2 の分業)
+- 速さが効く点: (a) 毎 tick 答えられるので **RuleBrain と同じ cadence** になり、L3 で
+  「cadence の差を測ってしまう」として見送った per-tick 一致率が正当に測れる。
+  (b) ClaudeBrain の審議 5〜10s が replay の遅れにならない
+- L3 実測の「どう操作するか ○ / いつ・何に ×」の**得意な側だけを渡す**形。
+  curator はレンズを選ばないので、§12 の転写の罠 (写す元の判定) も構造的に存在しない
+
+**案2: 取り込み層。非構造データ → 型付きフィールド**
+
+- 例: テスト失敗ログを flaky / 環境要因 / 本物の回帰に分類して DCP 行のフィールドにし、
+  curator はそれを `group_by` するだけ。Jev 本来の用途に最も近い
+- モックは `result` を最初から型付きで出すので分類対象のテキストが無い。
+  **パイロットでは検証不能**で、実データ派生側の話
+
+### 着手時に守る不変条件 (既に踏んだ罠)
+
+- **「いつ異常か」を分類器に決めさせない** — 毎 tick = 1 分 60 回の判定になり、
+  package 単位の誤警報が Šidák 導入前の curator (29%) と同じ形で膨らむ。
+  異常判定は較正を測ってある curator に残す
+- **Choice の選択肢はプロセス状態から生成する** — 型付きにすれば選択肢外は出ず
+  `validateObserveParams` の棄却は構造的に消える。ただし実行可能なレンズの集合は
+  ランタイム配線に依存する (2026-08-25 欠陥1 = median と疎化の食い違い)。
+  静的な enum にすると同じ隙間が戻る
+- **審議を tick から切り離す構造は残す** — 遅い側 500ms + ネットワークは 1s tick に対して
+  同期呼び出しでは危険。短くなるのは遅延であって形ではない (in-flight ラッチと
+  `meta.snapshotTs` はそのまま要る)
+- **判定不能は問いの前にコードで落とす** — Noul の 0.5 は「証拠が拮抗」と「証拠が無い」を
+  区別しない。`referenceUsable:false` / `aggFuncUnscored` のパッケージを問いに流さない
+- **curator の σ・タイル判定を `state` に入れない** (§12 の転写の罠)
+
+### 着手時に最初に測ること
+
+1. **自領域での較正** — 公開証拠が無いので前提にしない。`calibration.ts`
+   (誤警報率/検出力をレンズ引数で測る器) を分類器の reliability 測定へ広げる
+2. **遅延の裾** — p50 ではなく遅い側が 1s tick に収まるか
+3. **陰性対照での行動率** — QUIET で発火点を通過した後、分類器が `none` 以外を選ぶ率
+
+**事前にできること / できないこと**: 公式の互換実装 `system-one-adapter-python` (MIT) は
+同じ問いの形を OpenAI/Anthropic の LLM で実行する。**問いの形の設計は今でも試せるが、
+速度と RLCD の較正は再現できない**ので、案1 の価値の実測には Jev のアクセスが要る。
