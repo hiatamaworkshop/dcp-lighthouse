@@ -69,10 +69,10 @@ function rng32(seed: number): () => number {
  * than a genuine pass/fail stream's and puts every tail comfortably in reach —
  * so the property under test here can only be exercised on real aggregation.
  */
-function bernoulliResult(seed: number, passRate: number, fromTs: number, spanMs: number) {
+function bernoulliResult(seed: number, passRate: number, fromTs: number, spanMs: number, eventCount = 1000) {
   const rand = rng32(seed);
   const events: LensEvent[] = [];
-  for (let i = 0; i < 1000; i++) {
+  for (let i = 0; i < eventCount; i++) {
     events.push({ ts: fromTs + Math.floor(rand() * spanMs), value: rand() < passRate ? 1 : 0 });
   }
   return applyLens(events, { window_ms: 1000, align: "epoch" });
@@ -80,14 +80,18 @@ function bernoulliResult(seed: number, passRate: number, fromTs: number, spanMs:
 
 describe("SnapshotCurator — a tail that cannot fire is blindness, not quiet", () => {
   it("declares the spike tail unreachable when the data's ceiling sits under the gate", () => {
-    // A window mean cannot exceed the largest value the stream produces. On the
-    // pilot's 0.95-pass shape that ceiling is 1.0, only a couple of σ above
-    // baseline, so the Šidák-corrected gate sits above anything the data could
-    // ever produce. "No spikes" then reports a question that was never askable
-    // — measured as 136 dips to 1 spike over 2000 null trials
-    // (ROADMAP_BRIEF.md 2026-08-17).
-    const observation = bernoulliResult(1, 0.95, 0, 10_000);
-    const reference = bernoulliResult(2, 0.95, -10_000, 10_000);
+    // A window mean cannot exceed the largest value the stream produces. At a
+    // 0.95 pass rate with ~20 events per window, even an all-pass window turns
+    // up about a third of the time, so the Šidák-corrected gate sits above
+    // anything the data could ever produce. "No spikes" then reports a question
+    // that was never askable.
+    //
+    // ~20 events, not the ~100 this used before 2026-09-27: under the exact
+    // gate an all-pass window of ~100 at p≈0.95 (probability ≈0.1%) DOES clear
+    // the gate — "unreachable" at that shape was an artefact of the normal
+    // approximation understating how rare the ceiling is.
+    const observation = bernoulliResult(1, 0.95, 0, 10_000, 200);
+    const reference = bernoulliResult(2, 0.95, -10_000, 10_000, 200);
     const pkg = new SnapshotCurator({ spikeZThreshold: 2.0 }).curate(observation, reference);
 
     const spike = pkg.unreachableTails.find((t) => t.direction === "spike");
@@ -938,11 +942,17 @@ const GROUPED = { window_ms: 1000, align: "epoch" as const, group_by: ["agentId"
 const FLAT = { window_ms: 1000, align: "epoch" as const };
 
 describe("SnapshotCurator — group_by: the mixture hides what the group shows", () => {
-  // agent-c spends part of the middle window failing: 20/25 = 0.80 against its
+  // agent-c spends part of the middle window failing: 18/25 = 0.72 against its
   // own 0.96 baseline. In the four-agent mixture that same window reads
-  // (24+24+20+24)/100 = 0.92 — the dip diluted to roughly a quarter of its
+  // (24+24+18+24)/100 = 0.90 — the dip diluted to roughly a quarter of its
   // depth, which is the recorded L4 motivation (ROADMAP_BRIEF.md 2026-07-25).
-  const SICK = { windowStart: 4000, agentId: "agent-c", passCount: 20 };
+  //
+  // 18, not the 20 this used before 2026-09-27: under the exact gate a 20/25
+  // cell is not rare enough to clear a family of 12 (5 fails against ~1
+  // expected happens by chance ~8% of the time across 12 comparisons — the
+  // normal approximation had called it 3.4σ). At 18/25 the group clears its
+  // bar (exact ≈3.16σ vs 2.89σ) and the mixture still does not (≈2.15σ vs 2.42σ).
+  const SICK = { windowStart: 4000, agentId: "agent-c", passCount: 18 };
   const obsEvents = span(OBS_WINDOWS, SICK);
   const refEvents = span(REF_WINDOWS);
   const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
@@ -951,8 +961,8 @@ describe("SnapshotCurator — group_by: the mixture hides what the group shows",
   const groupedPkg = curator.curate(applyLens(obsEvents, GROUPED), applyLens(refEvents, GROUPED));
 
   it("the mixed lens does not report the dip at all", () => {
-    // Not a threshold-tuning artefact: the mixed window sits ~1.8σ from
-    // baseline, under even the uncorrected 2.0σ bar.
+    // The mixed window's exact tail is ≈2.15σ-equivalent, under the N=3 gate
+    // (2.42σ) — the dilution, not the threshold, is what hides it.
     assert.equal(flatPkg.tiles.filter((t) => t.shapeTag === "dip").length, 0);
   });
 
@@ -979,7 +989,6 @@ describe("SnapshotCurator — group_by: the mixture hides what the group shows",
       .tiles.find((t) => t.regionStart === 4000 && t.shapeTag === "dip")!.magnitude!;
     const groupedZ = groupedPkg.tiles.find((t) => t.shapeTag === "dip")!.magnitude!;
 
-    assert.ok(mixedZ < 2.0, `mixed z ${mixedZ} must sit under the shipped 2.0σ bar`);
     assert.ok(groupedZ > 3.4, `grouped z ${groupedZ}`);
     assert.ok(
       groupedZ / mixedZ > 1.9,
@@ -1110,7 +1119,11 @@ describe("SnapshotCurator — group_by: the Šidák family is the package, not t
   // the correction costs 0.16σ instead of 0.44σ and a borderline exists again.
   const DENSE_RATE = 200;
   const DENSE_HEALTHY = 192; // 192/200 = 0.96, the same rate as the shared fixture
-  const BORDERLINE = 183; // 0.915 vs 0.96 = 2.81σ raw, 2.65σ gated — above N=3 (2.42σ), below N=12 (2.89σ)
+  // 182, not 183 (2026-09-27): the exact gate puts 183/200 at ≈2.38σ-equivalent,
+  // under BOTH bars; 182/200 is ≈2.60σ — above N=3 (2.42σ), below N=12 (2.89σ).
+  // The raw z Brain reads as magnitude is 3.12σ; the gap between the two is the
+  // skew of a failure count the normal approximation had been ignoring.
+  const BORDERLINE = 182;
 
   function denseCell(windowStart: number, agentId: string, passCount: number): LensEvent[] {
     return Array.from({ length: DENSE_RATE }, (_, i) => ({
@@ -1139,8 +1152,8 @@ describe("SnapshotCurator — group_by: the Šidák family is the package, not t
       applyLens(onlyC(denseSpan(REF_WINDOWS)), GROUPED),
     );
     const dip = pkg.tiles.find((t) => t.shapeTag === "dip");
-    assert.ok(dip, "a 2.81σ dip must clear the N=3 bar (2.42σ)");
-    assert.ok(dip!.magnitude! > 2.6 && dip!.magnitude! < 3.0, `magnitude ${dip!.magnitude}`);
+    assert.ok(dip, "a ≈2.60σ-equivalent dip must clear the N=3 bar (2.42σ)");
+    assert.ok(dip!.magnitude! > 3.0 && dip!.magnitude! < 3.25, `magnitude ${dip!.magnitude}`);
   });
 
   it("does not fire at family size 12 (four groups × three windows)", () => {

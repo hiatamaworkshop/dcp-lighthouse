@@ -56,13 +56,40 @@ export interface StreamShape {
   eventsPerSpan?: number;
   /** Baseline pass probability. */
   passRate?: number;
+  /**
+   * Keyed sub-streams with their own outcome mix, drawn the way
+   * MockStreamGenerator draws them: pass (1) below passRate, flaky (0.5) in
+   * the next flakyRate, fail (0) otherwise. Every event picks one agent
+   * uniformly and carries `keys.agentId`, so a `group_by` lens has groups to
+   * find. `passRate` above is ignored when this is set.
+   *
+   * Exists because the lens RuleBrain actually asks for on RC — 1s windows
+   * grouped by agent — was never a calibration target, and raised a false
+   * dip in 41% of quiet packages (2026-09-27 review, finding 4). Absent (the
+   * default), the stream is the single pass/fail Bernoulli every earlier
+   * figure was measured on, drawn from the same random sequence.
+   */
+  agents?: ReadonlyArray<{ id: string; passRate: number; flakyRate?: number }>;
 }
 
-const DEFAULT_SHAPE: Required<StreamShape> = {
+type Shape = Required<Omit<StreamShape, "agents">> & Pick<StreamShape, "agents">;
+
+const DEFAULT_SHAPE: Shape = {
   spanMs: 10_000,
   eventsPerSpan: 1_000,
   passRate: 0.95,
 };
+
+/**
+ * The pilot's own four agents (MockStreamGenerator's DEFAULT_PROFILES), for
+ * calibrating lenses against the stream the dashboard actually carries.
+ */
+export const PILOT_AGENTS: NonNullable<StreamShape["agents"]> = [
+  { id: "agent-A", passRate: 0.95, flakyRate: 0.01 },
+  { id: "agent-B", passRate: 0.88, flakyRate: 0.02 },
+  { id: "agent-C", passRate: 0.95, flakyRate: 0.01 },
+  { id: "agent-D", passRate: 0.90, flakyRate: 0.08 },
+];
 
 function emit(
   buf: RetentionBuffer<LensEvent>,
@@ -71,6 +98,7 @@ function emit(
   toTs: number,
   count: number,
   passRate: number,
+  agents?: StreamShape["agents"],
 ): void {
   // Generate then push in ts order, not draw order. RetentionBuffer.evict()
   // assumes the front of its internal array is the oldest event (it walks
@@ -85,10 +113,14 @@ function emit(
   // regardless, so this is a no-op for every pre-L5 trial (retentionWindowMs
   // = spanMs*10 there, so nothing evicts and every event lands in `events`
   // either way) and only changes behaviour where eviction actually runs.
-  const events = Array.from({ length: count }, () => ({
-    ts: fromTs + Math.floor(rng() * (toTs - fromTs)),
-    value: rng() < passRate ? 1 : 0,
-  })).sort((a, b) => a.ts - b.ts);
+  const events: LensEvent[] = Array.from({ length: count }, (): LensEvent => {
+    const ts = fromTs + Math.floor(rng() * (toTs - fromTs));
+    if (agents === undefined) return { ts, value: rng() < passRate ? 1 : 0 };
+    const a = agents[Math.floor(rng() * agents.length)];
+    const r = rng();
+    const value = r < a.passRate ? 1 : r < a.passRate + (a.flakyRate ?? 0) ? 0.5 : 0;
+    return { ts, value, keys: { agentId: a.id } };
+  }).sort((a, b) => a.ts - b.ts);
   for (const e of events) buf.observe(e, "calibration");
 }
 
@@ -104,7 +136,7 @@ function emit(
  */
 function buildTrial(
   seed: number,
-  shape: Required<StreamShape>,
+  shape: Shape,
   injected: { passRate: number } | null,
   retention?: Partial<RetentionBufferOptions>,
 ): { observation: RetentionBuffer<LensEvent>; obsFrom: number; obsTo: number; refFrom: number; refTo: number } {
@@ -121,14 +153,17 @@ function buildTrial(
   const refFrom = T0 - shape.spanMs;
   const obsTo = T0 + shape.spanMs;
 
-  emit(buf, rng, refFrom, T0, shape.eventsPerSpan, shape.passRate);
+  emit(buf, rng, refFrom, T0, shape.eventsPerSpan, shape.passRate, shape.agents);
   if (injected === null) {
-    emit(buf, rng, T0, obsTo, shape.eventsPerSpan, shape.passRate);
+    emit(buf, rng, T0, obsTo, shape.eventsPerSpan, shape.passRate, shape.agents);
   } else {
     const burstStart = obsTo - shape.spanMs / 5;
     const quietEvents = Math.round(shape.eventsPerSpan * 0.8);
-    emit(buf, rng, T0, burstStart, quietEvents, shape.passRate);
-    emit(buf, rng, burstStart, obsTo, shape.eventsPerSpan - quietEvents, injected.passRate);
+    // With agents, the burst hits the FIRST agent only — the RC shape: one
+    // agent dips, the rest carry on.
+    const burstAgents = shape.agents?.map((a, i) => (i === 0 ? { ...a, passRate: injected.passRate } : a));
+    emit(buf, rng, T0, burstStart, quietEvents, shape.passRate, shape.agents);
+    emit(buf, rng, burstStart, obsTo, shape.eventsPerSpan - quietEvents, injected.passRate, burstAgents);
   }
   return { observation: buf, obsFrom: T0, obsTo, refFrom, refTo: T0 };
 }

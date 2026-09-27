@@ -482,16 +482,17 @@ export class SnapshotCurator {
       // raw one, for the same reason the Šidák correction is not folded into it
       // — the correction belongs to the tail probability, not to the effect
       // size Brain reads.
-      const latticeStep = detectLattice(unit.windows, unit.refWindows);
+      const lattice = detectLattice(unit.windows, unit.refWindows);
+      const model = categoricalModel(unit.windows, unit.refWindows);
 
-      collectUnreachableTails(unit, effectiveZThreshold, latticeStep, unreachableTails);
+      collectUnreachableTails(unit, effectiveZThreshold, lattice, model, unreachableTails);
 
       for (const w of unit.windows) {
         if (!isScorable(w)) continue;
         const se = comparisonSE(w, unit.ref);
         if (!(se > 0)) continue;
         const z = (w.mean - unit.ref.mean) / se;
-        const gated = gateZ(w, unit.ref, se, latticeStep);
+        const gated = gate(w, unit.ref, se, lattice, model);
         if (gated >= effectiveZThreshold) {
           tiles.push({
             label: `${tag}spike at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${unit.ref.mean.toFixed(3)})`,
@@ -671,6 +672,12 @@ function buildScoringUnits(
 }
 
 /** Pooled aggregate of a reference lens's windows: {mean, variance, count}. */
+/** A two-valued lattice: every event is `min` or `min + step`. See detectLattice. */
+interface Lattice {
+  min: number;
+  step: number;
+}
+
 interface RefStats {
   mean: number;
   /** Bessel-corrected pooled variance over every retained event, weighted by
@@ -832,7 +839,8 @@ function hasMedianWindows(result: LensResult): boolean {
 function collectUnreachableTails(
   unit: { windows: WindowStat[]; ref: RefStats; group?: string },
   requiredZ: number,
-  latticeStep: number | null,
+  lattice: Lattice | null,
+  model: CategoricalModel | null,
   out: UnreachableTail[],
 ): void {
   const scorable = unit.windows.filter((w) => isScorable(w) && w.range !== undefined);
@@ -847,10 +855,14 @@ function collectUnreachableTails(
   // Scored through the same gate, continuity correction included. Asking a
   // different question here than the gate asks would be a slow way to start
   // declaring reachable tails unreachable, or worse, the reverse.
-  const ceiling: WindowStat = { ...best, mean: observedMax };
-  const floor: WindowStat = { ...best, mean: observedMin };
-  const maxZ = gateZ(ceiling, unit.ref, se, latticeStep);
-  const minZ = gateZ(floor, unit.ref, se, latticeStep);
+  // Every event AT the extreme value, sumSq included: exactZ decomposes a
+  // window from mean and sumSq together, and a mean moved on its own would
+  // not decompose (it would silently fall back to the normal gate — a
+  // different question than the one the scoring loop asks).
+  const ceiling: WindowStat = { ...best, mean: observedMax, sumSq: best.count * observedMax * observedMax };
+  const floor: WindowStat = { ...best, mean: observedMin, sumSq: best.count * observedMin * observedMin };
+  const maxZ = gate(ceiling, unit.ref, se, lattice, model);
+  const minZ = gate(floor, unit.ref, se, lattice, model);
 
   const group = unit.group !== undefined ? { group: unit.group } : {};
   if (maxZ < requiredZ) {
@@ -928,7 +940,7 @@ function comparisonSE(w: WindowStat, ref: RefStats): number {
  * because switching the correction off is all that a weighting lens was doing
  * to the gate (ROADMAP_BRIEF.md 2026-08-17).
  */
-function detectLattice(observation: readonly WindowStat[], reference: readonly WindowStat[]): number | null {
+function detectLattice(observation: readonly WindowStat[], reference: readonly WindowStat[]): Lattice | null {
   let min = Infinity;
   let max = -Infinity;
   let sumSq = 0;
@@ -949,7 +961,7 @@ function detectLattice(observation: readonly WindowStat[], reference: readonly W
   const q = (sum / weight - min) / (max - min);
   const predicted = min * min + (max * max - min * min) * q;
   const tolerance = 1e-9 * Math.max(1, Math.abs(predicted));
-  return Math.abs(sumSq / weight - predicted) <= tolerance ? max - min : null;
+  return Math.abs(sumSq / weight - predicted) <= tolerance ? { min, step: max - min } : null;
 }
 
 /**
@@ -986,6 +998,186 @@ function gateZ(w: WindowStat, ref: RefStats, se: number, latticeStep: number | n
   if (latticeStep === null || !(n > 0)) return deviation / se;
   const shrunk = Math.max(0, Math.abs(deviation) - 0.5 * (latticeStep / n));
   return (Math.sign(deviation) * shrunk) / se;
+}
+
+/**
+ * The gate every window passes through: the exact tail where the data allows
+ * one (exactZ), the continuity-corrected normal approximation where it does
+ * not (weighted windows or references, or values not on a small even lattice).
+ */
+function gate(
+  w: WindowStat,
+  ref: RefStats,
+  se: number,
+  lattice: Lattice | null,
+  model: CategoricalModel | null,
+): number {
+  const exact = model === null ? null : exactZ(w, model);
+  return exact ?? gateZ(w, ref, se, lattice?.step ?? null);
+}
+
+/**
+ * Events on an evenly spaced lattice of 2 or 3 levels, with the reference's
+ * count at each level — what exactZ needs to compute a window's exact null
+ * distribution. Null when that distribution is not available (see below).
+ */
+interface CategoricalModel {
+  min: number;
+  step: number;
+  levels: 2 | 3;
+  /** Reference events at each level, pooled over every reference window. */
+  refCounts: number[];
+}
+
+/**
+ * Per-level event counts of an UNWEIGHTED window, recovered exactly from the
+ * sufficient statistics it already carries — no raw values needed.
+ *
+ * In step units u = (v − min)/step ∈ {0, 1, 2}, the window gives Σu (from the
+ * mean) and Σu² (from sumSq). Two equations, two unknowns: c₂ = (Σu² − Σu)/2,
+ * c₁ = Σu − 2c₂, c₀ = n − c₁ − c₂. The answer is only accepted when all three
+ * come out as non-negative integers — that IS the lattice test, the same
+ * "ask the data" move detectLattice makes for two levels, extended by one.
+ */
+function levelCounts(w: WindowStat, min: number, step: number, levels: 2 | 3): number[] | null {
+  if (w.weights !== undefined) return null;
+  const n = w.count;
+  if (n === 0) return levels === 2 ? [0, 0] : [0, 0, 0];
+  const sum = w.mean * n;
+  const su = (sum - n * min) / step;
+  const su2 = (w.sumSq - 2 * min * sum + n * min * min) / (step * step);
+  const tol = 1e-6 * Math.max(1, n);
+  const asCount = (v: number): number | null => {
+    const r = Math.round(v);
+    return Math.abs(v - r) <= tol && r >= 0 && r <= n ? r : null;
+  };
+  if (levels === 2) {
+    // Two levels: every u is 0 or 1, so Σu² must equal Σu.
+    if (Math.abs(su2 - su) > tol) return null;
+    const c1 = asCount(su);
+    return c1 === null ? null : [n - c1, c1];
+  }
+  const c2 = asCount((su2 - su) / 2);
+  const c1 = c2 === null ? null : asCount(su - 2 * c2);
+  if (c1 === null || c2 === null || n - c1 - c2 < 0) return null;
+  return [n - c1 - c2, c1, c2];
+}
+
+/**
+ * Decide, once per scoring unit, whether exactZ can run: every window —
+ * observation and reference — unweighted and decomposable onto the same 2- or
+ * 3-level lattice. Two levels are tried first so that pass/fail data keeps its
+ * plain beta-binomial model; three cover the pilot's own pass/flaky/fail
+ * mapping (1 / 0.5 / 0), which is not two-valued and therefore never reached
+ * detectLattice's continuity correction either (2026-09-27 review).
+ */
+function categoricalModel(observation: readonly WindowStat[], reference: readonly WindowStat[]): CategoricalModel | null {
+  const all = [...observation, ...reference].filter((w) => w.count > 0);
+  if (all.length === 0 || reference.every((w) => w.count === 0)) return null;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const w of all) {
+    if (w.range === undefined || w.weights !== undefined) return null;
+    min = Math.min(min, w.range.min);
+    max = Math.max(max, w.range.max);
+  }
+  if (!(max > min)) return null;
+
+  for (const levels of [2, 3] as const) {
+    const step = (max - min) / (levels - 1);
+    if (!all.every((w) => levelCounts(w, min, step, levels) !== null)) continue;
+    const refCounts = new Array<number>(levels).fill(0);
+    for (const w of reference) {
+      const c = levelCounts(w, min, step, levels)!;
+      for (let i = 0; i < levels; i++) refCounts[i] += c[i];
+    }
+    return { min, step, levels, refCounts };
+  }
+  return null;
+}
+
+/** Windows above this size skip the exact path: O(n²) for three levels, and the normal approximation is sound there anyway. */
+const EXACT_MAX_COUNT = 2_000;
+
+/**
+ * The window's surprise under the reference, from the EXACT sampling
+ * distribution of its score, expressed as the normal z with the same one-sided
+ * tail — so it feeds the unchanged Šidák gate and nothing downstream needs to
+ * know which path produced it.
+ *
+ * Why this exists (2026-09-27 review, finding 4). The z-test's normal
+ * approximation is fine when a window holds ~100 events near p=0.95 (the shape
+ * the 4.40% calibration was measured on) and badly wrong when it holds ~12:
+ * the count of failures is then close to Poisson with a mean under 1, whose
+ * upper tail is far heavier than a normal one. The RC replay lens (1s windows
+ * × group_by:agentId) lives exactly there and raised a false dip in 41% of
+ * quiet packages against a 4.55% design. The continuity correction cannot fix
+ * it — it is a first-order term for a lattice, not for skew — and
+ * Cornish-Fisher already failed here once (2026-08-17) because the error is
+ * not smooth.
+ *
+ * The null distribution is the reference's POSTERIOR PREDICTIVE, not a
+ * multinomial at the reference's point estimate: level counts ~
+ * DirichletMultinomial(n, refCounts + ½) (Jeffreys prior), the exact
+ * counterpart of comparisonSE's `1/ref.effectiveN` term — a short reference
+ * widens the distribution instead of being trusted absolutely. With two
+ * levels this is the beta-binomial. The score whose tail is taken is the
+ * window sum in step units, Σ i·cᵢ — the exact version of what the z-test
+ * standardises.
+ *
+ * MID-p, not the plain exact tail. The plain exact test was measured on
+ * 2026-08-17 as never reaching its design rate (a discrete statistic can only
+ * reject at the attainable tail sizes, so it rejects less than asked); mid-p
+ * counts half the probability of the observed score itself, the standard
+ * remedy.
+ */
+function exactZ(w: WindowStat, model: CategoricalModel): number | null {
+  const n = w.count;
+  if (!(n > 0) || n > EXACT_MAX_COUNT) return null;
+  const c = levelCounts(w, model.min, model.step, model.levels);
+  if (c === null) return null;
+  const x = c.reduce((s, ci, i) => s + i * ci, 0);
+
+  const alpha = model.refCounts.map((r) => r + 0.5);
+  const A = alpha.reduce((s, a) => s + a, 0);
+  // Cumulative tables, so each composition costs a few additions:
+  //   logFact[j] = ln j!,  g[i][j] = ln Γ(αᵢ + j) − ln Γ(αᵢ).
+  const logFact = new Float64Array(n + 1);
+  for (let j = 1; j <= n; j++) logFact[j] = logFact[j - 1] + Math.log(j);
+  const g = alpha.map((a) => {
+    const t = new Float64Array(n + 1);
+    for (let j = 1; j <= n; j++) t[j] = t[j - 1] + Math.log(a + j - 1);
+    return t;
+  });
+  let logConst = logFact[n];
+  for (let j = 0; j < n; j++) logConst -= Math.log(A + j);
+
+  let below = 0;
+  let above = 0;
+  let at = 0;
+  const add = (score: number, lp: number): void => {
+    const p = Math.exp(lp);
+    if (score < x) below += p;
+    else if (score > x) above += p;
+    else at += p;
+  };
+  if (model.levels === 2) {
+    for (let c1 = 0; c1 <= n; c1++) {
+      const c0 = n - c1;
+      add(c1, logConst - logFact[c0] - logFact[c1] + g[0][c0] + g[1][c1]);
+    }
+  } else {
+    for (let c2 = 0; c2 <= n; c2++) {
+      for (let c1 = 0; c1 + c2 <= n; c1++) {
+        const c0 = n - c1 - c2;
+        add(c1 + 2 * c2, logConst - logFact[c0] - logFact[c1] - logFact[c2] + g[0][c0] + g[1][c1] + g[2][c2]);
+      }
+    }
+  }
+  const expected = (n * alpha.reduce((s, a, i) => s + i * a, 0)) / A;
+  // Each side from its own tail sum, never as 1 − (the other): the tail that
+  // matters is the small one, and subtracting it from 1 would round it away.
+  return x < expected ? normalQuantile(below + 0.5 * at) : -normalQuantile(above + 0.5 * at);
 }
 
 /**

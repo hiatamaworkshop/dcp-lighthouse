@@ -19,6 +19,7 @@ import {
   measureDetectionRate,
   measureFalseAlarmRate,
   formatCalibration,
+  PILOT_AGENTS,
 } from "./calibration.js";
 import { familyWiseAlpha } from "./snapshot-curator.js";
 
@@ -27,18 +28,25 @@ const SEEDS = 500;
 describe("curator calibration — false alarms on a null stream", () => {
   const design = familyWiseAlpha(2.0);
 
-  it("sits on the design target on the pilot's own data shape", () => {
+  it("sits at or under the design target on the pilot's own data shape", () => {
     // The pilot streams pass/fail at a ~0.95 pass rate with ~100 events per
-    // window, so this is the shape the shipped detector actually meets. It read
-    // 6.85% here until the continuity correction of 2026-08-17; 29% before 対策A.
+    // window. It read 29% before 対策A, 6.85% before the continuity correction
+    // (2026-08-17), 3.4% with it, and 3.0% under the exact gate (2026-09-27).
+    //
+    // MEASURED, NOT DESIRED: under the exact gate this sits UNDER design, and
+    // for a reason worth pinning. The 3.4% that looked calibrated was two
+    // opposite errors cancelling — the normal approximation fired dips too
+    // easily and spikes too rarely. Scored exactly, the dip side is at its
+    // nominal share and the spike side barely contributes (an all-pass window
+    // is only just reachable at this shape), so the package rate lands below
+    // the two-sided budget. Handing the unused spike share to the dip side
+    // would recover it; that was measured once under the old gate and rejected
+    // (12.60%), and has not been re-measured under this one.
     const r = measureFalseAlarmRate({ seeds: SEEDS });
     const summary = formatCalibration("shipped shape", r);
 
     assert.ok(r.trials > SEEDS * 0.9, `most trials must be scorable — ${summary}`);
-    assert.ok(
-      Math.abs(r.rate - design) < 0.015,
-      `shipped shape should sit near the ${(100 * design).toFixed(2)}% design target — ${summary}`,
-    );
+    assert.ok(r.rate <= design, `shipped shape must not exceed the ${(100 * design).toFixed(2)}% design target — ${summary}`);
     // A detector that never fires would satisfy any upper bound, so the lower
     // side is asserted separately rather than folded into the band above.
     assert.ok(r.rate > 0.02, `false-alarm rate suspiciously low, detector may be silenced — ${summary}`);
@@ -57,26 +65,24 @@ describe("curator calibration — false alarms on a null stream", () => {
     assert.ok(r.rate > 0.01, `conservative is not the same as silent — ${summary}`);
   });
 
-  it("documents where the correction still does NOT close the gap", () => {
-    // MEASURED, NOT DESIRED (ROADMAP_BRIEF.md 2026-08-17). Half a lattice step
-    // is the right first-order term, not the whole error. Two regimes still
-    // overshoot, both because the sampling distribution is further from normal
-    // than one step accounts for:
+  it("the exact gate closes the regimes the continuity correction could not", () => {
+    // The two regimes the correction left over design (ROADMAP_BRIEF.md
+    // 2026-08-17), both because the sampling distribution is further from
+    // normal than half a lattice step accounts for:
     //
-    //   extreme skew  p=0.99, ~100 events/window : 14.6% -> 8.1%
-    //   thin windows  p=0.95, ~20 events/window  : 13.5% -> 6.9%
+    //                                  none   +CC    exact (2026-09-27)
+    //   extreme skew  p=0.99, n~100 :  14.6%  8.1%   1.4%
+    //   thin windows  p=0.95, n~20  :  13.5%  6.9%   2.0%
     //
-    // Halved in each case, still above design. Asserting the residual keeps the
-    // claim in the devlog honest: this fixed the shipped operating point, it did
-    // not make the detector calibrated everywhere.
+    // Both now sit under design, for the same reason as the shipped shape: the
+    // spike tail is out of reach there, so only the dip side spends budget.
+    // The lower bound keeps "calibrated" from being satisfied by going silent.
     const skewed = measureFalseAlarmRate({ seeds: SEEDS, shape: { passRate: 0.99 } });
     const thin = measureFalseAlarmRate({ seeds: SEEDS, shape: { eventsPerSpan: 200 } });
-    assert.ok(skewed.rate > design, `extreme skew should still overshoot — ${formatCalibration("p=0.99", skewed)}`);
-    assert.ok(thin.rate > design, `thin windows should still overshoot — ${formatCalibration("n~20", thin)}`);
-    // ...but not by as much as before the correction, which is the other half
-    // of the claim.
-    assert.ok(skewed.rate < 0.12, `extreme skew regressed past its corrected level — ${formatCalibration("p=0.99", skewed)}`);
-    assert.ok(thin.rate < 0.11, `thin windows regressed past their corrected level — ${formatCalibration("n~20", thin)}`);
+    assert.ok(skewed.rate <= design, `extreme skew must no longer overshoot — ${formatCalibration("p=0.99", skewed)}`);
+    assert.ok(thin.rate <= design, `thin windows must no longer overshoot — ${formatCalibration("n~20", thin)}`);
+    assert.ok(skewed.rate > 0.005, `skew: under design, but not silent — ${formatCalibration("p=0.99", skewed)}`);
+    assert.ok(thin.rate > 0.005, `thin: under design, but not silent — ${formatCalibration("n~20", thin)}`);
   });
 });
 
@@ -101,11 +107,17 @@ describe("curator calibration — under a weighting lens", () => {
   });
 
   it("keeps its power — the weighting must not buy calibration by going blind", () => {
+    // Weighted windows are scored by the normal gate (a weighted sum is not a
+    // count, so the exact gate does not apply) and unweighted ones by the exact
+    // gate — so since 2026-09-27 the weighted lens reads MORE powerful (43.4% vs
+    // 34.8% here), and the difference is the normal approximation's generous
+    // dip tail, not anything τ does. What stays asserted is the original
+    // intent: weighting must not make the detector blind.
     const weak = measureDetectionRate(0.9, { seeds: SEEDS, lens });
     const unweighted = measureDetectionRate(0.9, { seeds: SEEDS });
     assert.ok(
-      Math.abs(weak.rate - unweighted.rate) < 0.05,
-      `a τ three times the span should barely move power — ${formatCalibration("exp", weak)} vs ${formatCalibration("plain", unweighted)}`,
+      weak.rate > unweighted.rate - 0.05,
+      `a τ three times the span must not cost power — ${formatCalibration("exp", weak)} vs ${formatCalibration("plain", unweighted)}`,
     );
     assert.ok(measureDetectionRate(0.6, { seeds: SEEDS, lens }).rate > 0.95, "a strong burst must still fire");
   });
@@ -217,5 +229,33 @@ describe("curator calibration — power", () => {
     const weak = measureDetectionRate(0.9, { seeds: SEEDS });
     assert.ok(strong.rate > weak.rate, "a larger effect must be detected at least as often");
     assert.ok(weak.rate > 0.1, `a 5pp regression should not be invisible — ${formatCalibration("burst 0.90", weak)}`);
+  });
+});
+
+describe("curator calibration — the lens RuleBrain actually asks for on RC", () => {
+  // 1s windows grouped by agent, on the pilot's four-agent pass/flaky/fail
+  // stream at its real density (50 evt/s over a 14s RC-sized span). It was
+  // never a calibration target until 2026-09-27, and under the normal gate it
+  // raised a false dip in 42.4% of quiet packages against a 4.55% design:
+  // ~12 events per agent-window at p≈0.95 is exactly where a failure count
+  // stops looking normal. The flaky value (0.5) also meant the data was never
+  // two-valued, so not even the continuity correction applied.
+  const design = familyWiseAlpha(2.0);
+  const lens = { window_ms: 1_000, group_by: ["agentId"] };
+  const shape = { agents: PILOT_AGENTS, spanMs: 14_000, eventsPerSpan: 700 };
+
+  it("stays at or under design on a quiet stream", () => {
+    const r = measureFalseAlarmRate({ seeds: SEEDS, lens, shape });
+    const summary = formatCalibration("RC lens", r);
+    assert.ok(r.trials > SEEDS * 0.9, `most trials must be scorable — ${summary}`);
+    assert.ok(r.rate <= design, `the RC replay lens must not exceed design (was 42.4%) — ${summary}`);
+    assert.ok(r.rate > 0.005, `under design, but not silent — ${summary}`);
+  });
+
+  it("still finds an RC-depth burst in one agent", () => {
+    // The burst hits the first agent only, as RC does. 0.20 is RC's own depth;
+    // 0.50 is a far gentler one that must still be caught nearly every time.
+    assert.ok(measureDetectionRate(0.2, { seeds: SEEDS, lens, shape }).rate > 0.95, "RC depth (0.20)");
+    assert.ok(measureDetectionRate(0.5, { seeds: SEEDS, lens, shape }).rate > 0.9, "half-depth (0.50)");
   });
 });
