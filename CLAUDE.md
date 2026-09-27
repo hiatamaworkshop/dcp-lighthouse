@@ -171,7 +171,8 @@ interface BrainAdapter {
 ```
 
 パイロットは `RuleBrain implements BrainAdapter`。
-将来 `ClaudeBrain implements BrainAdapter` を `BRAIN_MODE=claude` で差し替え可能に。
+`ClaudeBrain implements BrainAdapter` も実装済みで、`BRAIN_MODE=claude` で RuleBrain の
+shadow として併走する (L3)。primary は RuleBrain のまま。
 Minecraft で検証済みのパターン。
 
 ---
@@ -200,10 +201,9 @@ Minecraft で検証済みのパターン。
   - StCollector の group_by 集計 (現状 pass/fail カウントのみ)
   - tap の上に載せる ring buffer / retroactive re-observation ロジック (一番アーキ的に重い)
   - `observe_update`/`replay` の OutboundMessage 定義と発行・適用ロジック (onExtraDecision で受ける側)
-- Phase 0 の dcp-wrap 拡張点変更は Minecraft デモで動作確認済み (既存44テストを壊さない)。今後さらにコアを触る場合も両プロジェクトで確認
-- Minecraft デモを壊さない: Phase 0 (Step 1-3b) の dcp-wrap 変更は両プロジェクトで動作確認
+- dcp-wrap を触るときは両プロジェクトで動作確認する。Phase 0 (Step 1-3b) の拡張点変更は Minecraft デモで確認済み (既存44テストを壊さない)
 - 本番 AST 解析・mutation score・実テストランナー統合はすべて将来。パイロットは観測層の証明に集中
-- Brain は rule-based 固定。Claude 差し替えはインターフェース確保のみで実装は将来
+- primary Brain は RuleBrain 固定。ClaudeBrain は実装済みだが shadow 併走のみで、昇格は `/brain` のログを根拠に別途判断する
 
 ---
 
@@ -217,10 +217,10 @@ Phase 0 + Phase 1 実装完了 (詳細・ファイル対応は [README.md](READM
 E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以後の工程は
 **`docs/devlog/ROADMAP_BRIEF.md` の「2026-07-03 — 本体ロードマップ再編」を正とする**。要約:
 
-- **L1 ✅ (2026-07-03)** 足場固め — field findings の core 還元 (ts≤now クロック方針 / count 窓・有効性 / baseline ゲート+床)。テスト 113→121 件
-- **L2 ✅ (2026-07-03)** Brain write surface + replay 表面化 — $Q[schema] baseline_delta 昇格・区間指定 replay (fromTs/toTs)・dashboard 粗/細対比 UI。テスト 121→124 件。ブラウザ実地確認も完了 (2026-07-25)
+- **L1 ✅ (2026-07-03)** 足場固め — field findings の core 還元 (ts≤now クロック方針 / count 窓・有効性 / baseline ゲート+床)
+- **L2 ✅ (2026-07-03)** Brain write surface + replay 表面化 — $Q[schema] baseline_delta 昇格・区間指定 replay (fromTs/toTs)・dashboard 粗/細対比 UI。ブラウザ実地確認も完了 (2026-07-25)
 - **L3 ✅ (2026-08-18)** **ClaudeBrain (本丸)** — `claude-brain.ts` + `shadow-brain.ts`。
-  `BRAIN_MODE=claude` で RuleBrain と shadow 併走。テスト 292→336 件。設計判断 4 つ:
+  `BRAIN_MODE=claude` で RuleBrain と shadow 併走。設計判断 4 つ:
   - **審議を tick から切り離した** — `BrainAdapter.decide()` は同期、tick は 1s、モデルはどちらでもない。
     インターフェースを非同期化すると RuleBrain/dashboard/E2E が巻き添えなので、`observe()` が
     審議を開始しうる (in-flight ラッチ + `minIntervalMs` の床 = 支出ガード 2 枚)、`decide()` は
@@ -264,7 +264,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     プレアンブル冒頭 2 行の**組**(単独では通る)。かつては `onMeta` 未配線で refusal が
     `stats.unparseable` に化けた (=「モデルが JSON を書けない」と誤読) が、**2026-08-18 のレビューで修正**
     (下記)。付随: **Haiku 4.5 は `output_config.effort` を 400 で拒否**する
-  - **レビューで出た欠陥 3 件 (2026-08-18、同日修正。テスト 328→336 件)**:
+  - **レビューで出た欠陥 3 件 (2026-08-18、同日修正)**:
     - **`ClaudeBrain.reset()` が in-flight の審議を切り離していなかった** — `/demo/start` は
       審議中 (5〜10s 対 15s 床) に来るのが常態。前シナリオの決定が新シナリオに drain され、
       さらに reset がラッチを開けるので**同時 2 本**になっていた (支出ガード 2 枚の 1 枚が無効)。
@@ -284,7 +284,6 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
   - 前段の §12 A/B 実験 (以下) は当初の仮説が検証できなかった件も含めそのまま記録:
   **前段 dry-run 完了 (2026-07-28)**: A/B fixture (RC/AR + QUIET 陰性対照、シード付き、`ab-fixture.ts`) +
   ハーネス dry-run 層 (`ab-harness.ts` — prompt 2 アーム/パーサ/採点器、`askFn` 注入シームで API 接触ゼロ)。
-  テスト 132→140 件。
   **A/B 実行済 (2026-07-28、haiku 66 trial)**。ただし**再分析で当初結論を下方修正** —
   §12 仮説「提示形式が判断を助ける」は**検証できていない**。curated アームでは LLM が
   curator の閾値判定を転記しているだけ (タイル生成と 9/9 完全一致)。測れたのは
@@ -293,7 +292,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
   **対策A実装済 (2026-07-28)**: `snapshot-curator.ts` に Šidák 補正 (spike/dip
   判定ゲートのみ、`spikeZThreshold` は「窓ごと」から「package全体の誤警報予算」に
   再定義)。同じ31 seedで再検証: package単位誤警報率 29%→6.5%。RC(35σ)/AR(21〜23σ)は
-  無傷。テスト 140→145件。残る対策 B〜E は未着手。
+  無傷。残る対策 B〜E は未着手。
   詳細は ROADMAP_BRIEF.md 「再分析 (Opus 5 レビュー)」「今後の対策」「対策A 実装完了」参照
   - **較正の追い込み (2026-08-17)**: 残っていた 6.85% を**連続性補正**で 4.40% (設計値 4.55%) に。
     真因は歪度ではなく**格子の粗さ + 構造的に到達不能な上側の裾**で、Cornish-Fisher が
@@ -301,10 +300,10 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     `sumSq/count` の恒等式で**検出**する (連続データでは自分で切れ、実測ビット同一)。
     Fisher 正確検定 (設計値を一度も超えない) と「到達可能な裾への alpha 配分」(12.60% に悪化) は
     どちらも**測って却下**。副作用として **A/B の fp シード集合が変わった** (旧 9 件中 5 件が
-    誤警報しなくなった) ので、今後の対策B 実行は記録済み 18 trial と比較不能。テスト 276→279件
+    誤警報しなくなった) ので、今後の対策B 実行は記録済み 18 trial と比較不能
 - **L4 ✅ (2026-08-12)** レンズチェーン — 前段の「参照レンズ設計」(2026-07-25、curator を
   `curate(observation, reference)` の二項演算化、SE は `sqrt(var_ref × (1/n_w + 1/n_ref))`) に続き、
-  **格子 (`origin`/`align`) と `group_by` を実装**。テスト 164→194件。
+  **格子 (`origin`/`align`) と `group_by` を実装**。
   - `align:"epoch"` で窓境界がレンズの性質になる (従来は渡されたセグメントの性質だった)。
     格子の読み手 (`liveSpans` / `applyLens`) は `floorToWindow` を共有する
   - `group_by` は**加算的** — `LensResult.windows` の混合ビューは残り、`groups` が増える。
@@ -338,7 +337,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     `gateZ` の除数も `count` → `effectiveN` (無加重では厳密同値、加重では保守側)。
     **Kish はスケール不変なので窓自身の精度はほぼ落ちない** — decay が効くのは pool の
     取り分であって観測窓の SE ではない。無加重の数値・A/B fixture・fp シード集合は全て不変。
-    テスト 279→292件。詳細は ROADMAP_BRIEF.md 2026-08-17 (続々)
+    詳細は ROADMAP_BRIEF.md 2026-08-17 (続々)
   - **レビューで出た欠陥 (同日修正)**: 約 414τ より古い窓は**重みの二乗が underflow** して
     `effectiveN` が 0 に潰れる (`ΣW² === 0` かつ `ΣW > 0`)。標準誤差が Infinity なので
     **絶対発火しない**のに、scorability 判定が `count` だけだったため **Šidák family には
@@ -360,7 +359,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     パスが要らない — 実装が要るのは median/percentile 側だけ。ClaudeBrain の `replayRequest`
     ゲート (`validateObserveParams` を再利用) も自動的にこの値を拒否するようになった
     (`claude-brain.test.ts` の「REJECTS a replayRequest whose lens the rulebook refuses」に
-    `agg_func: median` を追加、`lens.test.ts` に専用 describe を追加)。テスト 336→339件。
+    `agg_func: median` を追加、`lens.test.ts` に専用 describe を追加)。
   - **`agg_func: "median"` 本体 実装済み (2026-08-23)** — 十分統計量からのプールという当初の
     前提を外し、**生値保持** (`WindowStat.values?: number[]`) で実装。sketch (t-digest 等) の
     近似プーリングと違い**厳密**なので、疎化の加重で1度踏んだ「測らずに較正が狂う」罠を踏まない
@@ -381,7 +380,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     そのまま残る — curatorは**判断を拒否するが値は隠さない**。
     ダッシュボード/ClaudeBrainプロンプトへの配線は行っていない
     (curatorが常にtiles:[]を返すため実利用の受け皿がまだ無い、L5の「実読み手」と同種の
-    別作業として意図的に見送り)。テスト 339→390件
+    別作業として意図的に見送り)
     (lens.test.ts 7件、snapshot-curator.test.ts 4件、既存の固定テスト2件を新挙動に更新)。
     詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §C, 2026-08-23
 - **L5** retention 参照ゾーン (疎化) — **疎化は「加重」であって新しい統計ではない**。
@@ -400,7 +399,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     同じ「3 コピーが揃っているつもりでズレていた」形)。`isReferenceUsable(ref)` 1 個に統一し
     3 箇所が同じ述語を呼ぶようにした。実害を再現するテスト追加: 全windowが100%passの
     agent (event数は十分、分散のみゼロ) が `unscoredGroups` ではなく無言のスコア対象に
-    なっていたケースを固定。テスト 339→341件。詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §B
+    なっていたケースを固定。詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §B
   - **L5 本体 実装・較正・本番配線 完了 (2026-08-22)**: 疎化の形状は固定比率 (N個に1個、
     残した1個の `weight` に N)。`LensEvent` に `weight?: number` を追加し、`lens.ts` の
     `aggregate()` で decay の `weightOf(ts)` と**掛け算で合成** (どちらかがどちらかを上書きしない)。
@@ -414,7 +413,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     (decayの短いτ・無疎化の低密度と同じ現象) に合流し悪化。疎化固有の新しい誤較正メカニズムは
     見つからなかった。**本番配線**: `index.ts` に `REFERENCE_WINDOW_MS = 鮮度ゾーン×10`
     (丸め数字)・`REFERENCE_THINNING_RATIO = 2` (較正で安全域と実測された値をそのまま採用)。
-    `$Q` 経由の動的再設定は2026-08-23に実装 (下記)。テスト 341→357件。
+    `$Q` 経由の動的再設定は2026-08-23に実装 (下記)。
   - **参照ゾーンへの初の実読み手 `/control/replay` 実装・実地確認済 (2026-08-22)**:
     手動トリガーの制御エンドポイント (ユーザ判断で、Brain側のreplayRequest拡張ではなくこちら)。
     `replaySpanWithReference()` を `dashboard.ts` に export し、`index.ts` のBrain駆動replay
@@ -422,7 +421,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     ユニットテストだけでなく**本番構成のまま起動した実サーバで約140秒待ち、125〜130秒前
     (120秒鮮度ゾーンを超えた区間) を指定して `referenceUsable:true` が実際に返る**ことを
     確認済み。RuleBrain/ClaudeBrain自体はまだ自発的に120秒超のreplayを要求しない
-    (手動経路のみ、意図的にスコープ外)。テスト 357→360件。詳細は
+    (手動経路のみ、意図的にスコープ外)。詳細は
     ROADMAP_BRIEF.md 2026-08-22 (2)〜(5)
 - **分業アーキテクチャ — rerouteSchema分 実装済み (2026-08-23)** — スコープは
   `rerouteSchema`/`quarantine` のみ。`schemaUpdate` (domain coverage) はcuratorが
@@ -438,7 +437,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
   `ClaudeBrainStats`に`gateRejected`を新設し`rejectedProposals`と分離
   (前者=形式不正、後者=断定したがcuratorの裏が取れなかった)、`/brain`で実走中に見える。
   `renderBrainPrompt`にσ/タイル判定は入れていない (§12の転写の罠、不変条件のまま)。
-  テスト 360→364件。詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §A, 2026-08-23
+  詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §A, 2026-08-23
 - **参照ゾーンの`$Q`動的設定 実装済み (2026-08-23)** — `RetentionBuffer`に
   `getReferenceWindowMs()`/`setReferenceWindowMs()`/`getThinningRatio()`/`setThinningRatio()`
   を新設。**既存のオプトイン境界を維持** — これらのsetterは構築時に参照ゾーンを
@@ -451,9 +450,9 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
   飾りだった、というretention_window_msの過去の教訓と同じ形の修正)。
   `setThinningRatio`は**リアクティブ** — 変更前に既に疎化済みのイベントは
   古い比率の`weight`を保持したまま (再重み付けするとanchor-slide系のバグに
-  なる、`decay_anchor`/`liveSpans`の格子と同じ理由)。テスト 364→379件
+  なる、`decay_anchor`/`liveSpans`の格子と同じ理由)
   (retention-buffer.test.ts 6件、q-retention-binding.test.ts 9件)。
-- **レビューで出た欠陥 4 件 (2026-08-25、同日修正。テスト 390→393 件)** — 直近 4 コミットをまとめてレビューしたもの。
+- **レビューで出た欠陥 4 件 (2026-08-25、同日修正)** — 直近 4 コミットをまとめてレビューしたもの。
   共通の形は **1/2 が「ガードやフラグを正しく作ったが、読み手/呼び出し側が追随していない」**、
   **3/4 が「動く経路しか試していない」**。詳細は ROADMAP_BRIEF.md 2026-08-25
   - **median の書込ゲートと実行時ガードが食い違っていた** — §C の 2 段ガードは個々には正しいが、
@@ -476,6 +475,13 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     併せて SSE 再接続でバッジのシナリオ名が失われる件も修正。実地確認で RC 回帰なし
     (agent-C dip 8.7〜13.1σ、新設 catch は未発火)。**`lensGate` は live では踏めない** —
     `BRAIN_MODE=rule` が既定で median を `$Q[observe]` に書ける HTTP 経路が存在しないため、ユニットテストのみで担保
+- **予定: 高速分類器 (TypeSafe AI / Jev) の Brain 層配置 (2026-09-17 登録・未着手)** — Jev は waitlist 制の
+  early access でアクセス待ち。型付きの確率つき判定を 70〜500ms で返すので、**毎 tick の一次判定
+  (応答種別とレンズを Choice で選ぶ) + 低確信度で ClaudeBrain に escalate** の二段構えにする案。
+  RuleBrain と cadence が揃うので L3 で見送った per-tick 一致率も測れる。
+  **発火 (いつ異常か) は curator に残す** (毎 tick 判定は誤警報を膨らませる)。Choice の選択肢は
+  プロセス状態から生成する (静的 enum だと 2026-08-25 の median と同じ隙間が戻る)。
+  較正の公開証拠が無いので自領域で測ってから使う。詳細は ROADMAP_BRIEF.md 2026-09-17
 - 常設: 実データ派生 (非公開の姉妹プロジェクト) からの還元フィルタ — 「機構を行使/変更する or ドメイン非依存知見を生む」もののみ灯台の実証に数える
 
 ---

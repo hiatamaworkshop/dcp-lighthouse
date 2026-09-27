@@ -197,7 +197,7 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       `reference_thinning_ratio`を配線、`index.ts`の起動時$Q行にも明示。
       テスト 364→379件。
 
-現在テスト計 390 件、全 green。
+現在テスト計 393 件、全 green。
 
 ## BRAIN_MODE
 
@@ -230,7 +230,7 @@ curl -s http://localhost:3001/brain
 **モデル選択の落とし穴 (2026-08-18 実測)**:
 
 - **`claude-opus-5` は現在このプロンプトを拒否する** — `stop_reason:"refusal"`、出力 0 トークン
-  (11/11 再現)。最小プロンプトには正常応答するのでアクセス問題ではない。現状 opus を指定してはいけない。
+  (11/11 再現)。最小プロンプトには正常応答するのでアクセス問題ではない。`index.ts` が起動時に落とすので指定できない。
   かつては refusal が `stats.unparseable` に化けて「モデルが JSON を書けない」と読めたが、
   **`onMeta` を配線したので `/brain` の `refusals` / `lastStopReason` で区別できる** (2026-08-18 修正)
 - **`claude-haiku-4-5` は `output_config.effort` を 400 で拒否**する。指定するなら

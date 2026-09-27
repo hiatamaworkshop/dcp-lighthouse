@@ -206,9 +206,48 @@ Lens ($Q[observe]) fields you may set:
 You may also set "fromTs" and "toTs" on a replayRequest to bound which retained
 interval is re-observed. Use timestamps from the data below.
 
-Respond with ONLY a JSON object, no other text:
-{"decisions": [{"type": "<one of the above>", "reason": "<one or two sentences naming what in the data drove this>", "agentId": "<if applicable>", "domain": "<if applicable>", "lens": {<if replayRequest>}, "fromTs": <optional>, "toTs": <optional>}]}
-Return {"decisions": [{"type": "noAction", "reason": "..."}]} if nothing warrants action.`;
+Return one decision per finding, each with the reason that names what in the data drove it.
+When nothing warrants action, return a single decision of type "noAction".`;
+
+/**
+ * Response schema for `output_config.format`, replacing the prose that used to
+ * ask for "ONLY a JSON object".
+ *
+ * Built from DECISION_TYPES so the enum cannot drift from the types
+ * parseBrainAnswer accepts. Every property is required and the optional ones
+ * are nullable, which is the shape strict schema validation accepts; null
+ * already reads as absent in parseBrainAnswer (`typeof x === "string"` and
+ * friends), so no parsing change is needed.
+ *
+ * `lens` stays an unconstrained object ON PURPOSE: the rulebook for a lens is
+ * validateObserveParams (the 関所, ROADMAP L3), and a second copy of it
+ * expressed as JSON Schema would be a copy that drifts. The schema guarantees
+ * the ENVELOPE; the gate still judges the content.
+ */
+export const BRAIN_ANSWER_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  additionalProperties: false,
+  required: ["decisions"],
+  properties: {
+    decisions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["type", "reason", "agentId", "domain", "lens", "fromTs", "toTs"],
+        properties: {
+          type: { type: "string", enum: [...DECISION_TYPES] },
+          reason: { type: "string" },
+          agentId: { type: ["string", "null"] },
+          domain: { type: ["string", "null"] },
+          lens: { type: ["object", "null"] },
+          fromTs: { type: ["number", "null"] },
+          toTs: { type: ["number", "null"] },
+        },
+      },
+    },
+  },
+};
 
 function mean(xs: number[]): number {
   return xs.length === 0 ? 0 : xs.reduce((a, b) => a + b, 0) / xs.length;

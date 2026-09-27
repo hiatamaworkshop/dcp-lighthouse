@@ -62,6 +62,14 @@ export interface AnthropicAskOptions {
    */
   effort?: "low" | "medium" | "high" | "xhigh" | "max";
   /**
+   * JSON Schema the answer must satisfy (`output_config.format`). Set by the
+   * Brain path, left unset by 対策B: with it the envelope is enforced server
+   * side instead of requested in prose, so an answer can no longer arrive
+   * wrapped in a markdown fence or a sentence of preamble. Unset keeps the
+   * request body byte-identical to the recorded trials.
+   */
+  responseSchema?: Record<string, unknown>;
+  /**
    * Invoked once per completed call with that response's diagnostics. Kept as
    * a side channel rather than widening AskFn's return type on purpose: the
    * seam's value is that ab-harness.ts stays ignorant of who answers it, and
@@ -96,13 +104,21 @@ export function makeAnthropicAsk(opts: AnthropicAskOptions): AskFn {
   const maxTokens = opts.maxTokens ?? 1024;
   const model = opts.model;
 
+  // Built once: both members are per-AskFn, not per-call, and an empty object
+  // must stay unsent (see the spread below).
+  const outputConfig: Anthropic.OutputConfig = {};
+  if (opts.effort !== undefined) outputConfig.effort = opts.effort;
+  if (opts.responseSchema !== undefined) {
+    outputConfig.format = { type: "json_schema", schema: opts.responseSchema };
+  }
+
   return async (prompt: string): Promise<string> => {
     const res = await client.messages.create({
       model,
       max_tokens: maxTokens,
       // Spread rather than pass `undefined`: an absent key keeps the request
       // body byte-identical to the 対策B trials that are already on record.
-      ...(opts.effort !== undefined ? { output_config: { effort: opts.effort } } : {}),
+      ...(Object.keys(outputConfig).length > 0 ? { output_config: outputConfig } : {}),
       messages: [{ role: "user", content: prompt }],
     });
     // Join every text block rather than taking the first: a response split

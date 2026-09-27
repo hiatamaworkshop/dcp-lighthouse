@@ -22,7 +22,7 @@ import { validateObserveParams } from "./lens.js";
 import type { QObserveParams } from "./q-registry.js";
 import { SnapshotCurator } from "./snapshot-curator.js";
 import { RuleBrain } from "./rule-brain.js";
-import { ClaudeBrain } from "./claude-brain.js";
+import { BRAIN_ANSWER_SCHEMA, ClaudeBrain } from "./claude-brain.js";
 import { ShadowBrain } from "./shadow-brain.js";
 import { makeAnthropicAsk } from "./anthropic-ask.js";
 import { DashboardServer, replaySpanWithReference, isReroutedAgentBacked } from "./dashboard.js";
@@ -164,6 +164,17 @@ let brain: ResettableBrain = ruleBrain;
 let brainDiagnostics: (() => unknown) | undefined;
 
 if (BRAIN_MODE === "claude") {
+  // README の「opus を指定してはいけない」をコード側で強制する。claude-opus-5 は
+  // このプロンプトを 11/11 で拒否する (2026-08-18) ので、指定を許すと 15 秒ごとに
+  // 0 トークンの refusal を積むだけのサーバが立ち上がる。不正な BRAIN_MODE と同じく
+  // 起動時に落とす — 走り出してからの警告は「モデルが何も言わなかった」に見える。
+  if (CLAUDE_BRAIN_MODEL === "claude-opus-5") {
+    throw new Error(
+      `CLAUDE_BRAIN_MODEL="claude-opus-5" refuses this Brain prompt ` +
+        `(stop_reason:"refusal", 11/11 on 2026-08-18). ` +
+        `Use claude-sonnet-5 or claude-sonnet-4-6.`,
+    );
+  }
   // Declared before the askFn that reports into it: AskFn returns a bare string
   // by design, so `stop_reason` has to come back through this side channel, and
   // the channel's only possible destination is the Brain being built from it.
@@ -176,6 +187,11 @@ if (BRAIN_MODE === "claude") {
     // the answer — an unbounded think can eat the budget and truncate the JSON.
     maxTokens: 2048,
     effort: "low",
+    // The envelope is the schema's job now, not the preamble's (ROADMAP: the
+    // prose "respond with ONLY a JSON object" was the pre-structured-outputs
+    // form of this). parseBrainAnswer stays as it is: a refusal still arrives
+    // as an empty string and has to be counted, schema or no schema.
+    responseSchema: BRAIN_ANSWER_SCHEMA,
     // Without this a refusal — Opus 5 declines this prompt outright, 11/11 on
     // 2026-08-18 — arrives as an empty string and is counted as "the model
     // could not write JSON". Two very different findings, one indistinguishable
