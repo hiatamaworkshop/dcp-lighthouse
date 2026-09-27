@@ -196,7 +196,7 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       `reference_thinning_ratio`を配線、`index.ts`の起動時$Q行にも明示。
       テスト 364→379件。
 
-現在テスト計 407 件、全 green。
+現在テスト計 409 件、全 green。
 
 ## BRAIN_MODE
 
