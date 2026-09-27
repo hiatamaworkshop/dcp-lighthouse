@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmedian本体まで実装、percentileのみ未着手)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済 (テスト393件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmedian本体まで実装、percentileのみ未着手)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済 (テスト407件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -475,6 +475,15 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     併せて SSE 再接続でバッジのシナリオ名が失われる件も修正。実地確認で RC 回帰なし
     (agent-C dip 8.7〜13.1σ、新設 catch は未発火)。**`lensGate` は live では踏めない** —
     `BRAIN_MODE=rule` が既定で median を `$Q[observe]` に書ける HTTP 経路が存在しないため、ユニットテストのみで担保
+- **実地動作確認レビュー (2026-09-27)** — §10 の AR/CG/RC は通るが、判断側が未較正だった。
+  **生成器は Windows のタイマー粒度で実際には約 32 evt/s** (`/status` は 50 と報告) で、RuleBrain の
+  固定 10pt は 50 evt/s でしか成立せず静穏で 0.37 回/分誤発火していた。生成器を時計基準の正確な rate に、
+  閾値を `baseline − max(delta, 3.5·SE)` に、warmup を単純平均にして **静穏誤発火 0** (検出力は不変)。
+  併せて `/demo/start` の重複に 409、`stop()` がシナリオも中断、`/status` と SSE が稼働状態を返す、
+  事象ゼロの tick を Brain が判定しない、replay の `referenceCoverage` 申告、reroute 再武装のヒステリシス。
+  **未対応 (要判断)**: RC の replay レンズ (1s 窓 × `group_by:agentId`) は静穏でも
+  **package 誤警報 41%** (設計 4.55%、全て dip)。薄い二値窓でガウス近似が下側を甘く見るため。
+  curator の較正は密な単一ストリームでしか測っていなかった。詳細は ROADMAP_BRIEF.md 2026-09-27
 - **予定: 高速分類器 (TypeSafe AI / Jev) の Brain 層配置 (2026-09-17 登録・未着手)** — Jev は waitlist 制の
   early access でアクセス待ち。型付きの確率つき判定を 70〜500ms で返すので、**毎 tick の一次判定
   (応答種別とレンズを Choice で選ぶ) + 低確信度で ClaudeBrain に escalate** の二段構えにする案。

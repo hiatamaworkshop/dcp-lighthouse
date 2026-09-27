@@ -4202,3 +4202,101 @@ early access で現時点ではアクセスが無いため**未着手・着手�
 **事前にできること / できないこと**: 公式の互換実装 `system-one-adapter-python` (MIT) は
 同じ問いの形を OpenAI/Anthropic の LLM で実行する。**問いの形の設計は今でも試せるが、
 速度と RLCD の較正は再現できない**ので、案1 の価値の実測には Jev のアクセスが要る。
+
+---
+
+## 2026-09-27 — 実地動作確認レビュー: 検出基準は通るが、判断側の較正と状態報告が未熟
+
+`npm run dev` で本番構成のまま起動し、AR/CG/RC を実配信で流して SSE をキャプチャ、
+静穏ベースライン 120 秒・制御エンドポイント・opus 起動ガードも叩いた
+(`BRAIN_MODE=claude` は実課金なので回していない)。
+
+### 通ったもの
+
+- 疎通: `/` 200、`/app.js` 200、`/status`、`/brain` (`{"mode":"rule"}`)、未定義パス 404
+- **AR**: regression 開始から **3.8s** で agent-C rerouteSchema (基準 5s 以内)
+- **CG**: **9.1s** で schemaUpdate (auth 24/32、gap 8。基準 10s 以内)
+- **RC**: 途切れず流れているストリームでは replayRequest が `window_ms:1000` + `group_by` +
+  `fromTs/toTs` を載せ、細窓 replay が agent-C の dip を **6.15〜12.35σ** で復元
+- 制御エンドポイントの入力検証 (`factor=0` / `toTs<fromTs` / `window_ms=-3`) と opus 起動ガード
+
+### 発見 (重い順)
+
+1. **primary の RuleBrain が静穏でも誤発火する** — 起動直後に agent-A/B、静穏 120s で agent-C 1 回
+   (85.3% 対 閾値 85.5%)、RC 中に agent-B・agent-A×2 (正解 1 に対し誤り 3)、CG 中に agent-B。
+   規則は「学習 baseline − **固定 10pt** を 2 tick」で、1 tick の事象数と pass 率から決まる
+   標準誤差に比例していない。分散の大きい agent-B (真値 0.88) / agent-D (0.90) ほど当たる。
+   **curator は 4.40% まで較正したが、判断を実際に適用している Brain は一度も較正していない**。
+   §10「シナリオ間は静か」は実地で満たされていない
+2. **`/demo/start` の重複起動が嘘の 200 を返す** — RC 実行中に AR を叩くと `{"started":"AR"}`、
+   `/status` は `RC` のまま。`runScenario` は実行中なら黙って return するが、その前に
+   `brain.reset()` が走る
+3. **`/demo/stop` の状態が外から見えない** — (a) 生成器のタイマーを止めるだけでシナリオの
+   非同期タイムラインは続き `activeScenario` も残る。(b) `/status` は停止後も
+   `eventsPerSec:50` (設定値であって稼働状態ではない)。(c) 止まったストリームから RuleBrain が
+   4 ドメイン全部に schemaUpdate (`0/32 bits covered`) を出す — curator は同時刻に
+   UNUSABLE (=盲目) と正しく記録しており、**沈黙/盲目の区別が Brain 層にだけ無い**。
+   (d) 停止直後に始めた RC は参照が **1 窓・18 事象**なのに `referenceUsable:true` で、
+   agent-C の dip が出なかった (連続ストリームの 2 回目は 6〜12σ)。`isReferenceUsable` は
+   `effectiveN ≥ 3` と分散 > 0 しか見ないので、薄い参照を申告しない
+4. **細窓 × group_by の非標的 dip が replay のたびに出る** — RC 2 回目の replay 3 package 全てに
+   非標的 dip (agent-A 4.15σ/3.54σ、agent-D 4.03σ)。1 窓 12〜14 事象・pass 率 ≈0.96 では
+   ガウス近似の z が下側の裾を約 1 桁甘く見る。記録済みの「薄い窓」残差だが、grouped replay では常態
+5. **reroute が同じ agent に繰り返し出る** — AR の regression 1 回 (30s) に対し agent-C へ
+   13.8s と 38.0s の 2 回。schemaUpdate にはドメイン単位の重複抑止があるが reroute に無い
+6. 小さな点: (a) `replay_snapshot` が、それを要求した `replayRequest` の決定より先に SSE に届く。
+   (b) SKILL.md の RC 期待値 (「3.0〜3.3σ」「例 2.48σ」) が group_by 導入前の値。
+   (c) README L5 節に「`$Q` 経由の動的再設定は未着手」が残る (次の bullet と矛盾)。
+   (d) opus 起動ガードは `claude-opus-5` 完全一致のみ (opus-5-5 の拒否は未測定)。
+   (e) 2026-09-27 に入れた `BRAIN_ANSWER_SCHEMA` (structured outputs) は型検査のみで実 API 未通過
+
+### 所見
+
+1 と 3(c) は根が同じ — **curator が持っている較正と「沈黙か盲目か」の規律が、判断を出す側に
+届いていない**。未実装の分業方針 (ゲートは curator、LLM はレンズ選択) を RuleBrain にも適用すれば
+同じ形で閉じる。片付けは簡単な順 (6 → 2 → 3 → 5 → 1/3(d)/4) に進める
+
+### 対応 (同日) — 簡単な順に片付けた結果
+
+**発見 1 の真因は Brain の規則ではなく、生成器の実レートだった (半分)**。Windows の
+`setInterval(20ms)` は実測 **31.6 回/秒**しか発火せず、1 発火 1 事象の生成器は約 32 evt/s で
+走っていた (`/status` は 50 と報告)。仮想時計・本番窓 (5s 窓 / 1s tick) で RuleBrain の静穏誤発火を
+測ると **50 evt/s: 0.004 回/分、32 evt/s: 0.367 回/分、25 evt/s: 1.262 回/分** — 実地の値と一致。
+固定 10pt は **50 evt/s でしか成立しない較正**だった。既存の静穏テストは tick を独立標本として
+模擬していたので、この脆さを検出できなかった。
+
+| # | 対応 | 実測 |
+|---|---|---|
+| 1 | 生成器を「発火ごと 1 事象」から「時計に対して rate 通り」に (遅延時の追い付きは 1 秒分で打ち切り)。RuleBrain の閾値を `baseline − max(delta, 3.5·√(b(1−b)/n))` に (n はその tick の窓の事象数)。warmup 中の baseline を種値からの EWMA ではなく単純平均に (種値 1 標本が warmup 後も重みの約 6 割を持っていた) | 静穏誤発火 32 evt/s: 0.367 → **0**、25 evt/s: 1.262 → 0.013 回/分。実地の生成速度 **50.0 evt/s**、静穏 90 秒で発火 0。検出力: AR 40/40 検出・平均遅延 3.85s (旧 3.88s)、RC 20/20 |
+| 2 | `/demo/start` はシナリオ実行中なら **409**。`brain.reset()` より前に拒否 | 実地で 409 を確認 |
+| 3a | `stop()` が実行中シナリオも中断する (各 phase の sleep を中断用 promise と race)。真値ログに `cancelled` を残す | 停止直後に `activeScenario:null` |
+| 3b | `getCurrentLoad()` が稼働状態を返す (`running`、停止中は `eventsPerSec:0`)。SSE に `streamRunning`、ダッシュボードの Stop バナーはこれで駆動 | 停止中の `/status` = `{"eventsPerSec":0,"running":false,…}` |
+| 3c | RuleBrain は事象ゼロの tick を判定せず、全カウンタを**凍結** (リセットではない)。AR/RC にも baseline 学習と同じ `MIN_OBS_COUNT` の有効性ゲート | 停止中の判断 0 件 (以前は 4 ドメインに schemaUpdate) |
+| 3d | `SnapshotPackage.referenceCoverage` (要求した参照区間のうち事象があった窓の割合) を `replaySpanWithReference` が付け、0.5 未満なら `index.ts` が `THIN` を警告。**採点は変えていない** (申告であってゲートではない) | stop 直後の RC で `THIN — 6%` |
+| 5 | reroute の再武装にヒステリシス (`REARM_TICKS=3` 連続で健全) | — |
+| 6a | replay パッケージを tick の決定の**後**に送る | — |
+| 6b/c | SKILL.md の RC 期待値を 6〜12σ に、README L5 の矛盾行を削除 | — |
+
+**AR 遅延の裾は以前から 5s を超えていた** — 40 seed で最大 6s (旧 RuleBrain も同じ 6s)。
+§10「5 秒以内」は平均 (3.85s) では満たすが、約 40 回に 1 回は超える。今回の変更による後退ではない。
+
+**未対応: 発見 4 は測ったら想定よりずっと重かった**。本番の生成器・extractor・retention buffer で
+静穏ストリームを作り、RC と同じ形 (約 14s 区間) で replay の package 誤警報率を測った (300 trial):
+
+| レンズ | 誤警報率 (設計 4.55%) |
+|---|---|
+| 1s 窓・混合 | 8.0% |
+| **1s 窓・`group_by:["agentId"]` (RuleBrain の RC 提案そのもの)** | **41.0%** |
+| 2s 窓・`group_by:["agentId"]` | 33.7% |
+
+**全て dip**。pass 率 ≈0.95・1 窓 12 事象前後では失敗数が Poisson 的な長い裾を持ち、ガウス近似の z が
+下側の有意性を過大に見る。curator の 4.40% は密な単一ストリーム (calibration.ts、10s に 1000 事象) で
+測った値で、**RuleBrain が実際に要求するレンズは一度も較正されていなかった**。直すには curator の
+統計モデル (二値格子窓の正確な裾、例えば mid-p の二項検定) に触れ、既存の較正を測り直す必要がある。
+過去に正確検定を「保守的すぎる」として却下した経緯もあるので、方針はユーザ判断とする。
+併せて calibration.ts を agent キー付きの多系列ストリームに拡張し、grouped レンズを較正対象に入れるべき。
+
+6d (opus-5-5 がこのプロンプトを拒否するか) と 6e (`BRAIN_ANSWER_SCHEMA` の実 API 通過) は
+**どちらも実課金の実走でしか確かめられない**ので未着手。
+
+テスト 393 → 407 件 (生成器 6・RuleBrain 6・dashboard 2)、全 green。

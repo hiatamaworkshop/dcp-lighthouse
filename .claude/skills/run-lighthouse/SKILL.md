@@ -24,7 +24,7 @@ cd server && npm run dev    # tsc → node dist/index.js。build 込みなので
 ```bash
 curl -s -o /dev/null -w "%{http_code} %{size_download}\n" http://localhost:3001/
 curl -s -o /dev/null -w "%{http_code} %{size_download}\n" http://localhost:3001/app.js
-curl -s http://localhost:3001/status     # {"eventsPerSec":50,"activeScenario":null}
+curl -s http://localhost:3001/status     # {"eventsPerSec":50,"running":true,"activeScenario":null}
 ```
 
 `/` と `/app.js` は `dashboard/` から `readFileSync` で配信される
@@ -83,9 +83,9 @@ for(const l of lines){
 
 ### RC が正常なときに出るもの
 
-1. `rerouteSchema` — バースト中。`agent-C pass rate ~56% < threshold ~85%`
+1. `rerouteSchema` — バースト中。`agent-C pass rate` が 60〜70% 前後まで落ちて学習 baseline − 10pt を下回る
 2. `replayRequest` — 回復時。`params` に **`window_ms:1000` と `fromTs`/`toTs` が載っていること** (区間指定 replay の配線確認点)
-3. `replay_snapshot` — 細窓再観測の `dip` タイル (実測例: `mean 0.653 vs baseline 0.894, 2.48σ`)
+3. `replay_snapshot` — 細窓・agent 別再観測の `[agent-C]` `dip` タイル (実測例 2026-09-27: `0.143 vs baseline 0.954, 9.90σ`)
 
 `replay_snapshot` は **decisions チャネル**に流れ、`app.js` が `data.type` で
 `renderReplayTiles` に分岐する。ここを `renderDecisions` に渡すと**黙って無視される**
@@ -99,9 +99,15 @@ for(const l of lines){
   (粗窓の判定は "now" にアンカーされていない)。
   **実体は `0.895 vs 0.920` = 実差 0.025 にすぎない** (細窓 replay の実差 0.24 の約 1/10)。
   自分の変更が壊したのではない。2026-07-25 の finding として ROADMAP_BRIEF.md に記録済み
-- **細窓 replay の `dip` は `3.0〜3.3σ` で安定して出る**。希釈は残る (バースト窓の実測
-  0.79〜0.80、agent-C 単独なら 0.20) が閾値からは十分離れている。
-  **dip が出ないなら本物の回帰を疑え**
+- **細窓 replay の `[agent-C]` `dip` は 6〜12σ で出る** (`group_by:["agentId"]` で agent 単独の
+  0.14〜0.55 が見えるため。混合窓だった頃の 3σ 前後ではない)。
+  **dip が出ないなら、まずサーバログの `replay reference THIN` を見る** — `/demo/stop` は
+  baseline ごとストリームを止めるので、直後のシナリオは参照がほぼ空のまま採点され dip が出ない
+  (2026-09-27 に実測)。THIN が出ていないのに出ないなら本物の回帰を疑え
+- **replay に標的以外の agent の `dip` (3.5〜4σ) が混ざるのは既知 (未修正)**。1 窓 12〜14 事象の
+  薄い窓でガウス近似が下側の裾を甘く見る。静穏でも package の 41% で出る (ROADMAP_BRIEF.md 2026-09-27 発見 4)
+- **`/status` の `running:false` は stop 済み**。この間 RuleBrain は判定を凍結するので、決定が
+  出ないのは正常。シナリオを開始すればストリームは再開する
 - **replay タイルに `spike` が出たら疑え**。健全な全 pass 窓が spike として出るのは
   2026-07-25 に修正した比較器バグの症状 (観測窓自身の分散を分母に使うと、有界データでは
   平均が極端な窓ほど分母が縮んで定数の誤警報になる)。再発したら `comparisonSE` を見ろ
