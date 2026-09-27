@@ -52,6 +52,15 @@ const BASELINE_DELTA = 0.10;         // regression threshold = learned baseline 
                                      // value comes from $Q[schema:test_result:v1].baseline_delta
                                      // (ROADMAP L2-1). Kept as a constant so RuleBrain works
                                      // standalone (no registry) in tests and other callers.
+const SE_Z = 3.5;                    // the threshold is also never closer to the baseline than
+                                     // SE_Z standard errors of THIS tick's window:
+                                     //   threshold = baseline − max(delta, SE_Z·√(b(1−b)/n)).
+                                     // A fixed delta is a fixed number of σ only at one event
+                                     // rate. It was tuned at 50 evt/s; the generator actually
+                                     // ran ~32 evt/s on Windows, n per window fell by a third,
+                                     // and quiet false reroutes went from 0.004/min to 0.37/min
+                                     // (2026-09-27 review, finding 1). At 50 evt/s the delta
+                                     // still governs agent-A/C, so AR's latency is unchanged.
 const WARMUP_TICKS = 10;             // ticks observed before an agent's threshold is trusted.
                                      // No AR/RC firing during warmup (no baseline yet).
 const MIN_OBS_COUNT = 3;             // events required in a tick's window for that tick to
@@ -76,6 +85,11 @@ const REGRESSION_TICKS = 2;          // consecutive sub-threshold ticks before A
                                      // the per-agent threshold ~3–4s after onset; 3 ticks would
                                      // exceed §10's 5s criterion. Per-agent threshold makes this
                                      // safe — a low-baseline agent no longer false-fires (异议).
+const REARM_TICKS = 3;               // consecutive healthy ticks before a rerouted agent can
+                                     // be rerouted again. 1 (the old behaviour) let a single
+                                     // noisy tick above threshold in the middle of one 30s
+                                     // regression re-arm it, so AR rerouted agent-C twice for
+                                     // one regression (2026-09-27 review, finding 5).
 const GAP_THRESHOLD = 4;             // bits: gap larger than this triggers CG
 const GAP_TICKS = 5;                 // gap must persist for N ticks
 
@@ -115,6 +129,8 @@ export class RuleBrain implements BrainAdapter {
   private readonly agentRegressionTicks = new Map<string, number>();
   /** Agents for which rerouteSchema has already been emitted (avoid spam). */
   private readonly rerouted = new Set<string>();
+  /** Consecutive healthy ticks per rerouted agent, toward REARM_TICKS. */
+  private readonly agentHealthyTicks = new Map<string, number>();
 
   /** Consecutive tick count per domain with coverage gap. */
   private readonly domainGapTicks = new Map<string, number>();
@@ -147,6 +163,14 @@ export class RuleBrain implements BrainAdapter {
   observe(snapshot: STSnapshot): void {
     this.lastSnapshot = snapshot;
     this.pendingDecisions = [];
+    // A tick with no events at all is blindness, not a reading: every domain
+    // shows 0 bits covered and every rule would judge a stream that is not
+    // there. /demo/stop produces exactly this, and CG answered it with a
+    // schemaUpdate for all four domains (2026-09-27 review, finding 3c) — the
+    // curator, at the same moment, correctly logged "reference UNUSABLE".
+    // Judge nothing and FREEZE every counter (not reset): a gap or a dip that
+    // was building before the outage is still building after it.
+    if (snapshot.agents.every((a) => a.eventCount === 0)) return;
     this.updateBaselines(snapshot.agents);
     this.checkAR(snapshot.agents);
     this.checkCG(snapshot.domains);
@@ -172,6 +196,7 @@ export class RuleBrain implements BrainAdapter {
   reset(): void {
     this.agentRegressionTicks.clear();
     this.rerouted.clear();
+    this.agentHealthyTicks.clear();
     this.domainGapTicks.clear();
     this.gapAlerted.clear();
     this.agentDipTicks.clear();
@@ -201,10 +226,16 @@ export class RuleBrain implements BrainAdapter {
       if (prev === undefined) {
         // First observation: seed the baseline with it.
         this.agentBaseline.set(a.agentId, a.passRate);
+      } else if (obs < WARMUP_TICKS) {
+        // Warmup: a plain running MEAN, not the EWMA. EWMA from a one-tick seed
+        // keeps 0.95^10 ≈ 60% of its weight on that single first reading after
+        // warmup, so one lucky tick set agent-A's baseline at 97.8% (true 95%)
+        // and the threshold 1.7σ from its mean — the boot-time false reroutes
+        // (2026-09-27 review, finding 1).
+        this.agentBaseline.set(a.agentId, prev + (a.passRate - prev) / (obs + 1));
       } else {
-        const warming = obs < WARMUP_TICKS;
-        const healthy = a.passRate >= prev - this.baselineDelta();
-        if (warming || healthy) {
+        const healthy = a.passRate >= this.thresholdAt(prev, a.eventCount);
+        if (healthy) {
           this.agentBaseline.set(
             a.agentId,
             BASELINE_ALPHA * a.passRate + (1 - BASELINE_ALPHA) * prev,
@@ -221,22 +252,32 @@ export class RuleBrain implements BrainAdapter {
    * at THRESHOLD_FLOOR. Returns null while the agent is still in warmup
    * (threshold not yet trusted).
    */
-  private thresholdFor(agentId: string): number | null {
+  private thresholdFor(agentId: string, n: number): number | null {
     if ((this.agentObsCount.get(agentId) ?? 0) < WARMUP_TICKS) return null;
     const baseline = this.agentBaseline.get(agentId);
-    return baseline === undefined ? null : Math.max(baseline - this.baselineDelta(), THRESHOLD_FLOOR);
+    return baseline === undefined ? null : this.thresholdAt(baseline, n);
+  }
+
+  /** baseline − max(delta, SE_Z·SE), floored — see SE_Z for why both terms. */
+  private thresholdAt(baseline: number, n: number): number {
+    const se = Math.sqrt((baseline * (1 - baseline)) / Math.max(n, 1));
+    return Math.max(baseline - Math.max(this.baselineDelta(), SE_Z * se), THRESHOLD_FLOOR);
   }
 
   // ── AR: agent regression ──────────────────────────────────────────────────
 
   private checkAR(agents: AgentStats[]): void {
     for (const a of agents) {
-      const threshold = this.thresholdFor(a.agentId);
+      // Same validity gate as baseline learning: a thin window's pass rate is
+      // not a reading, so it neither advances nor resets the regression count.
+      if (a.eventCount < MIN_OBS_COUNT) continue;
+      const threshold = this.thresholdFor(a.agentId, a.eventCount);
       if (threshold === null) continue; // warmup: no baseline to judge against yet
 
       if (a.passRate < threshold) {
         const ticks = (this.agentRegressionTicks.get(a.agentId) ?? 0) + 1;
         this.agentRegressionTicks.set(a.agentId, ticks);
+        this.agentHealthyTicks.set(a.agentId, 0);
 
         if (ticks >= REGRESSION_TICKS && !this.rerouted.has(a.agentId)) {
           this.rerouted.add(a.agentId);
@@ -252,9 +293,17 @@ export class RuleBrain implements BrainAdapter {
           });
         }
       } else {
-        // Recovery: reset tick count and re-enable future alerts
+        // Recovery: reset the tick count at once, but re-enable future alerts
+        // only after REARM_TICKS healthy ticks in a row (hysteresis).
         this.agentRegressionTicks.set(a.agentId, 0);
-        this.rerouted.delete(a.agentId);
+        if (this.rerouted.has(a.agentId)) {
+          const healthy = (this.agentHealthyTicks.get(a.agentId) ?? 0) + 1;
+          this.agentHealthyTicks.set(a.agentId, healthy);
+          if (healthy >= REARM_TICKS) {
+            this.rerouted.delete(a.agentId);
+            this.agentHealthyTicks.delete(a.agentId);
+          }
+        }
       }
     }
   }
@@ -296,7 +345,8 @@ export class RuleBrain implements BrainAdapter {
 
   private checkRC(agents: AgentStats[]): void {
     for (const a of agents) {
-      const threshold = this.thresholdFor(a.agentId);
+      if (a.eventCount < MIN_OBS_COUNT) continue; // validity gate, as in checkAR
+      const threshold = this.thresholdFor(a.agentId, a.eventCount);
       if (threshold === null) continue; // warmup
 
       const inDipZone =

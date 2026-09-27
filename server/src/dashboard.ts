@@ -216,7 +216,14 @@ export function replaySpanWithReference(
 ): SnapshotPackage {
   const observation = buffer.replay(lens, fromTs, toTs);
   const reference = buffer.replay(lens, fromTs - (toTs - fromTs), fromTs);
-  return curator.curate(observation, reference);
+  const pkg = curator.curate(observation, reference);
+  // How much of the requested reference span actually held events. Only this
+  // function knows the span it asked for (see SnapshotPackage.referenceCoverage).
+  const expected = Math.max(1, Math.ceil((toTs - fromTs) / reference.window_ms));
+  // `windowStart < fromTs`: replay's upper bound is inclusive, so the event
+  // sitting exactly at fromTs opens a window that belongs to the observation.
+  const present = reference.windows.filter((w) => w.count > 0 && w.windowStart < fromTs).length;
+  return { ...pkg, referenceCoverage: Math.min(1, present / expected) };
 }
 
 /**
@@ -417,6 +424,10 @@ export class DashboardServer {
       snapshot: snapshotPkg,
       qHistory: this.registry.rows().slice(-20),
       activeScenario: this.generator.getCurrentLoad().activeScenario,
+      // Whether events are flowing at all. /demo/stop halts the baseline too,
+      // and the dashboard has no other way to tell a stopped stream from a
+      // quiet one (2026-09-27 review, finding 3).
+      streamRunning: this.generator.getCurrentLoad().running,
     };
 
     for (const res of this.snapshotSubs) sseWrite(res, payload);
@@ -601,6 +612,18 @@ export class DashboardServer {
       if (!scenario || !["AR", "CG", "RC"].includes(scenario)) {
         jsonHeaders(res, 400);
         res.end(JSON.stringify({ error: "scenario must be AR|CG|RC" }));
+        return;
+      }
+      // One scenario at a time. runScenario() already refuses a second one by
+      // returning early, but it did so SILENTLY after this handler had reset
+      // the Brain mid-scenario and answered {"started": ...} — a 200 for a
+      // scenario that never ran (2026-09-27 review, finding 2). Refuse here,
+      // before anything is touched. Truthiness, not `!== null`: the field is
+      // what the generator reports, and "no scenario" is its only falsy value.
+      const running = this.generator.getCurrentLoad().activeScenario;
+      if (running) {
+        jsonHeaders(res, 409);
+        res.end(JSON.stringify({ error: `scenario ${running} is still running`, activeScenario: running }));
         return;
       }
       // Reset brain state so each scenario run starts fresh

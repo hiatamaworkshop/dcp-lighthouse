@@ -104,6 +104,8 @@ export class MockStreamGenerator {
   private lateArrivalRate = 0;
   private timingScale = 1.0;
   private activeScenario: string | null = null;
+  /** Ends the running scenario's current phase early; set only while one runs. */
+  private cancelScenario: (() => void) | null = null;
   private scenarioOverrides: Partial<Record<string, Partial<AgentProfile>>> = {};
   private cgExcludeBits: Set<number> = new Set();
   private eventCount = 0;
@@ -111,6 +113,8 @@ export class MockStreamGenerator {
   private scenarioLog: ScenarioLogEntry[] = [];
   private readonly rng: () => number;
   private readonly sleepFn: (ms: number) => Promise<void>;
+  /** The running scenario's cancellation, raced by phase(). */
+  private cancelled: Promise<never> | null = null;
   private readonly clockFn: () => number;
 
   constructor(opts: MockStreamGeneratorOptions = {}) {
@@ -138,28 +142,63 @@ export class MockStreamGenerator {
     return this.scenarioLog;
   }
 
+  /**
+   * Emits `rate` events per second of `clockFn` time, not one event per timer
+   * fire. A timer asked for every 20ms fires every ~31.6ms on Windows (the OS
+   * timer granularity), so one-event-per-fire produced ~32 evt/s while
+   * /status claimed 50 — and every threshold tuned at 50 (RuleBrain's quiet
+   * test, the curator's calibration runs) silently ran on 2/3 of the events it
+   * assumed (2026-09-27 review, finding 1). Each fire now emits however many
+   * events are due since start, so the rate is exact regardless of how the
+   * timer is actually scheduled.
+   */
   start(opts: GeneratorOptions = {}): void {
     if (this.timer) return;
     this.rate = opts.rate ?? 50;
     this.lateArrivalRate = opts.lateArrivalRate ?? 0;
     this.timingScale = opts.timingScale ?? 1.0;
     const intervalMs = 1000 / this.rate;
-    this.timer = setInterval(() => this.tick(), intervalMs);
+    const startedAt = this.clockFn();
+    let emitted = 0;
+    this.timer = setInterval(() => {
+      const due = Math.floor(((this.clockFn() - startedAt) * this.rate) / 1000) - emitted;
+      // Bounded catch-up: after a long event-loop stall, emitting the whole
+      // backlog in one burst would be a spike no real stream has. Drop what is
+      // more than one second late instead.
+      const n = Math.min(due, this.rate);
+      for (let i = 0; i < n; i++) this.tick();
+      emitted += due;
+    }, intervalMs);
   }
 
+  /**
+   * Stops the stream AND the scenario running on it. Clearing only the tick
+   * timer (as this did until 2026-09-27) left the scenario's own timeline
+   * running on sleeps: `activeScenario` stayed set for up to a minute, the
+   * profile flips kept landing on a stream that no longer existed, and the
+   * next /demo/start was refused for a scenario nobody could see.
+   */
   stop(): void {
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
     }
+    this.cancelScenario?.();
   }
 
   setAgentProfile(agentId: string, profile: AgentProfile): void {
     this.profiles[agentId] = profile;
   }
 
-  getCurrentLoad(): { eventsPerSec: number; activeScenario: string | null } {
-    return { eventsPerSec: this.rate, activeScenario: this.activeScenario };
+  /**
+   * What the generator is DOING, not what it was configured to do: a stopped
+   * generator reports 0 events/sec. It used to report the configured rate
+   * regardless, so /status said "50 events/sec" over a dead stream
+   * (2026-09-27 review, finding 3b).
+   */
+  getCurrentLoad(): { eventsPerSec: number; running: boolean; activeScenario: string | null } {
+    const running = this.timer !== null;
+    return { eventsPerSec: running ? this.rate : 0, running, activeScenario: this.activeScenario };
   }
 
   /**
@@ -170,13 +209,27 @@ export class MockStreamGenerator {
     if (this.activeScenario) return;
     this.activeScenario = id;
     this.scenarioLog = [];
+    const cancelled = new Promise<never>((_, reject) => {
+      this.cancelScenario = () => reject(new ScenarioCancelled());
+    });
+    // A rejection nobody is awaiting yet (between phases) must not surface as
+    // an unhandledRejection; phase() races against this same promise.
+    cancelled.catch(() => {});
+    this.cancelled = cancelled;
     try {
       switch (id) {
         case "AR": await this.runAR(); break;
         case "CG": await this.runCG(); break;
         case "RC": await this.runRC(); break;
       }
+    } catch (err) {
+      if (!(err instanceof ScenarioCancelled)) throw err;
+      // Recorded in the truth log: a harness comparing detections against it
+      // must not score the phases that never happened.
+      this.scenarioLog.push({ phase: "cancelled", ts: this.clockFn() });
     } finally {
+      this.cancelScenario = null;
+      this.cancelled = null;
       this.activeScenario = null;
       this.scenarioOverrides = {};
       this.cgExcludeBits.clear();
@@ -185,14 +238,25 @@ export class MockStreamGenerator {
     }
   }
 
+  /**
+   * One timed phase of a scenario: the injected sleep, cut short by stop().
+   * Every phase goes through here, so a stop always lands between two profile
+   * writes and never leaves a half-applied perturbation behind (the finally
+   * in runScenario restores the profiles either way).
+   */
+  private phase(ms: number): Promise<void> {
+    const wait = this.sleepFn(ms);
+    return this.cancelled === null ? wait : Promise.race([wait, this.cancelled]);
+  }
+
   // ── Scenario AR: agent regression ─────────────────────────────────────────
   // agent-C pass rate drops from 95% → 70% for 30s, then recovers
 
   private async runAR(): Promise<void> {
-    await this.sleepFn(10_000 * this.timingScale);  // 10s baseline before regression
+    await this.phase(10_000 * this.timingScale);  // 10s baseline before regression
     this.profiles["agent-C"] = { ...this.profiles["agent-C"], passRate: 0.70 };
     this.scenarioLog.push({ phase: "regression_start", ts: Date.now(), agentId: "agent-C", passRate: 0.70 });
-    await this.sleepFn(30_000 * this.timingScale);  // 30s regression window
+    await this.phase(30_000 * this.timingScale);  // 30s regression window
     this.profiles["agent-C"] = { ...DEFAULT_PROFILES["agent-C"] };
     this.scenarioLog.push({ phase: "regression_end", ts: Date.now(), agentId: "agent-C", passRate: DEFAULT_PROFILES["agent-C"].passRate });
   }
@@ -202,7 +266,7 @@ export class MockStreamGenerator {
 
   private async runCG(): Promise<void> {
     for (let b = 16; b <= 23; b++) this.cgExcludeBits.add(b);
-    await this.sleepFn(30_000 * this.timingScale);
+    await this.phase(30_000 * this.timingScale);
     this.cgExcludeBits.clear();
   }
 
@@ -212,14 +276,14 @@ export class MockStreamGenerator {
 
   private async runRC(): Promise<void> {
     this.scenarioLog.push({ phase: "baseline", ts: Date.now(), agentId: "agent-C", passRate: DEFAULT_PROFILES["agent-C"].passRate });
-    await this.sleepFn(5_000 * this.timingScale);   // 5s quiet lead-in
+    await this.phase(5_000 * this.timingScale);   // 5s quiet lead-in
     // 2s burst: agent-C fail rate spikes to 80%
     this.profiles["agent-C"] = { ...this.profiles["agent-C"], passRate: 0.20 };
     this.scenarioLog.push({ phase: "burst_start", ts: Date.now(), agentId: "agent-C", passRate: 0.20 });
-    await this.sleepFn(2_000 * this.timingScale);
+    await this.phase(2_000 * this.timingScale);
     this.profiles["agent-C"] = { ...DEFAULT_PROFILES["agent-C"] };
     this.scenarioLog.push({ phase: "burst_end", ts: Date.now(), agentId: "agent-C", passRate: DEFAULT_PROFILES["agent-C"].passRate });
-    await this.sleepFn(53_000 * this.timingScale);  // remainder of 60s coarse window
+    await this.phase(53_000 * this.timingScale);  // remainder of 60s coarse window
     this.scenarioLog.push({ phase: "scenario_end", ts: Date.now() });
   }
 
@@ -288,6 +352,13 @@ export class MockStreamGenerator {
 
   private broadcast(event: TestEvent): void {
     for (const l of this.listeners) l(event);
+  }
+}
+
+/** Thrown out of a scenario's current phase by stop(). */
+class ScenarioCancelled extends Error {
+  constructor() {
+    super("scenario cancelled by stop()");
   }
 }
 

@@ -129,6 +129,22 @@ export interface SnapshotPackage {
    */
   referenceUsable: boolean;
   /**
+   * Fraction (0–1) of the reference span's windows that actually held events.
+   * Set only by callers that know the span they ASKED for (see
+   * replaySpanWithReference in dashboard.ts) — the curator sees the windows it
+   * was handed, not the request, so it cannot tell a sparse reference from a
+   * short one.
+   *
+   * A declaration, not a gate. `referenceUsable` answers "can any comparison
+   * be made"; this answers "how much of the yardstick was there". They came
+   * apart in practice: an RC run started right after /demo/stop scored its
+   * replay against a reference of 1 window out of 16 (18 events), reported
+   * referenceUsable=true, and the injected dip did not appear (2026-09-27
+   * review, finding 3d). Gating on it would change the calibrated scoring
+   * path, so for now it is only reported — and logged by index.ts when low.
+   */
+  referenceCoverage?: number;
+  /**
    * Group labels that were observed but could not be scored, because the
    * reference lens had no same-group population to compare them against (the
    * group is new, or it fell silent during the reference span).

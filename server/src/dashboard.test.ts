@@ -20,6 +20,7 @@ import {
   liveSpans,
   maxCoarseWindowMs,
   isReroutedAgentBacked,
+  replaySpanWithReference,
 } from "./dashboard.js";
 import { RetentionBuffer } from "./retention-buffer.js";
 import { SnapshotCurator } from "./snapshot-curator.js";
@@ -543,6 +544,27 @@ test("/demo/start revives the generator's tick timer after a prior /demo/stop", 
   }
 });
 
+test("/demo/start refuses (409) while a scenario is running, and touches nothing", async () => {
+  // 2026-09-27 review, finding 2: starting AR during RC answered {"started":"AR"}
+  // while RC kept running, because runScenario() returns early on a busy
+  // generator — AFTER the handler had already reset the Brain mid-scenario.
+  const calls: string[] = [];
+  const generator = {
+    getCurrentLoad: () => ({ eventsPerSec: 50, activeScenario: "RC" }),
+    start: () => calls.push("start"),
+    runScenario: async () => calls.push("runScenario"),
+  };
+  const { base, close } = await startTestServer(generator);
+  try {
+    const res = await fetch(`${base}/demo/start?scenario=AR`);
+    assert.equal(res.status, 409);
+    assert.deepEqual(await res.json(), { error: "scenario RC is still running", activeScenario: "RC" });
+    assert.deepEqual(calls, [], "neither start() nor runScenario() may run");
+  } finally {
+    await close();
+  }
+});
+
 // ── isReroutedAgentBacked: the §A division-of-labor gate (ROADMAP_BRIEF.md 2026-08-18 (5) §A, 2026-08-23) ──
 
 type AgentEvent = { ts: number; value: number; agentId: string };
@@ -615,4 +637,30 @@ test("isReroutedAgentBacked: an unscorable statistic never reads as backed (2026
   // not the data — which is exactly what makes the false above a misattribution
   // if it were reported as "the model's aim was off".
   assert.equal(isReroutedAgentBacked(buf, curator, COARSE_LENS, "agent-C", GATE_NOW), true);
+});
+
+// ── referenceCoverage (2026-09-27 review, finding 3d) ────────────────────────
+
+test("replaySpanWithReference declares how much of the reference span held events", () => {
+  // Reproduces the RC-after-/demo/stop shape: the stream restarted a second
+  // before the replay's fromTs, so the equal-length reference span before it
+  // is empty except for its last window — "usable", but barely there.
+  const T0 = 1_000_000;
+  const SPAN = 16_000;
+  const curator = new SnapshotCurator({ spikeZThreshold: 2.0 });
+  const lens = { window_ms: 1_000, align: "epoch" as const };
+
+  const sparse = new RetentionBuffer<LensEvent>((raw) => raw, { retentionWindowMs: 120_000 });
+  for (let ts = T0 + SPAN - 1_000; ts < T0 + 2 * SPAN; ts += 20) {
+    sparse.observe({ ts, value: ts % 7 === 0 ? 0 : 1 }, "test_result:v1");
+  }
+  const thin = replaySpanWithReference(sparse, curator, lens, T0 + SPAN, T0 + 2 * SPAN);
+  assert.equal(thin.referenceUsable, true, "the old flag alone calls this usable");
+  assert.equal(thin.referenceCoverage, 1 / 16, "…while only 1 of 16 reference windows held events");
+
+  const full = new RetentionBuffer<LensEvent>((raw) => raw, { retentionWindowMs: 120_000 });
+  for (let ts = T0; ts < T0 + 2 * SPAN; ts += 20) {
+    full.observe({ ts, value: ts % 7 === 0 ? 0 : 1 }, "test_result:v1");
+  }
+  assert.equal(replaySpanWithReference(full, curator, lens, T0 + SPAN, T0 + 2 * SPAN).referenceCoverage, 1);
 });

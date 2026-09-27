@@ -213,23 +213,28 @@ describe("RuleBrain — replay interval bounds (ROADMAP L2-2)", () => {
 // ── CG rule ──────────────────────────────────────────────────────────────────
 
 describe("RuleBrain — CG rule", () => {
+  // Coverage is only a reading when events are flowing: these snapshots carry
+  // one live agent. `agents: []` is the shape of a STOPPED stream, which
+  // RuleBrain deliberately does not judge (see "a stopped stream is blindness").
+  const live = [makeAgent("agent-A", 0.95)];
+
   test("schemaUpdate fires after GAP_TICKS above gap threshold", () => {
     const brain = new RuleBrain();
-    const snap = makeSnapshot([], [makeDomain("auth", 8)]);  // gap=8 > GAP_THRESHOLD=4
+    const snap = makeSnapshot(live, [makeDomain("auth", 8)]);  // gap=8 > GAP_THRESHOLD=4
     const decisions = feedN(brain, snap, 5);
     assert.ok(decisions.some((d) => d.type === "schemaUpdate"), "schemaUpdate should fire");
   });
 
   test("schemaUpdate does not fire for small gap", () => {
     const brain = new RuleBrain();
-    const snap = makeSnapshot([], [makeDomain("auth", 2)]);  // gap=2 <= GAP_THRESHOLD=4
+    const snap = makeSnapshot(live, [makeDomain("auth", 2)]);  // gap=2 <= GAP_THRESHOLD=4
     const decisions = feedN(brain, snap, 10);
     assert.equal(decisions.filter((d) => d.type === "schemaUpdate").length, 0);
   });
 
   test("schemaUpdate fires for correct domain", () => {
     const brain = new RuleBrain();
-    const snap = makeSnapshot([], [makeDomain("auth", 8), makeDomain("payment", 1)]);
+    const snap = makeSnapshot(live, [makeDomain("auth", 8), makeDomain("payment", 1)]);
     const decisions = feedN(brain, snap, 5);
     const d = decisions.find((d) => d.type === "schemaUpdate");
     assert.ok(d, "schemaUpdate should fire");
@@ -456,5 +461,65 @@ describe("RuleBrain — RC calibration (noise guard + AR overlap fix)", () => {
       allDecisions.filter((d) => d.type === "replayRequest").length, 0,
       "production-noise baseline should not trigger replayRequest",
     );
+  });
+});
+
+// ── Blind ticks and re-arm hysteresis (2026-09-27 review, findings 3c / 5) ───
+
+describe("RuleBrain — a stopped stream is blindness, not a reading", () => {
+  const allGapped = ["auth", "payment", "ui", "utils"].map((d) => makeDomain(d, 32));
+
+  test("no events at all: no schemaUpdate even with every domain at 0 bits (agents: [])", () => {
+    const brain = new RuleBrain();
+    const decisions = feedN(brain, makeSnapshot([], allGapped), 20);
+    assert.deepEqual(decisions, [], "a dead stream must not be read as four coverage gaps");
+  });
+
+  test("no events at all: same when agents are listed with eventCount 0", () => {
+    const brain = new RuleBrain();
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
+    const dead = makeSnapshot([makeAgent("agent-C", 0, 0)], allGapped);
+    assert.deepEqual(feedN(brain, dead, 20), []);
+  });
+
+  test("blind ticks FREEZE a building gap count rather than reset it", () => {
+    const brain = new RuleBrain();
+    const live = makeSnapshot([makeAgent("agent-A", 0.95)], [makeDomain("auth", 8)]);
+    const dead = makeSnapshot([], [makeDomain("auth", 32)]);
+    assert.deepEqual(feedN(brain, live, 3), []);
+    assert.deepEqual(feedN(brain, dead, 10), []);
+    assert.deepEqual(feedN(brain, live, 1), [], "4th live gap tick: not yet (GAP_TICKS=5)");
+    const fifth = feedN(brain, live, 1);
+    assert.equal(fifth.length, 1, "5th live gap tick fires: the outage neither counted nor erased");
+    assert.equal(fifth[0].type, "schemaUpdate");
+  });
+
+  test("thin ticks (eventCount < MIN_OBS_COUNT) do not advance a regression", () => {
+    const brain = new RuleBrain();
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
+    const thinLow = makeSnapshot([makeAgent("agent-C", 0.0, 2)]); // 0/2 is not a reading
+    assert.equal(feedN(brain, thinLow, 10).filter((d) => d.type === "rerouteSchema").length, 0);
+  });
+});
+
+describe("RuleBrain — reroute re-arms only after REARM_TICKS healthy ticks", () => {
+  const low = makeSnapshot([makeAgent("agent-C", 0.70)]);
+  const high = makeSnapshot([makeAgent("agent-C", 0.95)]);
+  const reroutes = (ds: ReturnType<RuleBrain["decide"]>) => ds.filter((d) => d.type === "rerouteSchema").length;
+
+  test("one noisy healthy tick inside a regression does not re-arm it", () => {
+    const brain = new RuleBrain();
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
+    assert.equal(reroutes(feedN(brain, low, 3)), 1);
+    feedN(brain, high, 1); // a single tick above threshold mid-regression
+    assert.equal(reroutes(feedN(brain, low, 5)), 0, "same regression, same reroute — not a second one");
+  });
+
+  test("a real recovery (REARM_TICKS healthy ticks) re-arms it", () => {
+    const brain = new RuleBrain();
+    warmup(brain, [makeAgent("agent-C", 0.95)]);
+    feedN(brain, low, 3);
+    feedN(brain, high, 3);
+    assert.equal(reroutes(feedN(brain, low, 3)), 1);
   });
 });

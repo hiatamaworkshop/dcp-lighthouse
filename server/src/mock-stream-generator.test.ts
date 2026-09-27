@@ -168,3 +168,82 @@ describe("MockStreamGenerator — profile overrides during scenarios", () => {
     }
   });
 });
+
+// ── stop() and reported state (2026-09-27 review, findings 3a/3b) ─────────────
+
+describe("MockStreamGenerator — stop() ends the scenario, getCurrentLoad tells the truth", () => {
+  // A phase that never ends on its own: only stop() can finish the scenario.
+  const never: (ms: number) => Promise<void> = () => new Promise<void>(() => {});
+
+  test("stop() cancels a running scenario instead of leaving its timeline asleep", async () => {
+    const gen = new MockStreamGenerator({ sleepFn: never });
+    gen.start({ rate: 1000 });
+    const run = gen.runScenario("RC");
+    assert.equal(gen.getCurrentLoad().activeScenario, "RC");
+
+    gen.stop();
+    await run; // would hang forever before the fix
+
+    assert.equal(gen.getCurrentLoad().activeScenario, null);
+    const phases = gen.getScenarioLog().map((e: ScenarioLogEntry) => e.phase);
+    assert.deepEqual(phases, ["baseline", "cancelled"],
+      "the truth log must say the scenario was cut short, not pretend it completed");
+  });
+
+  test("a scenario can start again right after a stop", async () => {
+    const gen = new MockStreamGenerator({ sleepFn: never });
+    const first = gen.runScenario("AR");
+    gen.stop();
+    await first;
+    const second = gen.runScenario("CG");
+    assert.equal(gen.getCurrentLoad().activeScenario, "CG");
+    gen.stop();
+    await second;
+  });
+
+  test("reports 0 events/sec and running:false once stopped, not the configured rate", () => {
+    const gen = new MockStreamGenerator();
+    assert.deepEqual(gen.getCurrentLoad(), { eventsPerSec: 0, running: false, activeScenario: null });
+    gen.start({ rate: 50 });
+    assert.deepEqual(gen.getCurrentLoad(), { eventsPerSec: 50, running: true, activeScenario: null });
+    gen.stop();
+    assert.deepEqual(gen.getCurrentLoad(), { eventsPerSec: 0, running: false, activeScenario: null });
+  });
+
+  test("stop() with no scenario running is harmless", () => {
+    const gen = new MockStreamGenerator();
+    gen.stop();
+    gen.stop();
+    assert.equal(gen.getCurrentLoad().running, false);
+  });
+});
+
+// ── Emission rate follows the clock, not the timer (2026-09-27 review, finding 1) ──
+
+describe("MockStreamGenerator — rate is exact regardless of timer granularity", () => {
+  const realWait = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+  test("one second of clock time yields exactly `rate` events", async () => {
+    let now = 0;
+    const gen = new MockStreamGenerator({ rng: seededRng(1), clockFn: () => now });
+    let count = 0;
+    gen.onEvent(() => count++);
+    gen.start({ rate: 50 });
+    now = 1000;           // however many times the timer fires, 1s of clock is due
+    await realWait(80);   // let it fire (repeatedly) on real time
+    gen.stop();
+    assert.equal(count, 50, "a 20ms timer that really fires every ~31ms used to give ~32");
+  });
+
+  test("catch-up after a stall is bounded to one second of events", async () => {
+    let now = 0;
+    const gen = new MockStreamGenerator({ rng: seededRng(1), clockFn: () => now });
+    let count = 0;
+    gen.onEvent(() => count++);
+    gen.start({ rate: 50 });
+    now = 5000;           // a 5s stall: 250 events due
+    await realWait(80);
+    gen.stop();
+    assert.equal(count, 50, "the backlog beyond one second is dropped, not burst out");
+  });
+});

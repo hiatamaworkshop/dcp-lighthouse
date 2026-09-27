@@ -281,6 +281,11 @@ setInterval(() => {
   const snapshot = adapter.snapshot();
   brain.observe(snapshot);
   const decisions = brain.decide();
+  // Replay packages are sent AFTER this tick's decisions (see the broadcast at
+  // the bottom): a replay is the answer to a replayRequest, and the SSE
+  // decisions channel used to deliver the answer before the request that
+  // asked for it (2026-09-27 review, finding 6a).
+  const replays: ReturnType<typeof replaySpanWithReference>[] = [];
 
   if (decisions.length > 0) {
     for (const d of decisions) {
@@ -361,9 +366,19 @@ setInterval(() => {
             `[brain] replay reference UNUSABLE (no comparison possible) — ` +
             `requested [${fromTs}, ${toTs}]`,
           );
+        } else if (pkg.referenceCoverage !== undefined && pkg.referenceCoverage < 0.5) {
+          // Usable is not the same as adequate: a reference that is mostly
+          // empty (the stream was stopped, or had only just started) scores
+          // the replay against a handful of events. Say so — an empty tile
+          // list here is weak evidence of quiet, not strong evidence of it.
+          // 0.5 only decides when to log; nothing is scored differently.
+          console.warn(
+            `[brain] replay reference THIN — ${(pkg.referenceCoverage * 100).toFixed(0)}% of ` +
+              `its windows held events (${pkg.globalStats.eventCount} events) — requested [${fromTs}, ${toTs}]`,
+          );
         }
         console.log(`[brain] replay snapshot: ${pkg.tiles.length} tiles, span ${JSON.stringify(pkg.spanMs)}`);
-        dashboard.broadcastReplay(pkg);
+        replays.push(pkg);
       }
     }
   }
@@ -426,6 +441,7 @@ setInterval(() => {
   }
 
   dashboard.broadcast(snapshot, decisions);
+  for (const pkg of replays) dashboard.broadcastReplay(pkg);
 }, TICK_MS);
 
 // ── Start ─────────────────────────────────────────────────────────────────────

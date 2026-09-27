@@ -50,6 +50,9 @@ function renderSnapshot(data) {
   renderTiles(data.snapshot);
   renderQHistory(data.qHistory ?? []);
   renderActiveScenario(data.activeScenario ?? null);
+  // `=== false`, not falsy: a server that predates the field sends nothing,
+  // and that must not read as "stopped".
+  stopReminder.hidden = data.streamRunning !== false;
 }
 
 // ── Active scenario indicator ────────────────────────────────────────────────
@@ -57,13 +60,9 @@ function renderSnapshot(data) {
 let lastActiveScenario;
 
 function renderActiveScenario(activeScenario) {
-  // Retracting the Stop banner is NOT part of the "did the scenario change?"
-  // diff: pressing Stop while nothing is running leaves activeScenario at null
-  // on both sides of the comparison, so a banner hidden only after the early
-  // return below would stay up until a page reload. It answers "is a scenario
-  // still running", which every tick can restate cheaply.
-  if (!activeScenario) stopReminder.hidden = true;
-  // Restated every tick for the same reason, plus one of its own: the SSE
+  // The Stop banner is driven by `streamRunning` in renderSnapshot, not here:
+  // it answers "is the stream stopped", which a scenario change cannot tell.
+  // The badge text is restated every tick because the SSE
   // open handler resets this text to a bare "live" on every reconnect, so a
   // label written only on CHANGE would lose the running scenario's name for
   // the rest of that scenario. Only the TEXT is ours — the `running` class is
@@ -188,18 +187,34 @@ function renderQHistory(rows) {
 // ── Scenario controls ────────────────────────────────────────────────────────
 
 function runScenario(id) {
-  fetch(`${API}/demo/start?scenario=${id}`).catch(console.error);
+  fetch(`${API}/demo/start?scenario=${id}`)
+    .then(async (res) => {
+      // 409 = another scenario is still running. Say so: the click would
+      // otherwise look like it did nothing.
+      if (res.ok) return;
+      const body = await res.json().catch(() => ({}));
+      showNotice(body.error ?? `could not start ${id} (HTTP ${res.status})`);
+    })
+    .catch(console.error);
+}
+
+const notice = document.getElementById("notice");
+let noticeTimer;
+
+function showNotice(text) {
+  notice.textContent = text;
+  notice.hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { notice.hidden = true; }, 4000);
 }
 
 const stopBtn = document.getElementById("stop-btn");
 const stopReminder = document.getElementById("stop-reminder");
 
 function stopGen() {
-  // /demo/stop only clears the generator's tick timer — if a scenario is
-  // still running its activeScenario flag doesn't clear until the scenario's
-  // own async run finishes naturally, so the RC/AR/CG button can stay
-  // highlighted after Stop. Give immediate feedback here rather than leaving
-  // the click looking like it did nothing.
+  // /demo/stop halts the whole stream (baseline included) and cancels any
+  // running scenario. The banner goes up now for immediate feedback; the next
+  // snapshot's `streamRunning` keeps it up, and a scenario start retracts it.
   stopBtn.disabled = true;
   stopBtn.textContent = "Stopping…";
   stopReminder.hidden = false;
