@@ -39,7 +39,7 @@ const T0 = 2_000_000;
  * the property that lets a calibration figure be compared across commits at
  * all: an unseeded stream would make every run a different experiment.
  */
-function mulberry32(seed: number): () => number {
+export function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
     a = (a + 0x6d2b79f5) | 0;
@@ -169,7 +169,7 @@ function buildTrial(
 }
 
 /** Does a package claim an anomaly? Baseline tiles are not claims. */
-function hasAnomalyTile(tiles: ReadonlyArray<{ shapeTag: string }>): boolean {
+export function hasAnomalyTile(tiles: ReadonlyArray<{ shapeTag: string }>): boolean {
   return tiles.some((t) => t.shapeTag !== "baseline");
 }
 
