@@ -7,3 +7,4 @@ CLAUDE.local.md
 server/server.log
 server/strategy-b-*.log
 server/strategy-b-*.jsonl
+data/

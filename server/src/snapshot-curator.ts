@@ -813,7 +813,7 @@ function isScorable(w: WindowStat): boolean {
  * secretly says "median".
  */
 function hasMedianWindows(result: LensResult): boolean {
-  return result.windows.some((w) => w.aggFunc === "median");
+  return result.windows.some((w) => w.aggFunc !== undefined);
 }
 
 /**

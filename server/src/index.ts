@@ -144,10 +144,13 @@ const CLAUDE_BRAIN_INTERVAL_MS = Number(process.env.CLAUDE_BRAIN_INTERVAL_MS ?? 
  */
 function refuseUnrunnableLens(lens: QObserveParams): void {
   validateObserveParams(lens);
-  if (lens.agg_func === "median" && buffer.getThinningRatio() !== undefined) {
+  if (
+    (lens.agg_func === "median" || lens.agg_func === "percentile") &&
+    buffer.getThinningRatio() !== undefined
+  ) {
     throw new RangeError(
-      `agg_func "median" is unavailable in this process: its retention buffer thins the ` +
-        `reference zone (ratio ${buffer.getThinningRatio()}), and weighted median is not implemented`,
+      `agg_func "${lens.agg_func}" is unavailable in this process: its retention buffer thins the ` +
+        `reference zone (ratio ${buffer.getThinningRatio()}), and weighted ${lens.agg_func} is not implemented`,
     );
   }
 }

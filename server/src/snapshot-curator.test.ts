@@ -1222,6 +1222,17 @@ describe("SnapshotCurator — agg_func: median is unscorable, not silently score
     assert.deepEqual(pkg.tiles, []);
   });
 
+  it("agg_func: percentile is refused the same way as median", () => {
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+    const pctLens = { window_ms: 1000, agg_func: "percentile", agg_percentile: 95 };
+    const pkg = curator.curate(
+      applyLens(medEvents(50, 0), pctLens),
+      applyLens(medEvents(50, 0), pctLens),
+    );
+    assert.equal(pkg.aggFuncUnscored, true);
+    assert.deepEqual(pkg.tiles, []);
+  });
+
   it("a plain mean lens is entirely unaffected: no aggFuncUnscored field at all", () => {
     const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
     const observation = applyLens(medEvents(50, 0), { window_ms: 1000 });

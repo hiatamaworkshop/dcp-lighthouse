@@ -390,6 +390,89 @@ describe("applyLens — agg_func: median (§C body, raw-value retention)", () =>
   });
 });
 
+// ── agg_func: "percentile" (raw-value retention shared with median) ─────────
+
+describe("applyLens — agg_func: percentile", () => {
+  const p = (agg_percentile: number | undefined, extra: Record<string, unknown> = {}) => ({
+    window_ms: 1000,
+    agg_func: "percentile",
+    agg_percentile,
+    ...extra,
+  });
+
+  it("computes a linearly interpolated percentile and tags the window with it", () => {
+    // 1..5 → p90 sits at index 3.6 → 4 + 0.6 × (5 − 4) = 4.6
+    const r = applyLens([ev(0, 1), ev(0, 2), ev(0, 3), ev(0, 4), ev(0, 5)], p(90));
+    const w = r.windows[0];
+    assert.ok(Math.abs(w.mean - 4.6) < 1e-12);
+    assert.equal(w.aggFunc, "percentile");
+    assert.equal(w.percentile, 90);
+    assert.deepEqual(w.values, [1, 2, 3, 4, 5]);
+  });
+
+  it("p50 agrees with the median on the same values (odd and even counts)", () => {
+    for (const vals of [[1, 2, 3, 4, 100], [1, 2, 3, 4]]) {
+      const events = vals.map((v) => ev(0, v));
+      const med = applyLens(events, { window_ms: 1000, agg_func: "median" }).windows[0].mean;
+      assert.equal(applyLens(events, p(50)).windows[0].mean, med);
+    }
+  });
+
+  it("downsample_factor pools EXACTLY via raw values and keeps the percentile tag", () => {
+    const events = [
+      ev(0, 1), ev(0, 2), ev(0, 3),
+      ev(1000, 10), ev(1000, 20), ev(1000, 30), ev(1000, 40),
+    ];
+    const r = applyLens(events, p(75, { downsample_factor: 2, align: "epoch" }));
+    assert.equal(r.windows.length, 1);
+    const w = r.windows[0];
+    // sorted [1,2,3,10,20,30,40], index 4.5 → 20 + 0.5 × (30 − 20)
+    assert.equal(w.mean, 25);
+    assert.equal(w.count, 7);
+    assert.equal(w.aggFunc, "percentile");
+    assert.equal(w.percentile, 75);
+  });
+
+  it("group_by aggregates each group independently", () => {
+    const events = [
+      kev(0, 1, { agentId: "A" }), kev(0, 5, { agentId: "A" }), kev(0, 9, { agentId: "A" }),
+      kev(0, 100, { agentId: "B" }), kev(0, 200, { agentId: "B" }), kev(0, 300, { agentId: "B" }),
+    ];
+    const r = applyLens(events, p(50, { group_by: ["agentId"] }));
+    assert.equal(r.groups!.find((g) => g.label === "A")!.windows[0].mean, 5);
+    assert.equal(r.groups!.find((g) => g.label === "B")!.windows[0].mean, 200);
+  });
+
+  it("requires agg_percentile strictly inside (0, 100) — a fraction like 0.95 is a valid p0.95, but 0/100/NaN/absent are refused", () => {
+    for (const bad of [undefined, 0, 100, -1, 101, NaN, Infinity]) {
+      assert.throws(() => applyLens([ev(0, 1)], p(bad)), /agg_percentile/, String(bad));
+    }
+    assert.doesNotThrow(() => applyLens([ev(0, 1)], p(0.95)));
+  });
+
+  it("rejects agg_percentile without agg_func: percentile, rather than ignoring it", () => {
+    assert.throws(
+      () => applyLens([ev(0, 1)], { window_ms: 1000, agg_percentile: 95 }),
+      /agg_percentile/,
+    );
+    assert.throws(
+      () => applyLens([ev(0, 1)], { window_ms: 1000, agg_func: "median", agg_percentile: 95 }),
+      /agg_percentile/,
+    );
+  });
+
+  it("refuses decay, and refuses thinned (weighted) events, exactly as median does", () => {
+    assert.throws(
+      () => applyLens([ev(0, 1)], p(95, { decay: "step(cutoff=now-60s)", decay_anchor: "now" })),
+      /percentile.*decay|decay.*percentile/,
+    );
+    assert.throws(
+      () => applyLens([{ ts: 0, value: 1, weight: 5 }, ev(0, 2)], p(95)),
+      /percentile.*weight|weight.*percentile/,
+    );
+  });
+});
+
 describe("parseDecay — MODEL.md §228 syntax", () => {
   it("parses the step form, with or without the symbolic `now-` prefix", () => {
     assert.deepEqual(parseDecay("step(cutoff=now-60s)"), { kind: "step", cutoffMs: 60_000 });

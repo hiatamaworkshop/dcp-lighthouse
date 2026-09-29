@@ -143,6 +143,12 @@ export interface QObserveParams {
    * decay's exp form before it existed.
    */
   agg_func?: string;
+  /**
+   * Which percentile (strictly 0-100, e.g. 95) when agg_func is "percentile";
+   * rejected alongside any other agg_func. Percent, not fraction: 0.95 is a
+   * valid p0.95, so the range check cannot catch the unit slip.
+   */
+  agg_percentile?: number;
 }
 
 /** $Q[pipeline] — retention / replay / rate, pipeline-wide. */

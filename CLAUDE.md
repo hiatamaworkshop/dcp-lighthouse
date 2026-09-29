@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmedian本体まで実装、percentileのみ未着手)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済 (テスト409件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済 (テスト417件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -369,8 +369,13 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     修正が実装の核。**スコープは非加重 median のみ** — `decay`との組合せは
     `validateObserveParams`で静的に拒否 (レンズ自体が加重を宣言)、L5の参照ゾーン疎化
     (レンズではなくイベント側の`weight`) は`aggregate()`のflush()で動的に拒否
-    (静的検査が見えない加重源のための2枚目のガード)。percentile は未実装のまま
-    (どのパーセンタイルかを指定するフィールドがスキーマに無い、別作業)。
+    (静的検査が見えない加重源のための2枚目のガード)。
+    **percentile は 2026-09-29 に実装** — `agg_func:"percentile"` + `agg_percentile` (0〜100 の
+    開区間、百分率。0.95 は p0.95 として通るので単位の取り違えは範囲検査で捕まらない)。
+    median と同じ生値保持経路に乗り、線形補間 (R type 7、p50 は median と厳密一致)。
+    downsample は生値連結で厳密、decay 併用・加重(疎化)イベントは median と同じ2段ガードで拒否、
+    curator は median と同じく `aggFuncUnscored` で採点拒否。median の出力はバイト同一
+    (lens.test.ts 7件・snapshot-curator.test.ts 1件、テスト417件)。
     curator側は`SnapshotPackage.aggFuncUnscored`を新設し、observation/referenceの
     どちらかがmedianなら**全体を採点拒否** (`tiles:[]`、z検定はガウス仮定前提で
     median窓には適用不能・新しい統計モデルは作らない、という§C原文の設計方針どおり)。
@@ -487,7 +492,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
   等価 z にして Šidák gate へ** — 41%→**2.4%** (本番構成 4.3%)、RC 深さの検出力は 100% のまま。
   calibration.ts に多系列 (`agents`) を足し RC レンズを常設の較正対象に。加重窓は従来 gate のまま。
   詳細は ROADMAP_BRIEF.md 2026-09-27, 2026-09-27 (2)
-- **予定: 実データ較正期間 (2026-09-27 事前登録・未着手)** — 統計層の前提、特に「窓内の事象は独立」
+- **予定: 実データ較正期間 (2026-09-27 事前登録・第0段階着手: Wikimedia 収集器は実装済 2026-09-29、再生ハーネス/指標は未着手)** — 統計層の前提、特に「窓内の事象は独立」
   が実データで成り立つかを、事前に固定した仮説で検証する (実データで調整する期間ではない)。
   データ源は Wikimedia EventStreams (無料・認証不要の SSE、value = bot 編集か否か) と
   OpenTelemetry Demo (障害フラグで真値あり、最小限の OTLP 受け口を灯台側に作る)。

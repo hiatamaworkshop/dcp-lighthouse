@@ -173,10 +173,16 @@ export interface WindowStat {
    * (`SnapshotPackage.aggFuncUnscored`) rather than silently running mean/
    * variance machinery over a summary statistic it was never derived for.
    */
-  aggFunc?: "median";
+  aggFunc?: "median" | "percentile";
+  /**
+   * Which percentile (0-100, exclusive) `mean` holds when `aggFunc ===
+   * "percentile"`. Carried on the window so downsample can recompute the same
+   * quantile from the concatenated `values` without being handed the lens.
+   */
+  percentile?: number;
   /**
    * The raw values a median window was computed from, in the order they were
-   * observed. Present only when `aggFunc === "median"`.
+   * observed. Present only when `aggFunc` is set (median or percentile).
    *
    * Median/percentile cannot be pooled from sufficient statistics — two
    * windows' medians do not merge into the merged window's median, the way
@@ -504,7 +510,8 @@ export function validateObserveParams(lens: QObserveParams): void {
   if (
     lens.agg_func !== undefined &&
     lens.agg_func !== "mean" &&
-    lens.agg_func !== "median"
+    lens.agg_func !== "median" &&
+    lens.agg_func !== "percentile"
   ) {
     // Same precedent as decay's exp form before it was implemented: parse but
     // throw, rather than silently reporting mean/sumSq numbers under an
@@ -513,15 +520,27 @@ export function validateObserveParams(lens: QObserveParams): void {
     // raw-value retention (WindowStat.values), which keeps downsample_factor's
     // pooling EXACT for it too (ROADMAP_BRIEF.md 2026-08-18 (5) §C / 2026-08-23)
     // — the sufficient-statistic argument above only ruled out pooling
-    // count/sum/sumSq into a median, not pooling raw values. Percentile is not
-    // implemented: it needs a parameter (which percentile) this schema does
-    // not carry yet, a smaller but separate piece of work.
+    // count/sum/sumSq into a median, not pooling raw values. "percentile" rides
+    // the same raw-value path with `agg_percentile` naming which one.
     throw new RangeError(
-      `agg_func "${lens.agg_func}" is not implemented — only "mean" (the default) ` +
-        `and "median" are supported`,
+      `agg_func "${lens.agg_func}" is not implemented — only "mean" (the default), ` +
+        `"median" and "percentile" are supported`,
     );
   }
-  if (lens.agg_func === "median" && lens.decay !== undefined) {
+  if (lens.agg_func === "percentile") {
+    const p = lens.agg_percentile;
+    if (typeof p !== "number" || !Number.isFinite(p) || !(p > 0 && p < 100)) {
+      // 0 and 100 are min/max, already on WindowStat.range. Refuse rather than
+      // guess the unit: a fraction like 0.95 is a legal p0.95, so only the
+      // name and doc distinguish it from the intended 95.
+      throw new RangeError(
+        `agg_func "percentile" requires agg_percentile strictly between 0 and 100 (got ${String(p)})`,
+      );
+    }
+  } else if (lens.agg_percentile !== undefined) {
+    throw new RangeError(`agg_percentile is only meaningful with agg_func "percentile"`);
+  }
+  if ((lens.agg_func === "median" || lens.agg_func === "percentile") && lens.decay !== undefined) {
     // Weighted median is a well-defined thing but a DIFFERENT algorithm from
     // the plain sorted-values median this module implements, and it has not
     // been built. A decay lens always produces weighted events (`exp`) or
@@ -537,7 +556,7 @@ export function validateObserveParams(lens: QObserveParams): void {
     // lens — so aggregate() in this file carries a second, dynamic check for
     // that case (see its flush()).
     throw new RangeError(
-      `agg_func "median" cannot be combined with "decay" — weighted median is not implemented`,
+      `agg_func "${lens.agg_func}" cannot be combined with "decay" — weighted ${lens.agg_func} is not implemented`,
     );
   }
 }
@@ -599,7 +618,7 @@ export function applyLens(events: readonly LensEvent[], lens: QObserveParams = {
   if (kept.length === 0) return { window_ms: outputWindowMs, windows: [] };
 
   const origin = resolveAlign(lens) === "epoch" ? (lens.origin ?? 0) : kept[0].ts;
-  const aggFunc = lens.agg_func === "median" ? "median" : undefined;
+  const aggFunc = resolveRawAgg(lens);
 
   const windows = downsample(
     aggregate(kept, window_ms, origin, weightOf, aggFunc),
@@ -665,7 +684,7 @@ function downsample(
   // away to approximate). A single applyLens() call produces windows under
   // one agg_func, so checking the first window is enough to know the mode
   // for the whole array.
-  if (windows[0].aggFunc === "median") return downsampleMedian(windows, window_ms, factor, origin);
+  if (windows[0].aggFunc !== undefined) return downsampleRaw(windows, window_ms, factor, origin);
 
   const bucketMs = window_ms * factor;
   interface Bucket {
@@ -725,14 +744,59 @@ function median(values: readonly number[]): number {
   return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
 }
 
-/** downsample()'s median-mode branch — see its call site for why this is exact. */
-function downsampleMedian(
+/**
+ * Linear-interpolated quantile (R type 7) of q in (0,1). At q=0.5 this equals
+ * median() (average of the two middles when even), so median and percentile
+ * share one definition rather than two that could drift apart.
+ */
+function quantile(values: readonly number[], q: number): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const pos = (sorted.length - 1) * q;
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+
+/** The raw-value aggregation a lens asks for; undefined = ordinary mean. */
+interface RawAgg {
+  func: "median" | "percentile";
+  /** 0-100; 50 for median. */
+  percentile: number;
+}
+
+function resolveRawAgg(lens: QObserveParams): RawAgg | undefined {
+  if (lens.agg_func === "median") return { func: "median", percentile: 50 };
+  if (lens.agg_func === "percentile") {
+    return { func: "percentile", percentile: lens.agg_percentile as number };
+  }
+  return undefined;
+}
+
+/** Summary of a raw-value window. Median keeps its original median() path. */
+function rawSummary(values: readonly number[], agg: RawAgg): number {
+  return agg.func === "median" ? median(values) : quantile(values, agg.percentile / 100);
+}
+
+/** WindowStat fields tagging a raw-value window; median stays byte-identical. */
+function rawTag(agg: RawAgg): Pick<WindowStat, "aggFunc" | "percentile"> {
+  return agg.func === "median"
+    ? { aggFunc: "median" }
+    : { aggFunc: "percentile", percentile: agg.percentile };
+}
+
+/** downsample()'s raw-value branch (median/percentile) — see its call site for why this is exact. */
+function downsampleRaw(
   windows: readonly WindowStat[],
   window_ms: number,
   factor: number,
   origin: number,
 ): WindowStat[] {
   const bucketMs = window_ms * factor;
+  const first = windows[0];
+  const agg: RawAgg =
+    first.aggFunc === "percentile"
+      ? { func: "percentile", percentile: first.percentile as number }
+      : { func: "median", percentile: 50 };
   interface MedianBucket {
     count: number;
     values: number[];
@@ -763,10 +827,10 @@ function downsampleMedian(
         windowStart: bucketStart,
         windowEnd: bucketStart + bucketMs,
         count: b.count,
-        mean: median(b.values),
+        mean: rawSummary(b.values, agg),
         sumSq,
         valid: b.count >= MIN_VALID_COUNT,
-        aggFunc: "median" as const,
+        ...rawTag(agg),
         values: b.values,
         ...(Number.isFinite(b.min) ? { range: { min: b.min, max: b.max } } : {}),
       };
@@ -797,7 +861,7 @@ function aggregate(
   window_ms: number,
   origin: number,
   weightOf: ((ts: number) => number) | null,
-  aggFunc?: "median",
+  aggFunc?: RawAgg,
 ): WindowStat[] {
   const windows: WindowStat[] = [];
   let curIdx = -1;
@@ -827,7 +891,7 @@ function aggregate(
       values = [];
       return;
     }
-    if (aggFunc === "median" && weighted) {
+    if (aggFunc !== undefined && weighted) {
       // The DYNAMIC half of the guard validateObserveParams' static check
       // (agg_func:"median" + decay) cannot reach: an event can arrive here
       // pre-weighted by reference-zone thinning (LensEvent.weight, ROADMAP
@@ -837,8 +901,8 @@ function aggregate(
       // asked to be weighted would silently misreport, which is exactly what
       // this project's "parse but throw" precedent exists to prevent.
       throw new RangeError(
-        `agg_func "median" cannot be computed over weighted events (a thinned ` +
-          `reference-zone event, or a decayed one) — weighted median is not implemented`,
+        `agg_func "${aggFunc.func}" cannot be computed over weighted events (a thinned ` +
+          `reference-zone event, or a decayed one) — weighted ${aggFunc.func} is not implemented`,
       );
     }
     const windowStart = origin + curIdx * window_ms;
@@ -846,12 +910,12 @@ function aggregate(
       windowStart,
       windowEnd: windowStart + window_ms,
       count,
-      mean: aggFunc === "median" ? median(values) : sum / sumW,
+      mean: aggFunc !== undefined ? rawSummary(values, aggFunc) : sum / sumW,
       sumSq,
       valid: count >= MIN_VALID_COUNT,
       ...(weighted ? { weights: { sumW, sumW2 } } : {}),
       range: { min, max },
-      ...(aggFunc === "median" ? { aggFunc: "median" as const, values } : {}),
+      ...(aggFunc !== undefined ? { ...rawTag(aggFunc), values } : {}),
     });
     sum = sumSq = sumW = sumW2 = count = 0;
     weighted = false;
@@ -875,7 +939,7 @@ function aggregate(
     sumW += w;
     sumW2 += w * w;
     count++;
-    if (aggFunc === "median") values.push(ev.value);
+    if (aggFunc !== undefined) values.push(ev.value);
     // The range bounds the RAW values, not the weighted ones: a weighted mean
     // is still a convex combination of the values, so min/max bound it exactly
     // as they do unweighted (collectUnreachableTails depends on that).
