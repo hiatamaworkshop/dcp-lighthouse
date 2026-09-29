@@ -4573,3 +4573,32 @@ curator は `aggFuncUnscored`。0.95 は p0.95 として通る (単位の取り�
 
 **未了 (第0段階)**: ログオン時再起動のタスクスケジューラ登録とスリープ設定 (個人環境 = CLAUDE.local.md 側)。
 OTel Demo 用の OTLP 受け口は第 1 段階の 1 日分 (H4) に必要になるまで着手しない。
+
+## 2026-09-29 (3) — 直近実装のレビュー修正と、待たずに作れる H4 の部品
+
+**レビューで出た欠陥 3 件 (同日修正、`loadWikiDir` と `runInjectionPower`)**
+- 数日分を全件メモリに載せる際、1 件ごとに `keys` を作っていた (48 evt/s × 4 日 ≒ 1,660 万件で
+  数 GB)。同じ (wiki, type, namespace) は 1 つの keys を共有する
+- `align: "epoch"` のレンズでは注入窓の位置が `origin(=0) + 位置` になり 1970 年に落ちて
+  試行が全て「対象が薄い」に分類されていた。観測区間の始点から数えて格子に丸める
+- 収集器を `Stop-Process` で止めると (Windows は SIGTERM が届かない) gzip の途中で落ち、
+  `.jsonl.gz` が切れたまま / `.jsonl` と両方残る。loader は両方読んで**落ちる or 二重計上**
+  していた。同じ日に生の `.jsonl` があればそれだけを読む (gzip 開始前に書き終わっているため)
+- 記述の訂正: 日別ファイルの日付は**到着日**。到着 ≥ イベント時刻なので保留期間の漏洩は起きない
+  (探索範囲の末尾が数秒欠けるだけ)。φ の期待値は「ちょうど 1」ではなく N/(N−1) 倍 (≤ +0.5%)
+
+**H4 の部品 (事前登録の「1 日分が必要になるまで着手しない」を、ユーザ判断で前倒し)** —
+待つ理由が無いものを先に作った。事前登録の値の割り当て (value/keys/weight) は変えていない。
+- `otlp-receiver.ts` / `run-otlp-receiver.ts`: OTLP/HTTP **JSON のみ** (protobuf は 415、gzip 可)。
+  ts = span の**終了**時刻、value = ERROR なら 0、keys = service + op、weight = 1/p
+  (W3C tracestate の `ot=th:` = OTEP 235 の棄却閾値、無ければ `sampling.probability` 属性、
+  無ければ 1)。**span の種別は絞っていない** (kind は行に記録するが group キーにしない) —
+  どの種別を数えるかは再収集なしで再生側が選べる。バッチ再送は span id で重複除去、
+  イベント時刻の 30 秒超の穴は gaps.jsonl (盲目)
+- `run-otel-flag-log.ts`: 障害フラグの ON/OFF を `flags.jsonl` に記録する真値ログ
+  (受け口とは別ファイル・別クロックで、受け口が真値を書き換えられない)
+- 再生側: `loadOtelDir` (weight 付き)、`thinEvents(events, p, rng)` — p = 1 の記録を p = 0.5 / 0.1 に
+  間引いて weight 1/p を付ける。実データを p 別に取り直さずに H4 の p 軸が測れる
+- **意図して手を付けていない**: 加重窓の警報率の実測 (H4 の予想そのもの。実データが要る)、
+  OTel Demo の実起動 (数 GB を使うので 1 日だけ)、フラグ切替のスクリプト (Demo の flagd 構成に依存)。
+  H3 は事前登録どおり第 2 段階 (7 日以上) — 前倒しの対象ではない

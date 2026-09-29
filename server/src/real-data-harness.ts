@@ -61,6 +61,57 @@ export async function loadWikiDir(
   dir: string,
   range: { fromDay?: string; toDay?: string } = {},
 ): Promise<LoadedStream> {
+  // Days of events number in the millions; one shared keys object per distinct
+  // (wiki, type, namespace) instead of one per event keeps the heap in check.
+  // Nothing mutates `keys` (shuffle/injection copy the event, not its keys).
+  const pool = new KeysPool();
+  return loadDayFiles(dir, range, (r) => ({
+    ts: r.ts as number,
+    value: r.value as number,
+    keys: pool.get([String(r.wiki), String(r.type), String(r.namespace)], ["wiki", "type", "namespace"]),
+  }));
+}
+
+/**
+ * Read an OTLP receiver directory (otlp-receiver.ts): value 0 = ERROR span,
+ * keys = service + op, `weight` = the sampling adjusted count. Same day-file and
+ * gaps.jsonl conventions as the Wikimedia collector's directory.
+ */
+export async function loadOtelDir(
+  dir: string,
+  range: { fromDay?: string; toDay?: string } = {},
+): Promise<LoadedStream> {
+  const pool = new KeysPool();
+  return loadDayFiles(dir, range, (r) => {
+    const weight = typeof r.weight === "number" && r.weight > 0 ? r.weight : 1;
+    return {
+      ts: r.ts as number,
+      value: r.value as number,
+      keys: pool.get([String(r.service), String(r.op)], ["service", "op"]),
+      ...(weight !== 1 ? { weight } : {}),
+    };
+  });
+}
+
+/** Interns key objects: one per distinct tuple, shared by every event that carries it. */
+class KeysPool {
+  private readonly pool = new Map<string, Record<string, string>>();
+  get(values: readonly string[], names: readonly string[]): Record<string, string> {
+    const id = values.join("\u0000");
+    let keys = this.pool.get(id);
+    if (keys === undefined) {
+      keys = Object.fromEntries(names.map((n, i) => [n, values[i]]));
+      this.pool.set(id, keys);
+    }
+    return keys;
+  }
+}
+
+async function loadDayFiles(
+  dir: string,
+  range: { fromDay?: string; toDay?: string },
+  toEvent: (raw: Record<string, unknown>) => LensEvent,
+): Promise<LoadedStream> {
   const files = readdirSync(dir)
     .filter((f) => /^\d{4}-\d{2}-\d{2}\.jsonl(\.gz)?$/.test(f))
     .filter((f) => (range.fromDay === undefined || f.slice(0, 10) >= range.fromDay) &&
@@ -77,24 +128,13 @@ export async function loadWikiDir(
     return !shadowed;
   });
   const events: LensEvent[] = [];
-  // Days of events number in the millions; one shared keys object per distinct
-  // (wiki, type, namespace) instead of one per event keeps the heap in check.
-  // Nothing mutates `keys` (shuffle/injection copy the event, not its keys).
-  const keysPool = new Map<string, Record<string, string>>();
   for (const f of readable) {
     const raw = createReadStream(join(dir, f));
     const input = f.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
     for await (const line of createInterface({ input, crlfDelay: Infinity })) {
       if (line === "") continue;
       try {
-        const r = JSON.parse(line) as { ts: number; value: number; wiki: string; type: string; namespace: number };
-        const poolKey = `${r.wiki}\u0000${r.type}\u0000${r.namespace}`;
-        let keys = keysPool.get(poolKey);
-        if (keys === undefined) {
-          keys = { wiki: r.wiki, type: r.type, namespace: String(r.namespace) };
-          keysPool.set(poolKey, keys);
-        }
-        events.push({ ts: r.ts, value: r.value, keys });
+        events.push(toEvent(JSON.parse(line) as Record<string, unknown>));
       } catch {
         // A torn final line from a crash: the collector's own restart logic skips these too.
       }
@@ -222,6 +262,22 @@ export function shuffleValues(
       [vals[i], vals[j]] = [vals[j], vals[i]];
     }
     idx.forEach((ei, k) => { out[ei].value = vals[k]; });
+  }
+  return out;
+}
+
+/**
+ * Head-sample a recorded stream the way a probability sampler would: each event
+ * survives with probability `p` and carries weight 1/p (times any weight it
+ * already had), so a p = 1 recording can be replayed at p = 0.5 / 0.1 for H4
+ * with the same events. Independent Bernoulli per event, seeded.
+ */
+export function thinEvents(events: readonly LensEvent[], p: number, rng: () => number): LensEvent[] {
+  if (!(p > 0 && p <= 1)) throw new RangeError(`sampling probability must be in (0, 1], got ${p}`);
+  if (p === 1) return events.map((e) => ({ ...e }));
+  const out: LensEvent[] = [];
+  for (const e of events) {
+    if (rng() < p) out.push({ ...e, weight: (e.weight ?? 1) / p });
   }
   return out;
 }

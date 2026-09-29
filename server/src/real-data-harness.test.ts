@@ -19,6 +19,7 @@ import {
   shuffleValues,
   sliceEvents,
   synthesizeStream,
+  thinEvents,
   topKeyValues,
 } from "./real-data-harness.js";
 import { mulberry32 } from "./calibration.js";
@@ -145,6 +146,24 @@ describe("injection power on a known stream", () => {
     const kept = restrictToKeyValues(s.events, "wiki", top);
     assert.ok(kept.length < s.events.length);
     assert.ok(kept.every((e) => top.includes(e.keys!.wiki)));
+  });
+});
+
+describe("thinning a recording to a sampling probability (H4 replay)", () => {
+  it("keeps ≈ p of the events, each weighted 1/p, so the weighted count still estimates the original", () => {
+    const s = synthesizeStream({ durationMs: HOUR, seed: 41 });
+    const out = thinEvents(s.events, 0.1, mulberry32(9));
+    assert.ok(Math.abs(out.length / s.events.length - 0.1) < 0.01, `kept = ${out.length / s.events.length}`);
+    assert.ok(out.every((e) => e.weight === 10));
+    const est = out.reduce((a, e) => a + (e.weight ?? 1), 0);
+    assert.ok(Math.abs(est / s.events.length - 1) < 0.05, `estimate ratio = ${est / s.events.length}`);
+  });
+  it("p = 1 leaves the events and their weights alone; a bad p is refused", () => {
+    const s = synthesizeStream({ durationMs: 10_000, seed: 42 });
+    const same = thinEvents(s.events, 1, mulberry32(1));
+    assert.deepEqual(same, s.events);
+    assert.throws(() => thinEvents(s.events, 0, mulberry32(1)), RangeError);
+    assert.throws(() => thinEvents(s.events, 1.5, mulberry32(1)), RangeError);
   });
 });
 
