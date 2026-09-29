@@ -113,6 +113,17 @@ describe("injection power on a known stream", () => {
     assert.ok(r.meanShiftTruth < -0.4 && r.meanShiftTruth > -0.6, `shift = ${r.meanShiftTruth}`);
   });
 
+  it("an epoch-aligned lens finds the same dip: the injected window sits inside the span, not at 1970", () => {
+    const s = synthesizeStream({ durationMs: HOUR, seed: 31, wikis: { enwiki: 1 } });
+    const r = runInjectionPower(s, {
+      lens: { window_ms: 1_000, align: "epoch" },
+      target: { key: "wiki", value: "enwiki" }, fraction: 1, seed: 3,
+    });
+    assert.equal(r.targetThin, 0);
+    assert.ok(r.trials > 50, `trials = ${r.trials}`);
+    assert.ok(r.power > 0.9, `power = ${r.power}`);
+  });
+
   it("fraction 0 plants nothing and detects (almost) nothing", () => {
     const s = synthesizeStream({ durationMs: HOUR, seed: 32, wikis: { enwiki: 1 } });
     const r = runInjectionPower(s, { target: { key: "wiki", value: "enwiki" }, fraction: 0, seed: 3 });
@@ -159,5 +170,24 @@ describe("loading a collector directory", () => {
     assert.equal(day2.events.length, 1);
     assert.equal(day2.gaps.length, 1);
     assert.equal(sliceEvents(all.events, d1, d1 + 1).length, 1); // half-open
+  });
+
+  it("an interrupted rollover (raw file AND a truncated .gz for one day) reads the raw file once", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wiki-"));
+    const d = Date.parse("2026-10-01T12:00:00Z");
+    const rec = (ts: number) => JSON.stringify({ ts, value: 1, wiki: "enwiki", type: "edit", namespace: 0, eid: `e${ts}` });
+    writeFileSync(join(dir, "2026-10-01.jsonl"), [rec(d), rec(d + 1000)].join("\n") + "\n");
+    writeFileSync(join(dir, "2026-10-01.jsonl.gz"), Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x00])); // cut mid-header
+    const s = await loadWikiDir(dir);
+    assert.equal(s.events.length, 2);
+  });
+
+  it("events with the same wiki/type/namespace share one keys object", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wiki-"));
+    const d = Date.parse("2026-10-01T12:00:00Z");
+    const rec = (ts: number) => JSON.stringify({ ts, value: 0, wiki: "enwiki", type: "edit", namespace: 0, eid: `e${ts}` });
+    writeFileSync(join(dir, "2026-10-01.jsonl"), [rec(d), rec(d + 1)].join("\n") + "\n");
+    const s = await loadWikiDir(dir);
+    assert.equal(s.events[0].keys, s.events[1].keys);
   });
 });

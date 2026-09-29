@@ -50,6 +50,12 @@ const DAY_MS = 86_400_000;
  * Read a collector directory: `YYYY-MM-DD.jsonl` (today, raw) and
  * `YYYY-MM-DD.jsonl.gz` (rolled) day files plus gaps.jsonl. `fromDay`/`toDay`
  * are inclusive UTC days; omitted = everything present.
+ *
+ * The day in a file name is the collector's ARRIVAL day, not the event's: a
+ * straggler from just before midnight lands in the next day's file, and events
+ * re-fetched after downtime land in the day they were fetched. Arrival is never
+ * earlier than event time, so a `toDay` range can never contain a later day's
+ * events (the holdout stays sealed); it can only miss a few seconds at its end.
  */
 export async function loadWikiDir(
   dir: string,
@@ -60,15 +66,35 @@ export async function loadWikiDir(
     .filter((f) => (range.fromDay === undefined || f.slice(0, 10) >= range.fromDay) &&
       (range.toDay === undefined || f.slice(0, 10) <= range.toDay))
     .sort();
+  // A raw `.jsonl` next to a `.jsonl.gz` of the same day means the collector died
+  // mid-rollover: the raw file was complete before gzip began, the .gz may be
+  // truncated or a full copy. Reading both would double every event (or throw on
+  // a cut gzip), so the raw file alone stands for that day.
+  const rawDays = new Set(files.filter((f) => !f.endsWith(".gz")).map((f) => f.slice(0, 10)));
+  const readable = files.filter((f) => {
+    const shadowed = f.endsWith(".gz") && rawDays.has(f.slice(0, 10));
+    if (shadowed) console.warn(`[real-data-harness] ${f} skipped: the raw day file exists (interrupted rollover)`);
+    return !shadowed;
+  });
   const events: LensEvent[] = [];
-  for (const f of files) {
+  // Days of events number in the millions; one shared keys object per distinct
+  // (wiki, type, namespace) instead of one per event keeps the heap in check.
+  // Nothing mutates `keys` (shuffle/injection copy the event, not its keys).
+  const keysPool = new Map<string, Record<string, string>>();
+  for (const f of readable) {
     const raw = createReadStream(join(dir, f));
     const input = f.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
     for await (const line of createInterface({ input, crlfDelay: Infinity })) {
       if (line === "") continue;
       try {
         const r = JSON.parse(line) as { ts: number; value: number; wiki: string; type: string; namespace: number };
-        events.push({ ts: r.ts, value: r.value, keys: { wiki: r.wiki, type: r.type, namespace: String(r.namespace) } });
+        const poolKey = `${r.wiki}\u0000${r.type}\u0000${r.namespace}`;
+        let keys = keysPool.get(poolKey);
+        if (keys === undefined) {
+          keys = { wiki: r.wiki, type: r.type, namespace: String(r.namespace) };
+          keysPool.set(poolKey, keys);
+        }
+        events.push({ ts: r.ts, value: r.value, keys });
       } catch {
         // A torn final line from a crash: the collector's own restart logic skips these too.
       }
@@ -358,7 +384,9 @@ export function runInjectionPower(stream: LoadedStream, opts: InjectionOptions):
 
     // The grid applyLens will actually use for this observation span.
     const origin = resolveAlign(lens) === "epoch" ? (lens.origin ?? 0) : obs[0].ts;
-    const w0 = floorToWindow(origin + Math.floor(0.8 * spanMs / windowMs) * windowMs, windowMs, origin);
+    // Anchored to the span itself, then snapped to the lens's grid: an epoch grid's
+    // origin is 0 (or lens.origin), so origin + offset would land in 1970.
+    const w0 = floorToWindow(t.obsFrom + Math.floor(0.8 * spanMs / windowMs) * windowMs, windowMs, origin);
     const w1 = w0 + windowMs;
     const inTarget = obs.filter((e) => e.ts >= w0 && e.ts < w1 && e.keys?.[opts.target.key] === opts.target.value);
     if (inTarget.length < MIN_VALID_COUNT) { out.targetThin++; return; }
@@ -423,9 +451,10 @@ export interface DispersionResult {
 /**
  * φ = window-mean variance ÷ binomial variance, as Pearson's dispersion
  * Σ nᵢ(mᵢ − p̂)² / (p̂(1 − p̂)) over (k − 1) degrees of freedom. Its expectation
- * under independent 0/1 values is exactly 1 for ANY window sizes nᵢ (the
- * identity holds because p̂ is the count-weighted pooled mean), which is why
- * the synthetic check can demand φ ≈ 1 and mean it.
+ * under independent 0/1 values is 1 up to a factor N/(N − 1) (N = events in the
+ * measured block, ≥ minEvents, so ≤ +0.5%) for ANY window sizes nᵢ — p̂ is the
+ * count-weighted pooled mean, so the size dependence cancels — which is why the
+ * synthetic check can demand φ ≈ 1 and mean it.
  */
 export function dispersionProfile(
   stream: LoadedStream,
