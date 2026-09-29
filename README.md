@@ -41,7 +41,7 @@ dcp-lighthouse/
 cd server
 npm install
 npm run dev    # tsc && node dist/index.js
-npm test       # tsc && node --test dist/
+npm test       # tsc && node --test "dist/*.test.js" (実サーバは起動しない)
 ```
 
 **§12 A/B 対策B (上位モデルでの再測定)** — `ANTHROPIC_API_KEY` が必要な実課金スクリプト。
@@ -161,9 +161,10 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       (`WindowStat.values`) で、downsample_factor 併用でも厳密 (sketch の近似ではない)。
       非加重のみ対応 (`decay`併用は静的拒否、参照ゾーン疎化併用は動的拒否)。
       curator は observation/reference どちらかが median なら `SnapshotPackage.aggFuncUnscored`
-      を立てて全体を採点拒否 (z検定はガウス仮定前提のため)。percentile は未実装
-      (どのパーセンタイルかを指定するフィールドがスキーマに無い)。実利用の受け皿
-      (ダッシュボード/ClaudeBrainプロンプト) はまだ配線していない。
+      を立てて全体を採点拒否 (z検定はガウス仮定前提のため)。**`"percentile"` も実装済み
+      (2026-09-29)** — `agg_percentile` (0〜100 の開区間・百分率) で指定し、median と同じ生値保持経路・
+      同じ2段ガード・同じ採点拒否に乗る (線形補間 R type 7、p50 は median と厳密一致)。
+      実利用の受け皿 (ダッシュボード/ClaudeBrainプロンプト) はまだ配線していない。
       詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §C, 2026-08-23
 - [x] **L5** retention 参照ゾーン — 鮮度ゾーンの上の疎化レイヤー (2026-08-22 完了)。
       形状は固定比率 (N個に1個、`LensEvent.weight = N`)。**疎化は「加重」であって新しい統計
@@ -196,7 +197,40 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       `reference_thinning_ratio`を配線、`index.ts`の起動時$Q行にも明示。
       テスト 364→379件。
 
-現在テスト計 409 件、全 green。
+- [x] **レビューで出た欠陥 4 件の修正** (2026-08-25) — median の書込ゲートと実行時ガードの食い違い
+      (`lensGate` を新設)、`aggFuncUnscored` の読み手不在 (盲目と誤診断していた)、`npm test` が実サーバを
+      起動していた件、dashboard の Stop バナー。詳細は ROADMAP_BRIEF.md 2026-08-25
+- [x] **実地動作確認レビューと較正** (2026-09-27) — 生成器を時計基準の正確な rate に、RuleBrain の閾値を
+      `baseline − max(delta, 3.5·SE)` に (静穏誤発火 0)。薄い二値/三値の非加重窓は**正確な裾
+      (事後予測 Dirichlet 多項・mid-p) を等価 z にして Šidák gate へ** — RC レンズの package 誤警報
+      41%→2.4% (本番構成 4.3%)、検出力は 100% のまま。詳細は ROADMAP_BRIEF.md 2026-09-27, (2)
+- [ ] **実データ較正期間** (2026-09-27 事前登録、2026-09-29 収集開始) — 統計層の前提 (窓内の事象は
+      独立) を実データで検証する。仮説と判定規則は収集前に固定済みで、**実データで調整する期間ではない**。
+      - 第 0 段階は実装・合成検算済: Wikimedia EventStreams 収集器 (`wikimedia-collector.ts`)、
+        再生ハーネスと指標 (`real-data-harness.ts` — φ・ラグ1・シャッフル帰無・注入)、
+        H4 用の OTLP 受け口 (`otlp-receiver.ts`)・障害フラグの真値ログ・p 別の間引き再生
+      - 収集 1〜4 日目は探索、**5〜7 日目 (2026-10-03〜10-05) は保留期間** (最後に 1 回だけ見る。
+        レポートは保留日を `--holdout` なしでは拒否する)
+      - 待ち: 探索日レポートの実行、保留期間の最終確認、OTel Demo の実走 (1 日)
+      - 詳細は ROADMAP_BRIEF.md 2026-09-27 (3), 2026-09-29 〜 (3)
+
+現在テスト計 456 件、全 green。
+
+## 実データ較正期間の運用
+
+すべて `server/` で `npm run build` した後の `node dist/...`。収集データは `data/` (gitignore 済み) に置かれ、
+公開リポジトリには入らない。
+
+```sh
+node dist/run-wikimedia-collector.js       # Wikimedia の常駐収集 (data/wikimedia/、欠落は gaps.jsonl)
+node dist/run-real-data-report.js --from 2026-09-29 --to 2026-10-02   # H1 (φ・R_real vs FA_shuffle)・H2 (検出力 vs G)
+node dist/run-real-data-report.js --from 2026-10-03 --to 2026-10-05 --holdout   # 保留期間: 最終確認 1 回だけ
+node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
+node dist/run-otel-flag-log.js paymentServiceFailure on   # 障害フラグ切替の真値ログ (data/otel/flags.jsonl)
+```
+
+`WIKI_DATA_DIR` / `OTEL_DATA_DIR` / `PORT` で置き場所とポートを変えられる。
+`--holdout` は「ちょっと見る」ために付けない — 保留期間を見た後にパラメータを変えると、期間の結論が無効になる。
 
 ## BRAIN_MODE
 

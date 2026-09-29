@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済 (テスト417件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済・実データ較正期間の第0段階を実装済 (テスト456件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -142,6 +142,12 @@ dcp-lighthouse/
       calibration.ts             ← 誤警報率/検出力の測定器 (レンズを引数に取る)
       q-collector-binding.ts     ← $Q[observe] → StCollector 動的 bind
       q-retention-binding.ts     ← $Q[pipeline] → retention 窓
+    ── 実データ較正期間 (2026-09-27 事前登録。実データ用・灯台側のみ) ──
+      wikimedia-collector.ts     ← EventStreams 収集器 (v1 レコード・欠落=盲目・日別 gzip)
+      otlp-receiver.ts           ← OTLP/HTTP JSON 受け口 (H4。weight = 1/p)
+      real-data-harness.ts       ← 再生ハーネス: R_real vs FA_shuffle・注入・φ/ラグ1・間引き再生
+      run-wikimedia-collector.ts / run-otlp-receiver.ts / run-otel-flag-log.ts / run-real-data-report.ts
+                                 ← 起動口 (レポートは保留日を --holdout なしで拒否)
     ── ドメイン適用 (Phase 1) ──
       mock-stream-generator.ts   ← MockStreamGenerator
       testor-adapter.ts          ← test_result:v1 への正規化
