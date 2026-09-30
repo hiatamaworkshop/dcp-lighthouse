@@ -47,6 +47,13 @@ export interface LoadedStream {
 const DAY_MS = 86_400_000;
 
 /**
+ * Day 5 of the collection that began 2026-09-29: the first holdout day. Every
+ * report refuses days from here on unless given `--holdout` (the single final
+ * look), so the rule lives in one place rather than one copy per report.
+ */
+export const HOLDOUT_FROM_DAY = "2026-10-03";
+
+/**
  * Read a collector directory: `YYYY-MM-DD.jsonl` (today, raw) and
  * `YYYY-MM-DD.jsonl.gz` (rolled) day files plus gaps.jsonl. `fromDay`/`toDay`
  * are inclusive UTC days; omitted = everything present.
@@ -73,22 +80,44 @@ export async function loadWikiDir(
 }
 
 /**
+ * A span event that remembers its trace, as a 32-bit hash of the trace id (a
+ * number, not the 32-hex string: a day of spans would otherwise hold millions
+ * of strings). Lets the replay sample whole traces, as head samplers do.
+ */
+export interface TracedEvent extends LensEvent {
+  traceHash?: number;
+}
+
+/** FNV-1a, 32 bit. */
+export function fnv1a32(s: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/**
  * Read an OTLP receiver directory (otlp-receiver.ts): value 0 = ERROR span,
- * keys = service + op, `weight` = the sampling adjusted count. Same day-file and
- * gaps.jsonl conventions as the Wikimedia collector's directory.
+ * keys = service + op, `weight` = the sampling adjusted count, `traceHash` from
+ * the trace half of `eid` (traceId:spanId). Same day-file and gaps.jsonl
+ * conventions as the Wikimedia collector's directory.
  */
 export async function loadOtelDir(
   dir: string,
   range: { fromDay?: string; toDay?: string } = {},
-): Promise<LoadedStream> {
+): Promise<{ events: TracedEvent[]; gaps: GapSpan[] }> {
   const pool = new KeysPool();
-  return loadDayFiles(dir, range, (r) => {
+  return loadDayFiles(dir, range, (r): TracedEvent => {
     const weight = typeof r.weight === "number" && r.weight > 0 ? r.weight : 1;
+    const colon = typeof r.eid === "string" ? r.eid.indexOf(":") : -1;
     return {
       ts: r.ts as number,
       value: r.value as number,
       keys: pool.get([String(r.service), String(r.op)], ["service", "op"]),
       ...(weight !== 1 ? { weight } : {}),
+      ...(colon > 0 ? { traceHash: fnv1a32((r.eid as string).slice(0, colon)) } : {}),
     };
   });
 }
@@ -203,24 +232,29 @@ export interface TrialPlan {
 /**
  * Lay trials over the recording, `strideMs` apart. Any trial touching a
  * collection gap goes to `blind` — the replay may not read a hole as calm.
+ * A trial touching an `exclude` span (a known-perturbed stretch, e.g. a fault
+ * flag's ON interval) is not a null trial either; it is counted as `excluded`,
+ * apart from blindness, because it was seen — just not under the null.
  */
 export function planTrials(
   events: readonly LensEvent[],
   gaps: readonly GapSpan[],
-  o: { spanMs: number; strideMs?: number },
-): { trials: TrialPlan[]; blind: number } {
+  o: { spanMs: number; strideMs?: number; exclude?: readonly GapSpan[] },
+): { trials: TrialPlan[]; blind: number; excluded: number } {
   const stride = o.strideMs ?? 2 * o.spanMs;
   const trials: TrialPlan[] = [];
   let blind = 0;
-  if (events.length === 0) return { trials, blind };
+  let excluded = 0;
+  if (events.length === 0) return { trials, blind, excluded };
   const first = events[0].ts;
   const last = events[events.length - 1].ts;
   for (let t = first; t + 2 * o.spanMs <= last; t += stride) {
     const plan = { refFrom: t, obsFrom: t + o.spanMs, obsTo: t + 2 * o.spanMs };
     if (overlapsGap(gaps, plan.refFrom, plan.obsTo)) blind++;
+    else if (o.exclude !== undefined && overlapsGap(o.exclude, plan.refFrom, plan.obsTo)) excluded++;
     else trials.push(plan);
   }
-  return { trials, blind };
+  return { trials, blind, excluded };
 }
 
 // ── Alarm definition ────────────────────────────────────────────────────────
@@ -277,10 +311,11 @@ export function shuffleValues(
 }
 
 /**
- * Head-sample a recorded stream the way a probability sampler would: each event
- * survives with probability `p` and carries weight 1/p (times any weight it
- * already had), so a p = 1 recording can be replayed at p = 0.5 / 0.1 for H4
- * with the same events. Independent Bernoulli per event, seeded.
+ * Thin a recorded stream event by event: each event survives with probability
+ * `p` and carries weight 1/p (times any weight it already had). Independent
+ * Bernoulli per event, seeded. H4 does NOT use this — real samplers keep or
+ * drop whole traces (thinByTrace); this is the per-event model, kept for
+ * streams with no trace structure.
  */
 export function thinEvents(events: readonly LensEvent[], p: number, rng: () => number): LensEvent[] {
   if (!(p > 0 && p <= 1)) throw new RangeError(`sampling probability must be in (0, 1], got ${p}`);
@@ -288,6 +323,36 @@ export function thinEvents(events: readonly LensEvent[], p: number, rng: () => n
   const out: LensEvent[] = [];
   for (const e of events) {
     if (rng() < p) out.push({ ...e, weight: (e.weight ?? 1) / p });
+  }
+  return out;
+}
+
+/**
+ * Head-sample by TRACE (the H4 replay unit, fixed 2026-09-30): a trace is kept
+ * or dropped whole, the way a trace-id ratio sampler decides — all its spans
+ * survive together, each weighted 1/p. Per-event thinning (thinEvents) would
+ * make the spans of one trace independent, which real sampling never does: a
+ * service called several times per trace sees its window's events kept or lost
+ * in clumps, and that clumping is part of what H4 asks the weighted gate to
+ * survive.
+ *
+ * Kept iff a seeded mix of the trace hash, read as a fraction, is < p — so for
+ * one seed the p = 0.1 sample is a subset of the p = 0.5 one (consistent
+ * sampling, as with a trace-id threshold). An event without a trace is refused:
+ * silently thinning it on its own would be the per-event model again.
+ */
+export function thinByTrace(events: readonly TracedEvent[], p: number, seed: number): TracedEvent[] {
+  if (!(p > 0 && p <= 1)) throw new RangeError(`sampling probability must be in (0, 1], got ${p}`);
+  const out: TracedEvent[] = [];
+  for (const e of events) {
+    if (e.traceHash === undefined) throw new RangeError("event without a trace: cannot sample by trace");
+    if (p === 1) { out.push({ ...e }); continue; }
+    // murmur3 finalizer over hash ⊕ seed: an even spread even for similar trace ids.
+    let h = (e.traceHash ^ Math.imul(seed, 0x9e3779b1)) >>> 0;
+    h = Math.imul(h ^ (h >>> 16), 0x85ebca6b);
+    h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+    h = (h ^ (h >>> 16)) >>> 0;
+    if (h / 4_294_967_296 < p) out.push({ ...e, weight: (e.weight ?? 1) / p });
   }
   return out;
 }
@@ -321,6 +386,8 @@ export interface NullCalibrationResult {
   planned: number;
   /** Trials skipped because the span overlapped a collection gap. */
   blindByGap: number;
+  /** Trials skipped because the span overlapped an `exclude` span (not under the null). */
+  excluded: number;
   real: ArmTally;
   shuffled: ArmTally;
   /** familyWiseAlpha(baseZ): the only legitimate comparison point for either arm. */
@@ -348,7 +415,7 @@ function scoreInto(arm: ArmTally, pkg: SnapshotPackage): void {
  */
 export function runNullCalibration(
   stream: LoadedStream,
-  opts: HarnessOptions & { shuffleReps?: number } = {},
+  opts: HarnessOptions & { shuffleReps?: number; exclude?: readonly GapSpan[] } = {},
 ): NullCalibrationResult {
   const spanMs = opts.spanMs ?? 10_000;
   const baseZ = opts.baseZThreshold ?? 2.0;
@@ -356,7 +423,9 @@ export function runNullCalibration(
   const lens: QObserveParams = opts.lens ?? { window_ms: 1_000 };
   const reps = opts.shuffleReps ?? 1;
   const seed = opts.seed ?? 1;
-  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs, strideMs: opts.strideMs });
+  const { trials, blind, excluded } = planTrials(stream.events, stream.gaps, {
+    spanMs, strideMs: opts.strideMs, exclude: opts.exclude,
+  });
 
   const real = tally();
   const shuffled = tally();
@@ -375,7 +444,10 @@ export function runNullCalibration(
   });
   real.rate = real.trials > 0 ? real.flagged / real.trials : 0;
   shuffled.rate = shuffled.trials > 0 ? shuffled.flagged / shuffled.trials : 0;
-  return { planned: trials.length + blind, blindByGap: blind, real, shuffled, designTarget: familyWiseAlpha(baseZ) };
+  return {
+    planned: trials.length + blind + excluded, blindByGap: blind, excluded,
+    real, shuffled, designTarget: familyWiseAlpha(baseZ),
+  };
 }
 
 // ── ② Injection ─────────────────────────────────────────────────────────────
@@ -480,6 +552,145 @@ export function runInjectionPower(stream: LoadedStream, opts: InjectionOptions):
   });
   out.power = out.trials > 0 ? out.detected / out.trials : 0;
   out.meanShiftTruth = out.trials > 0 ? shiftSum / out.trials : 0;
+  return out;
+}
+
+// ── ③ Labelled faults (H4: OTel Demo fault flags) ───────────────────────────
+
+/**
+ * One line of the fault-flag truth log (OTEL_DATA_DIR/flags.jsonl), written by
+ * run-otel-flag-log.ts (manual) or run-otel-flag-schedule.ts (scheduled).
+ * `confirmedTs` is when flagd was seen serving the new variant; null = the
+ * write happened but was never confirmed; absent = a manual line (no check).
+ */
+export interface FlagTruthLine {
+  ts: number;
+  flag: string;
+  state: "on" | "off";
+  variant?: string;
+  /** The variant's value as flagd serves it (e.g. paymentFailure "90%" is 0.95). */
+  value?: unknown;
+  confirmedTs?: number | null;
+}
+
+/** An interval during which a fault flag was ON. */
+export interface FlagSpan extends GapSpan {
+  variant?: string;
+  value?: unknown;
+  /** Both edges were confirmed against flagd (a still-open span: its start only). */
+  confirmed: boolean;
+}
+
+/**
+ * ON intervals of `flag`, from the truth log. Each edge is placed at its
+ * confirmed time when there is one (the moment flagd served it), else at the
+ * write. Repeated ONs (a variant change) extend the open span; an ON never
+ * closed runs to `endTs`. A missing file is no truth at all, so it throws —
+ * treating it as "never ON" would score fault time as null time.
+ */
+export function loadFlagTruth(dir: string, flag: string, endTs = Infinity): FlagSpan[] {
+  const lines: FlagTruthLine[] = [];
+  for (const line of readFileSync(join(dir, "flags.jsonl"), "utf8").split("\n")) {
+    if (line === "") continue;
+    try {
+      const l = JSON.parse(line) as FlagTruthLine;
+      if (l.flag === flag && (l.state === "on" || l.state === "off")) lines.push(l);
+    } catch {
+      // torn line
+    }
+  }
+  const at = (l: FlagTruthLine) => (typeof l.confirmedTs === "number" ? l.confirmedTs : l.ts);
+  lines.sort((a, b) => at(a) - at(b));
+  const spans: FlagSpan[] = [];
+  let open: FlagSpan | undefined;
+  for (const l of lines) {
+    if (l.state === "on") {
+      if (open === undefined) {
+        open = { fromTs: at(l), toTs: endTs, variant: l.variant, value: l.value, confirmed: typeof l.confirmedTs === "number" };
+      } else {
+        open.variant = l.variant;
+        open.value = l.value;
+        open.confirmed &&= typeof l.confirmedTs === "number";
+      }
+    } else if (open !== undefined) {
+      open.toTs = at(l);
+      open.confirmed &&= typeof l.confirmedTs === "number";
+      spans.push(open);
+      open = undefined;
+    }
+  }
+  if (open !== undefined) spans.push(open);
+  return spans;
+}
+
+/** ON spans widened by `settleMs` at the end: the fault's tail (in-flight requests) is not null time. */
+export function flagExclusion(spans: readonly FlagSpan[], settleMs: number): GapSpan[] {
+  return spans.map((s) => ({ fromTs: s.fromTs, toTs: s.toTs + settleMs }));
+}
+
+export interface FlagDetectionOptions extends HarnessOptions {
+  /** The group the fault should show in (grouped lens), e.g. { key: "service", value: "payment" }. */
+  target: { key: string; value: string };
+  /** Skipped after each edge before a span counts as ON / OFF. Default 30 s. */
+  settleMs?: number;
+}
+
+export interface FlagDetectionResult {
+  planned: number;
+  blindByGap: number;
+  /** ON span shorter than settle + span: no observation fits inside it. */
+  tooShort: number;
+  /** The reference before the ON edge overlapped an earlier ON span (or its tail). */
+  refContaminated: number;
+  unusableReference: number;
+  trials: number;
+  /** A statistical tile inside the observation, in the target group (any group for a mixed lens). */
+  detected: number;
+  power: number;
+  /** A statistical tile inside the observation in ANY group — the wiring check doesn't need the right group. */
+  detectedAnyGroup: number;
+}
+
+/**
+ * The wiring check H4 pre-registers: is a known ON interval detected at all?
+ * One trial per ON span — reference = the `spanMs` just before the ON edge,
+ * observation = `spanMs` starting `settleMs` after it. A miss at p = 1 is a
+ * wiring (ingest / value mapping) problem to fix first, not a statistical result.
+ */
+export function runFlagDetection(
+  stream: LoadedStream,
+  spans: readonly FlagSpan[],
+  opts: FlagDetectionOptions,
+): FlagDetectionResult {
+  const spanMs = opts.spanMs ?? 60_000;
+  const settleMs = opts.settleMs ?? 30_000;
+  const baseZ = opts.baseZThreshold ?? 2.0;
+  const curator = opts.curator ?? newCurator(baseZ);
+  const lens: QObserveParams = opts.lens ?? { window_ms: 10_000, group_by: [opts.target.key] };
+  const grouped = (lens.group_by ?? []).length > 0;
+  const tails = flagExclusion(spans, settleMs);
+  const out: FlagDetectionResult = {
+    planned: spans.length, blindByGap: 0, tooShort: 0, refContaminated: 0, unusableReference: 0,
+    trials: 0, detected: 0, power: 0, detectedAnyGroup: 0,
+  };
+  spans.forEach((s, i) => {
+    const refFrom = s.fromTs - spanMs;
+    const obsFrom = s.fromTs + settleMs;
+    const obsTo = obsFrom + spanMs;
+    if (obsTo > s.toTs) { out.tooShort++; return; }
+    if (tails.some((t, j) => j !== i && t.toTs > refFrom && t.fromTs < s.fromTs)) { out.refContaminated++; return; }
+    if (overlapsGap(stream.gaps, refFrom, s.fromTs) || overlapsGap(stream.gaps, obsFrom, obsTo)) { out.blindByGap++; return; }
+    const pkg = curator.curate(
+      applyLens(sliceEvents(stream.events, obsFrom, obsTo), lens),
+      applyLens(sliceEvents(stream.events, refFrom, s.fromTs), lens),
+    );
+    if (!pkg.referenceUsable) { out.unusableReference++; return; }
+    out.trials++;
+    const tiles = statisticalTiles(pkg);
+    if (tiles.length > 0) out.detectedAnyGroup++;
+    if (tiles.some((t) => !grouped || t.group === opts.target.value)) out.detected++;
+  });
+  out.power = out.trials > 0 ? out.detected / out.trials : 0;
   return out;
 }
 

@@ -17,15 +17,13 @@
 import { join } from "node:path";
 import {
   dispersionProfile,
+  HOLDOUT_FROM_DAY,
   loadWikiDir,
   restrictToKeyValues,
   runInjectionPower,
   runNullCalibration,
   topKeyValues,
 } from "./real-data-harness.js";
-
-/** Day 5 of the collection that began 2026-09-29. */
-const HOLDOUT_FROM_DAY = "2026-10-03";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);

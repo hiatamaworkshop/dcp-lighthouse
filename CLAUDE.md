@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済・実データ較正期間の第0段階を実装済・収集器の再開欠陥 (2026-09-30) 修正済 (テスト467件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済・実データ較正期間の第0段階を実装済・収集器の再開欠陥 (2026-09-30) 修正済・H4 のフラグ切替器/コレクタ設定/レポート整備済 (テスト483件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -146,9 +146,14 @@ dcp-lighthouse/
       wikimedia-collector.ts     ← EventStreams 収集器 (v1 レコード・欠落=盲目・日別 gzip・
                                    トピック別再開 Last-Event-ID・未確定の穴は collector-state.json)
       otlp-receiver.ts           ← OTLP/HTTP JSON 受け口 (H4。weight = 1/p)
-      real-data-harness.ts       ← 再生ハーネス: R_real vs FA_shuffle・注入・φ/ラグ1・間引き再生
-      run-wikimedia-collector.ts / run-otlp-receiver.ts / run-otel-flag-log.ts / run-real-data-report.ts
+      otel-flag-schedule.ts      ← H4 の障害フラグ切替器 (固定予定・flagd-ui API 経由・flagd で切替を確認して真値ログへ)
+      real-data-harness.ts       ← 再生ハーネス: R_real vs FA_shuffle・注入・φ/ラグ1・間引き再生・
+                                   フラグ真値 (ON 区間の除外と検出)
+      run-wikimedia-collector.ts / run-otlp-receiver.ts / run-otel-flag-log.ts / run-otel-flag-schedule.ts /
+      run-real-data-report.ts / run-otel-report.ts
                                  ← 起動口 (レポートは保留日を --holdout なしで拒否)
+  server/otel/
+      otelcol-config-lighthouse.yml ← OTel Demo のコレクタ extras (traces → 受け口へ OTLP/JSON)
     ── ドメイン適用 (Phase 1) ──
       mock-stream-generator.ts   ← MockStreamGenerator
       testor-adapter.ts          ← test_result:v1 への正規化
@@ -517,6 +522,11 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     未確定の穴は `collector-state.json` に保存してハーネスも盲目として読む (読めなければ拒否)、
     タスクは `conhost --headless` 経由。運用手順は skill `wiki-collector-ops`。
     事前登録の規則 (欠落=盲目) は不変。詳細は ROADMAP_BRIEF.md 2026-09-30
+  - **H4 の整備 (2026-09-30、Demo は未起動)** — Demo では `paymentServiceFailure` が **`paymentFailure`** に改名
+    (失敗率の数値バリアント、`"90%"` の値は 0.95)。フラグ切替器は flagd-ui API 経由で書き flagd で確認
+    (ファイル直書きは flagd-ui のキャッシュに消され、Windows では監視にも届かない)。H4 レポートは
+    ON 区間を帰無から除外し p 別に判定。間引きは**トレース単位** (`thinByTrace`)。レンズ・間引き単位・実施日
+    (探索期間に配線確認の短い通し、判定用の 1 日は保留期間中) は事前登録の改訂履歴 2026-09-30 で確定
 - **予定: 高速分類器 (TypeSafe AI / Jev) の Brain 層配置 (2026-09-17 登録・未着手)** — Jev は waitlist 制の
   early access でアクセス待ち。型付きの確率つき判定を 70〜500ms で返すので、**毎 tick の一次判定
   (応答種別とレンズを Choice で選ぶ) + 低確信度で ClaudeBrain に escalate** の二段構えにする案。

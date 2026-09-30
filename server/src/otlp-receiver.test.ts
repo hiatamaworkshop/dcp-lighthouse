@@ -126,5 +126,8 @@ describe("OtlpReceiver", () => {
     assert.deepEqual(s.events[0].keys, { service: "payment", op: "POST /pay" });
     assert.equal(s.events.find((e) => e.value === 1)?.weight, 2);
     assert.equal(s.events.find((e) => e.value === 0)?.weight, undefined);
+    // Both spans are trace t1: the replay can sample them as one trace.
+    assert.equal(typeof s.events[0].traceHash, "number");
+    assert.equal(s.events[0].traceHash, s.events[1].traceHash);
   });
 });

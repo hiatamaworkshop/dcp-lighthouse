@@ -1,0 +1,23 @@
+# OTel Demo collector extras for H4 (ROADMAP_BRIEF.md 2026-09-27 (3), source B).
+# Sends every trace to lighthouse's OTLP receiver (server/src/run-otlp-receiver.ts,
+# port 4318 on the host) as OTLP/JSON — the receiver answers protobuf with 415.
+#
+# Use it by pointing the Demo's .env (or the shell) at this file:
+#   OTEL_COLLECTOR_CONFIG_EXTRAS=<absolute path to this file>
+# and start the base compose only (no compose.observability.yaml: Jaeger,
+# Prometheus and OpenSearch are not needed and cost memory).
+#
+# The collector merges config files but REPLACES arrays, so the traces
+# exporters repeat the base config's list (debug, span_metrics) and add ours.
+# Written against the Demo at 858f76f (collector-contrib 0.160.0), where the
+# OTLP/HTTP exporter type is `otlp_http`.
+
+exporters:
+  otlp_http/lighthouse:
+    endpoint: http://host.docker.internal:4318
+    encoding: json
+
+service:
+  pipelines:
+    traces:
+      exporters: [debug, span_metrics, otlp_http/lighthouse]

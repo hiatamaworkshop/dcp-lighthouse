@@ -11,16 +11,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   dispersionProfile,
+  flagExclusion,
+  fnv1a32,
+  loadFlagTruth,
   loadWikiDir,
   planTrials,
+  runFlagDetection,
   restrictToKeyValues,
   runInjectionPower,
   runNullCalibration,
   shuffleValues,
   sliceEvents,
   synthesizeStream,
+  thinByTrace,
   thinEvents,
   topKeyValues,
+  type TracedEvent,
 } from "./real-data-harness.js";
 import { mulberry32 } from "./calibration.js";
 
@@ -167,6 +173,37 @@ describe("thinning a recording to a sampling probability (H4 replay)", () => {
   });
 });
 
+describe("thinning by trace (the H4 sampling unit)", () => {
+  // 2000 traces × 5 spans; trace ids like the Demo's (32 hex), hashed as loadOtelDir does.
+  const events: TracedEvent[] = [];
+  for (let t = 0; t < 2000; t++) {
+    const traceHash = fnv1a32(t.toString(16).padStart(32, "0"));
+    for (let k = 0; k < 5; k++) events.push({ ts: t * 10 + k, value: 1, traceHash });
+  }
+  const traces = (xs: readonly TracedEvent[]) => new Set(xs.map((e) => e.traceHash));
+
+  it("keeps or drops a trace whole, ≈ p of the traces, each span weighted 1/p", () => {
+    const out = thinByTrace(events, 0.1, 7);
+    const kept = traces(out);
+    assert.ok(Math.abs(kept.size / 2000 - 0.1) < 0.02, `kept traces = ${kept.size / 2000}`);
+    assert.equal(out.length, 5 * kept.size); // no trace half-kept
+    assert.ok(out.every((e) => e.weight === 10));
+  });
+
+  it("consistent: for one seed the p = 0.1 sample is inside the p = 0.5 one; another seed draws another sample", () => {
+    const small = traces(thinByTrace(events, 0.1, 7));
+    const big = traces(thinByTrace(events, 0.5, 7));
+    assert.ok([...small].every((h) => big.has(h)));
+    assert.notDeepEqual([...traces(thinByTrace(events, 0.1, 8))].sort(), [...small].sort());
+  });
+
+  it("p = 1 keeps everything unweighted; an event without a trace is refused, not thinned alone", () => {
+    assert.deepEqual(thinByTrace(events, 1, 7), events);
+    assert.throws(() => thinByTrace([{ ts: 0, value: 1 }], 0.5, 7), RangeError);
+    assert.throws(() => thinByTrace(events, 0, 7), RangeError);
+  });
+});
+
 describe("loading a collector directory", () => {
   it("reads day files and gaps, keeps only the requested days, drops nothing personal (there is none to keep)", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wiki-"));
@@ -222,5 +259,84 @@ describe("loading a collector directory", () => {
     writeFileSync(join(dir, "2026-10-01.jsonl"), [rec(d), rec(d + 1)].join("\n") + "\n");
     const s = await loadWikiDir(dir);
     assert.equal(s.events[0].keys, s.events[1].keys);
+  });
+});
+
+describe("fault-flag truth (H4 / measurement ③)", () => {
+  it("builds ON spans from confirmed edges; a variant change extends the span; an open ON runs to endTs", () => {
+    const dir = mkdtempSync(join(tmpdir(), "otel-"));
+    const l = (o: Record<string, unknown>) => JSON.stringify({ flag: "paymentFailure", ...o });
+    writeFileSync(join(dir, "flags.jsonl"), [
+      l({ ts: 0, state: "off", confirmedTs: 10 }),
+      l({ ts: 100, state: "on", variant: "50%", value: 0.5, confirmedTs: 150 }),
+      JSON.stringify({ ts: 120, flag: "kafkaQueueProblems", state: "on" }), // another flag
+      l({ ts: 200, state: "on", variant: "90%", value: 0.95, confirmedTs: 210 }),
+      l({ ts: 300, state: "off", confirmedTs: null }), // written, never confirmed
+      "{torn",
+      l({ ts: 500, state: "on" }), // manual line: no confirmation field at all
+    ].join("\n") + "\n");
+    const spans = loadFlagTruth(dir, "paymentFailure", 9_999);
+    assert.deepEqual(spans, [
+      { fromTs: 150, toTs: 300, variant: "90%", value: 0.95, confirmed: false },
+      { fromTs: 500, toTs: 9_999, variant: undefined, value: undefined, confirmed: false },
+    ]);
+    assert.deepEqual(flagExclusion(spans, 30), [{ fromTs: 150, toTs: 330 }, { fromTs: 500, toTs: 10_029 }]);
+  });
+
+  it("no truth file is refused, not read as 'never ON'", () => {
+    assert.throws(() => loadFlagTruth(mkdtempSync(join(tmpdir(), "otel-")), "paymentFailure"));
+  });
+
+  // Two services at 16 evt/s each, pass rate 0.95; ON spans of 10 min every 20 min.
+  // Edges sit 90 s off the null trials' 120 s grid: an edge ON a trial boundary
+  // is never inside any trial, and fault time would leak into nothing to exclude.
+  const MIN = 60_000;
+  const t0 = 1_800_000_000_000;
+  const spans = Array.from({ length: 12 }, (_, i) => {
+    const fromTs = t0 + 10 * MIN + 90_000 + i * 20 * MIN;
+    return { fromTs, toTs: fromTs + 10 * MIN, confirmed: true };
+  });
+  const base = synthesizeStream({ startTs: t0, durationMs: 250 * MIN, seed: 51, wikis: { payment: 1, cart: 1 }, p: 0.95 });
+  const rng = mulberry32(52);
+  const faulted = {
+    ...base,
+    events: base.events.map((e) =>
+      e.keys!.wiki === "payment" && spans.some((s) => e.ts >= s.fromTs && e.ts < s.toTs) && rng() < 0.5 ? { ...e, value: 0 } : e),
+  };
+  const opts = { lens: { window_ms: 10_000, group_by: ["wiki"] }, target: { key: "wiki", value: "payment" } };
+
+  it("a real fault in the target group is detected in every ON span (the wiring check passes)", () => {
+    const r = runFlagDetection(faulted, spans, opts);
+    assert.equal(r.trials, spans.length);
+    assert.equal(r.detected, spans.length);
+  });
+
+  it("the same ON spans over an unperturbed stream mostly stay quiet — the check does not find faults by itself", () => {
+    const r = runFlagDetection(base, spans, opts);
+    assert.equal(r.trials, spans.length);
+    assert.ok(r.detected <= 2, `detected ${r.detected}/${r.trials}`);
+  });
+
+  it("excluding ON time keeps fault time out of the null rate, and is counted apart from blindness", () => {
+    const exclude = flagExclusion(spans, 30_000);
+    const withEx = runNullCalibration(faulted, { lens: opts.lens, spanMs: 60_000, shuffleReps: 0, exclude, seed: 5 });
+    const without = runNullCalibration(faulted, { lens: opts.lens, spanMs: 60_000, shuffleReps: 0, seed: 5 });
+    assert.ok(withEx.excluded > 0);
+    assert.equal(withEx.blindByGap, 0);
+    assert.equal(withEx.planned, withEx.real.trials + withEx.real.unusableReference + withEx.excluded);
+    assert.ok(withEx.real.rate < 0.09, `OFF rate with exclusion = ${withEx.real.rate}`);
+    assert.ok(without.real.rate > 2 * withEx.real.rate, `${without.real.rate} vs ${withEx.real.rate}`);
+  });
+
+  it("an ON span too short for settle + span, or whose reference overlaps an earlier span's tail, is not scored", () => {
+    const short = [{ fromTs: t0 + 10 * MIN, toTs: t0 + 10 * MIN + 60_000, confirmed: true }];
+    assert.equal(runFlagDetection(faulted, short, opts).tooShort, 1);
+    const close = [
+      { fromTs: t0 + 10 * MIN, toTs: t0 + 15 * MIN, confirmed: true },
+      { fromTs: t0 + 15 * MIN + 45_000, toTs: t0 + 25 * MIN, confirmed: true }, // ref starts inside the first's 30 s tail
+    ];
+    const r = runFlagDetection(faulted, close, opts);
+    assert.equal(r.refContaminated, 1);
+    assert.equal(r.trials, 1);
   });
 });
