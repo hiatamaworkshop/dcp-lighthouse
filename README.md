@@ -211,10 +211,14 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
         H4 用の OTLP 受け口 (`otlp-receiver.ts`)・障害フラグの真値ログ・p 別の間引き再生
       - 収集 1〜4 日目は探索、**5〜7 日目 (2026-10-03〜10-05) は保留期間** (最後に 1 回だけ見る。
         レポートは保留日を `--holdout` なしでは拒否する)
+      - 2026-09-30: 再起動後の遡り取得で約 2 時間を取りこぼした (静かな方の Kafka トピックが先に
+        現在時刻へ着き、最大時刻から計算した再接続位置が本流の未読区間を飛ばした)。
+        トピック別の再開 (`Last-Event-ID`) と「埋まる見込みが消えてから確定する」欠落検知に修正。
+        取りこぼした区間は盲目として残している
       - 待ち: 探索日レポートの実行、保留期間の最終確認、OTel Demo の実走 (1 日)
-      - 詳細は ROADMAP_BRIEF.md 2026-09-27 (3), 2026-09-29 〜 (3)
+      - 詳細は ROADMAP_BRIEF.md 2026-09-27 (3), 2026-09-29 〜 (3), 2026-09-30
 
-現在テスト計 456 件、全 green。
+現在テスト計 467 件、全 green。
 
 ## 実データ較正期間の運用
 
@@ -222,7 +226,7 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 公開リポジトリには入らない。
 
 ```sh
-node dist/run-wikimedia-collector.js       # Wikimedia の常駐収集 (data/wikimedia/、欠落は gaps.jsonl)
+node dist/run-wikimedia-collector.js       # Wikimedia の常駐収集 (data/wikimedia/、確定した欠落は gaps.jsonl)
 node dist/run-real-data-report.js --from 2026-09-29 --to 2026-10-02   # H1 (φ・R_real vs FA_shuffle)・H2 (検出力 vs G)
 node dist/run-real-data-report.js --from 2026-10-03 --to 2026-10-05 --holdout   # 保留期間: 最終確認 1 回だけ
 node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
@@ -230,6 +234,12 @@ node dist/run-otel-flag-log.js paymentServiceFailure on   # 障害フラグ切�
 ```
 
 `WIKI_DATA_DIR` / `OTEL_DATA_DIR` / `PORT` で置き場所とポートを変えられる。
+
+Windows で常駐させるなら、タスクスケジューラの action を
+`conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File server/scripts/run-wiki-collector.ps1 -Node <node.exe>`
+にする (ログは `data/logs/`)。`node.exe` を直接登録するとログオン時にコンソール窓が出て、
+閉じると収集器ごと終了する。再開位置と未確定の欠落は `data/wikimedia/collector-state.json` に残り、
+再生ハーネスは未確定の欠落も盲目として読む。点検手順は `.claude/skills/wiki-collector-ops/SKILL.md`。
 `--holdout` は「ちょっと見る」ために付けない — 保留期間を見た後にパラメータを変えると、期間の結論が無効になる。
 
 ## BRAIN_MODE

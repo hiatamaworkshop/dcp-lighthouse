@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済・実データ較正期間の第0段階を実装済 (テスト456件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済・実データ較正期間の第0段階を実装済・収集器の再開欠陥 (2026-09-30) 修正済 (テスト467件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -143,7 +143,8 @@ dcp-lighthouse/
       q-collector-binding.ts     ← $Q[observe] → StCollector 動的 bind
       q-retention-binding.ts     ← $Q[pipeline] → retention 窓
     ── 実データ較正期間 (2026-09-27 事前登録。実データ用・灯台側のみ) ──
-      wikimedia-collector.ts     ← EventStreams 収集器 (v1 レコード・欠落=盲目・日別 gzip)
+      wikimedia-collector.ts     ← EventStreams 収集器 (v1 レコード・欠落=盲目・日別 gzip・
+                                   トピック別再開 Last-Event-ID・未確定の穴は collector-state.json)
       otlp-receiver.ts           ← OTLP/HTTP JSON 受け口 (H4。weight = 1/p)
       real-data-harness.ts       ← 再生ハーネス: R_real vs FA_shuffle・注入・φ/ラグ1・間引き再生
       run-wikimedia-collector.ts / run-otlp-receiver.ts / run-otel-flag-log.ts / run-real-data-report.ts
@@ -159,7 +160,10 @@ dcp-lighthouse/
       dashboard.ts / index.ts    ← SSE bridge / 起動
     ── §12 A/B 実験 (L3 前段) ──
       ab-fixture.ts / ab-harness.ts / ab-strategy-b.ts / run-ab-strategy-b.ts / anthropic-ask.ts
+  server/scripts/
+      run-wiki-collector.ps1     ← 収集器のタスクスケジューラ入口 (conhost --headless・data/logs/)
   dashboard/             ← ブラウザ UI (HTML + JS)
+  .claude/skills/        ← run-lighthouse (ダッシュボード実地検証) / wiki-collector-ops (収集器の点検・運用)
     index.html
     app.js
 ```
@@ -505,6 +509,14 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
   仮説は H1 依存 (過分散・自己相関) / H2 group 数の爆発 / H3 日周変動 / H4 サンプリング重み。
   **5〜7 日目は保留期間、閾値で実データを黙らせない、収集の欠落は盲目として扱う**。
   すべて灯台側で dcp-wrap のコアは触らない。詳細は ROADMAP_BRIEF.md 2026-09-27 (3)
+  - **収集の取りこぼしと修正 (2026-09-30)** — OS 再起動後、タスクが出したコンソール窓を閉じて収集器が停止。
+    遡り取得では**静かな方の Kafka トピック (codfw) が先に「今」へ着く**ため、最大時刻基準の欠落検知が
+    偽の穴 7 件を出し、さらに遡り取得中の再接続が `since=最大時刻−60s` で本流 (eqiad) の
+    11:21〜13:18Z を飛ばした (取り直さない判断、gaps.jsonl は書き換えない)。
+    修正: `Last-Event-ID` によるトピック別再開、穴は最下位が `gapSettleMs` 埋まらなかったときに確定、
+    未確定の穴は `collector-state.json` に保存してハーネスも盲目として読む (読めなければ拒否)、
+    タスクは `conhost --headless` 経由。運用手順は skill `wiki-collector-ops`。
+    事前登録の規則 (欠落=盲目) は不変。詳細は ROADMAP_BRIEF.md 2026-09-30
 - **予定: 高速分類器 (TypeSafe AI / Jev) の Brain 層配置 (2026-09-17 登録・未着手)** — Jev は waitlist 制の
   early access でアクセス待ち。型付きの確率つき判定を 70〜500ms で返すので、**毎 tick の一次判定
   (応答種別とレンズを Choice で選ぶ) + 低確信度で ClaudeBrain に escalate** の二段構えにする案。

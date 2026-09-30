@@ -6,8 +6,10 @@ import { join } from "node:path";
 import { gunzipSync } from "node:zlib";
 import {
   GapTracker,
+  STATE_FILE,
   SseParser,
   WikimediaCollector,
+  resumeAssignments,
   toRecord,
   utcDay,
   type WikiRecord,
@@ -74,31 +76,110 @@ describe("SseParser", () => {
     const p = new SseParser();
     assert.deepEqual([...p.push("data: x\r"), ...p.push("\n\r"), ...p.push("\n")], ["x"]);
   });
+
+  it("tracks the id of the last completed event (an id sticks until the next one)", () => {
+    const p = new SseParser();
+    p.push("id: A\ndata: 1\n\n");
+    assert.equal(p.lastEventId, "A");
+    p.push("data: 2\n\nid: B\ndata: 3");
+    assert.equal(p.lastEventId, "A", "B's event is not complete yet");
+    p.push("\n\n");
+    assert.equal(p.lastEventId, "B");
+  });
 });
 
 describe("GapTracker", () => {
   it("flags a hole wider than the tolerance, measured from the running maximum", () => {
     const g = new GapTracker(10_000);
-    assert.equal(g.observe(1_000), null);
-    assert.equal(g.observe(5_000), null);
+    assert.deepEqual(g.observe(1_000, 0), []);
+    assert.deepEqual(g.observe(5_000, 0), []);
     // an out-of-order straggler is not a hole and must not lower the reference
-    assert.equal(g.observe(2_000), null);
-    assert.deepEqual(g.observe(20_000), { kind: "gap", fromTs: 5_000, toTs: 20_000 });
-    assert.equal(g.observe(21_000), null);
+    assert.deepEqual(g.observe(2_000, 0), []);
+    assert.deepEqual(g.observe(20_000, 0), [{ kind: "gap", fromTs: 5_000, toTs: 20_000 }]);
+    assert.deepEqual(g.observe(21_000, 0), []);
   });
 
   it("a seeded reference makes the first event after a restart reveal the downtime", () => {
     const g = new GapTracker(10_000);
     g.seed(1_000);
-    assert.deepEqual(g.observe(100_000), { kind: "gap", fromTs: 1_000, toTs: 100_000 });
+    assert.deepEqual(g.observe(100_000, 0), [{ kind: "gap", fromTs: 1_000, toTs: 100_000 }]);
+  });
+
+  it("a backlog filling in behind a quiet topic that ran ahead leaves NO gap (2026-09-30)", () => {
+    // The quiet topic lands at 100 s and 200 s first; the busy one then replays
+    // 2..199 s, one event per wall second — far longer than settleMs in total.
+    const g = new GapTracker(10_000, 60_000);
+    g.seed(1_000);
+    let wall = 0;
+    assert.deepEqual(g.observe(100_000, wall), []);
+    assert.deepEqual(g.observe(200_000, wall), []);
+    assert.equal(g.openGaps().length, 2);
+    for (let ts = 2_000; ts < 200_000; ts += 1_000) {
+      wall += 1_000;
+      assert.deepEqual(g.observe(ts, wall), [], `no gap may be finalized while the backlog fills (ts=${ts})`);
+    }
+    assert.deepEqual(g.openGaps(), []);
+  });
+
+  it("a hole nothing fills is finalized after settleMs, bottom-up, and not before", () => {
+    const g = new GapTracker(10_000, 60_000);
+    g.seed(0);
+    g.observe(100_000, 0);
+    g.observe(200_000, 0);
+    assert.equal(g.lowestOpenFrom(), 0);
+    assert.deepEqual(g.settle(59_999), []);
+    assert.deepEqual(g.settle(60_000), [
+      { kind: "gap", fromTs: 0, toTs: 100_000 },
+      { kind: "gap", fromTs: 100_000, toTs: 200_000 },
+    ]);
+  });
+
+  it("an event inside a hole splits it; only the pieces wider than the tolerance stay open", () => {
+    const g = new GapTracker(10_000, 60_000);
+    g.seed(0);
+    g.observe(100_000, 0);
+    g.observe(50_000, 0);
+    assert.deepEqual(g.openGaps(), [{ fromTs: 0, toTs: 50_000 }, { fromTs: 50_000, toTs: 100_000 }]);
+    g.observe(95_000, 0);
+    assert.deepEqual(g.openGaps(), [{ fromTs: 0, toTs: 50_000 }, { fromTs: 50_000, toTs: 95_000 }]);
+  });
+
+  it("restored holes stay open and restart their clocks", () => {
+    const g = new GapTracker(10_000, 60_000);
+    g.restore([{ fromTs: 5_000, toTs: 9_000_000 }], 1_000_000);
+    assert.equal(g.lowestOpenFrom(), 5_000);
+    assert.deepEqual(g.settle(1_059_999), []);
+    assert.equal(g.settle(1_060_000).length, 1);
+  });
+});
+
+describe("resumeAssignments", () => {
+  it("steps timestamps back by the overlap, keeps offsets, and turns 'latest' into the floor", () => {
+    const id = JSON.stringify([
+      { topic: "eqiad.mediawiki.recentchange", partition: 0, timestamp: 50_000 },
+      { topic: "codfw.mediawiki.recentchange", partition: 0, offset: -1 },
+      { topic: "x", partition: 1, offset: 42 },
+    ]);
+    assert.deepEqual(resumeAssignments(id, 1_000, 7), [
+      { topic: "eqiad.mediawiki.recentchange", partition: 0, timestamp: 49_000 },
+      { topic: "codfw.mediawiki.recentchange", partition: 0, timestamp: 7 },
+      { topic: "x", partition: 1, offset: 42 },
+    ]);
+  });
+
+  it("anything it cannot read is null (the caller falls back to `since`)", () => {
+    assert.equal(resumeAssignments("not json", 0, 0), null);
+    assert.equal(resumeAssignments("[]", 0, 0), null);
+    assert.equal(resumeAssignments('[{"partition":0}]', 0, 0), null);
   });
 });
 
 /** A fetch that serves the given bodies, one per connection, then hangs until aborted. */
-function fakeFetch(bodies: string[], urls: string[] = []): typeof fetch {
+function fakeFetch(bodies: string[], urls: string[] = [], lastIds: (string | undefined)[] = []): typeof fetch {
   let i = 0;
   return (async (url: string | URL | Request, init?: RequestInit) => {
     urls.push(String(url));
+    lastIds.push((init?.headers as Record<string, string> | undefined)?.["Last-Event-ID"]);
     const body = bodies[i++];
     const signal = init?.signal;
     if (body === undefined) {
@@ -156,7 +237,7 @@ describe("WikimediaCollector", () => {
     try {
       const body = sse(raw({}, "a", 0)) + sse(raw({}, "b", 30_000));
       const c = new WikimediaCollector({
-        dir, now: () => T0, log: () => {}, gapToleranceMs: 10_000,
+        dir, now: () => T0, log: () => {}, gapToleranceMs: 10_000, gapSettleMs: 0,
         backoffMinMs: 5, backoffMaxMs: 5, fetchFn: fakeFetch([body]),
       });
       await runUntilIdle(c);
@@ -199,7 +280,7 @@ describe("WikimediaCollector", () => {
       writeFileSync(join(dir, `${day}.jsonl`), JSON.stringify(rec("a", 0)) + "\n" + JSON.stringify(rec("b", 1_000)) + "\n{torn");
       const urls: string[] = [];
       const c = new WikimediaCollector({
-        dir, now: () => T0, log: () => {}, gapToleranceMs: 10_000, sinceOverlapMs: 0,
+        dir, now: () => T0, log: () => {}, gapToleranceMs: 10_000, gapSettleMs: 0, sinceOverlapMs: 0,
         backoffMinMs: 5, backoffMaxMs: 5,
         fetchFn: fakeFetch([sse(raw({}, "b", 1_000)) + sse(raw({}, "c", 60_000))], urls),
       });
@@ -207,6 +288,85 @@ describe("WikimediaCollector", () => {
       assert.ok(urls[0].includes(`since=${new Date(T0 + 1_000).toISOString()}`), "resumes from the restored maximum");
       assert.equal(c.stats.duplicates, 1, "b was already on disk");
       assert.equal(c.stats.gaps, 1, "the downtime is reported, not read as quiet");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a reconnect mid-backfill resumes from the lowest open hole, not the running maximum (2026-09-30)", async () => {
+    const dir = tmp();
+    try {
+      const urls: string[] = [];
+      // The quiet topic runs ahead to +100 s; the busy one has only reached +5 s when the connection drops.
+      const first = sse(raw({}, "a", 0)) + sse(raw({}, "quiet", 100_000)) + sse(raw({}, "b", 5_000));
+      const c = new WikimediaCollector({
+        dir, now: () => T0, log: () => {}, sinceOverlapMs: 1_000,
+        backoffMinMs: 5, backoffMaxMs: 5, fetchFn: fakeFetch([first], urls),
+      });
+      await runUntilIdle(c, 120);
+      assert.equal(urls[1], `https://stream.wikimedia.org/v2/stream/recentchange?since=${new Date(T0 + 4_000).toISOString()}`);
+      assert.equal(c.stats.gaps, 0, "the hole is still open, not final");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resumes each topic from its own position via Last-Event-ID, across reconnects and restarts", async () => {
+    const dir = tmp();
+    try {
+      const id = (ts: number) =>
+        `id: ${JSON.stringify([
+          { topic: "eqiad.mediawiki.recentchange", partition: 0, timestamp: ts },
+          { topic: "codfw.mediawiki.recentchange", partition: 0, offset: -1 },
+        ])}\n`;
+      const body = id(T0) + sse(raw({}, "a", 0)) + id(T0 + 2_000) + sse(raw({}, "b", 2_000));
+      const urls: string[] = [];
+      const lastIds: (string | undefined)[] = [];
+      const c = new WikimediaCollector({
+        dir, now: () => T0 + 10_000, log: () => {}, sinceOverlapMs: 1_000,
+        backoffMinMs: 5, backoffMaxMs: 5, fetchFn: fakeFetch([body], urls, lastIds),
+      });
+      await runUntilIdle(c, 120);
+      const expected = JSON.stringify([
+        { topic: "eqiad.mediawiki.recentchange", partition: 0, timestamp: T0 + 1_000 },
+        // codfw delivered nothing: it resumes from where the first connection started, not "latest"
+        { topic: "codfw.mediawiki.recentchange", partition: 0, timestamp: T0 + 9_000 },
+      ]);
+      assert.equal(lastIds[0], undefined);
+      assert.equal(urls[1], "https://stream.wikimedia.org/v2/stream/recentchange");
+      assert.equal(lastIds[1], expected);
+
+      // A new process picks the cursor up from collector-state.json.
+      const lastIds2: (string | undefined)[] = [];
+      const c2 = new WikimediaCollector({
+        dir, now: () => T0 + 99_000, log: () => {}, sinceOverlapMs: 1_000,
+        backoffMinMs: 5, backoffMaxMs: 5, fetchFn: fakeFetch([], [], lastIds2),
+      });
+      await runUntilIdle(c2);
+      assert.equal(lastIds2[0], expected);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an open hole survives a restart in collector-state.json and still steers the resume", async () => {
+    const dir = tmp();
+    try {
+      const c = new WikimediaCollector({ dir, now: () => T0, log: () => {}, sinceOverlapMs: 0 });
+      c.ingest(JSON.stringify(raw({}, "a", 0)));
+      c.ingest(JSON.stringify(raw({}, "quiet", 100_000)));
+      await c.close();
+      const state = JSON.parse(readFileSync(join(dir, STATE_FILE), "utf8"));
+      assert.deepEqual(state.openGaps, [{ fromTs: T0, toTs: T0 + 100_000 }]);
+      assert.equal(existsSync(join(dir, "gaps.jsonl")), false);
+
+      const urls: string[] = [];
+      const c2 = new WikimediaCollector({
+        dir, now: () => T0, log: () => {}, sinceOverlapMs: 0,
+        backoffMinMs: 5, backoffMaxMs: 5, fetchFn: fakeFetch([], urls),
+      });
+      await runUntilIdle(c2);
+      assert.ok(urls[0].endsWith(`since=${new Date(T0).toISOString()}`), urls[0]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -221,8 +381,8 @@ describe("WikimediaCollector", () => {
       clock = T0 + 24 * 3600_000;
       c.ingest(JSON.stringify(raw({}, "b", 24 * 3600_000)));
       await c.close();
-      // (the 24h jump between the two events is itself a gap, so gaps.jsonl exists)
-      const files = readdirSync(dir).filter((f) => f !== "gaps.jsonl").sort();
+      // (the 24h jump is a hole, still open under the default settle — it lives in collector-state.json)
+      const files = readdirSync(dir).filter((f) => f !== "gaps.jsonl" && f !== STATE_FILE).sort();
       assert.deepEqual(files, [`${utcDay(T0)}.jsonl.gz`, `${utcDay(T0 + 24 * 3600_000)}.jsonl`]);
       assert.ok(gunzipSync(readFileSync(join(dir, files[0]))).toString().includes('"eid":"a"'));
       assert.equal(existsSync(join(dir, `${utcDay(T0)}.jsonl`)), false, "raw file removed after gzip");

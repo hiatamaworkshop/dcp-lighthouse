@@ -12,12 +12,13 @@
  * The collector's one duty beyond writing lines is to be honest about what it
  * did NOT see (pre-registration rule 5: a collection gap is BLINDNESS, never
  * quiet). A gap is recorded whenever consecutive event timestamps are more
- * than `gapToleranceMs` apart. That single rule covers a dropped connection
+ * than `gapToleranceMs` apart and nothing has filled the hole for
+ * `gapSettleMs` (see GapTracker). That single rule covers a dropped connection
  * that `since` could not fully refill, a silent stall, and a process that was
  * down — all three look the same to whoever replays the file, which is the
  * point: the replay asks "is there an event-time hole here?", not "why".
  */
-import { createReadStream, createWriteStream, mkdirSync, readdirSync, statSync, unlinkSync, openSync, readSync, closeSync, appendFileSync } from "node:fs";
+import { createReadStream, createWriteStream, mkdirSync, readdirSync, statSync, unlinkSync, openSync, readSync, closeSync, appendFileSync, existsSync, readFileSync, writeFileSync, renameSync } from "node:fs";
 import type { WriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { createGzip } from "node:zlib";
@@ -62,10 +63,17 @@ export function toRecord(raw: unknown): WikiRecord | null {
   return { ts, value: r.bot ? 1 : 0, wiki: r.wiki, type: r.type, namespace, eid: meta.id };
 }
 
-/** Incremental SSE parser: feed decoded text, get the `data:` payload of each completed event. */
+/**
+ * Incremental SSE parser: feed decoded text, get the `data:` payload of each
+ * completed event. `lastEventId` follows the SSE rule (an `id:` line sets it,
+ * and it sticks until the next one), read after `push` = the id of the last
+ * event that chunk completed.
+ */
 export class SseParser {
   private buf = "";
   private data: string[] = [];
+  private pendingId: string | undefined;
+  lastEventId: string | undefined;
 
   push(text: string): string[] {
     this.buf += text;
@@ -78,40 +86,156 @@ export class SseParser {
       if (this.buf[nl] === "\r" && nl + 1 === this.buf.length) break;
       this.buf = this.buf.slice(nl + sep);
       if (line === "") {
+        if (this.pendingId !== undefined) this.lastEventId = this.pendingId;
         if (this.data.length > 0) out.push(this.data.join("\n"));
         this.data = [];
       } else if (line.startsWith(":")) {
         // comment / keepalive — liveness is judged on bytes, not here
       } else if (line.startsWith("data:")) {
         this.data.push(line.slice(5).replace(/^ /, ""));
+      } else if (line.startsWith("id:")) {
+        this.pendingId = line.slice(3).replace(/^ /, "");
       }
     }
     return out;
   }
 }
 
+/** A hole that later events may still fill. */
+export interface OpenGap {
+  fromTs: number;
+  toTs: number;
+}
+
 /**
- * Flags event-time holes. Uses the running MAXIMUM timestamp, not the previous
- * one: recentchange arrives slightly out of order, and an early straggler must
- * not look like a hole (nor reset the reference point).
+ * Flags event-time holes, but only once they can no longer be filled.
+ *
+ * recentchange is two Kafka topics (eqiad / codfw), and only one datacenter
+ * carries the traffic — the other emits a handful of events an hour. On a
+ * resume that re-reads hours of backlog, the near-empty topic reaches "now"
+ * within seconds while the busy one is still replaying from the resume point.
+ * Judged against the running maximum alone, every one of those early arrivals
+ * opens a "gap" the busy topic is about to fill (2026-09-30: seven false gaps
+ * over 11:12–13:19Z). So a hole is kept OPEN, shrunk or split as events land in
+ * it, and finalized only when the lowest open hole has gone `settleMs` of wall
+ * time without an event landing in it. The backlog replays in order, so it
+ * only ever fills the LOWEST hole: a higher hole is not stale for being
+ * untouched while a lower one is filling, and its clock starts when it becomes
+ * the lowest.
+ *
+ * `settleMs: 0` finalizes a hole the moment it opens (the old behaviour).
  */
 export class GapTracker {
   private maxTs: number | undefined;
-  constructor(private readonly toleranceMs: number) {}
+  private open: (OpenGap & { touchedAt: number })[] = [];
+  constructor(
+    private readonly toleranceMs: number,
+    private readonly settleMs = 0,
+  ) {}
 
   seed(ts: number): void {
     if (this.maxTs === undefined || ts > this.maxTs) this.maxTs = ts;
   }
 
-  observe(ts: number): GapEntry | null {
+  /** Re-open holes a previous process left unresolved; their clocks restart now. */
+  restore(gaps: readonly OpenGap[], now: number): void {
+    for (const g of gaps) this.open.push({ fromTs: g.fromTs, toTs: g.toTs, touchedAt: now });
+    this.open.sort((a, b) => a.fromTs - b.fromTs);
+  }
+
+  openGaps(): OpenGap[] {
+    return this.open.map(({ fromTs, toTs }) => ({ fromTs, toTs }));
+  }
+
+  /** Where the backlog still has to be read from, if anywhere. */
+  lowestOpenFrom(): number | undefined {
+    return this.open[0]?.fromTs;
+  }
+
+  /** Account for one event; returns the holes that became final. */
+  observe(ts: number, now: number): GapEntry[] {
     const prev = this.maxTs;
     this.seed(ts);
     if (prev !== undefined && ts - prev > this.toleranceMs) {
-      return { kind: "gap", fromTs: prev, toTs: ts };
+      this.open.push({ fromTs: prev, toTs: ts, touchedAt: now });
+    } else {
+      const i = this.open.findIndex((g) => g.fromTs < ts && ts < g.toTs);
+      if (i !== -1) {
+        const g = this.open[i];
+        const pieces: typeof this.open = [];
+        if (ts - g.fromTs > this.toleranceMs) pieces.push({ fromTs: g.fromTs, toTs: ts, touchedAt: now });
+        if (g.toTs - ts > this.toleranceMs) pieces.push({ fromTs: ts, toTs: g.toTs, touchedAt: now });
+        this.open.splice(i, 1, ...pieces);
+        // A hole that just became the lowest starts its clock now, not when it opened.
+        if (i === 0 && pieces.length === 0 && this.open.length > 0) this.open[0].touchedAt = now;
+      }
     }
-    return null;
+    return this.settle(now);
+  }
+
+  /** Finalize, from the bottom up, the holes nothing has landed in for `settleMs`. */
+  settle(now: number): GapEntry[] {
+    const done: GapEntry[] = [];
+    while (this.open.length > 0 && now - this.open[0].touchedAt >= this.settleMs) {
+      const g = this.open.shift() as OpenGap;
+      done.push({ kind: "gap", fromTs: g.fromTs, toTs: g.toTs });
+    }
+    return done;
   }
 }
+
+/** One Kafka assignment as EventStreams' SSE `id:` line carries it. */
+export interface StreamAssignment {
+  topic: string;
+  partition: number;
+  offset?: number;
+  timestamp?: number;
+}
+
+/**
+ * The `Last-Event-ID` to resume with: every topic continues from its OWN
+ * position. A single `since` timestamp cannot do that — derived from the
+ * running maximum, it jumps the busy topic past whatever the quiet one ran
+ * ahead of (2026-09-30: a reconnect mid-backfill resumed at 13:18Z and the busy
+ * topic's 11:21–13:18Z was never read). Timestamps step back `overlapMs` (the
+ * de-dup ring absorbs the repeat); an `offset` is exact and kept; offset -1
+ * ("latest", the topic has delivered nothing on this connection) would skip
+ * whatever it publishes while we are away, so it becomes `floorTs`.
+ */
+export function resumeAssignments(
+  lastEventId: string,
+  overlapMs: number,
+  floorTs: number,
+): StreamAssignment[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(lastEventId);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const out: StreamAssignment[] = [];
+  for (const a of parsed as Record<string, unknown>[]) {
+    if (typeof a?.topic !== "string" || typeof a.partition !== "number") return null;
+    if (typeof a.timestamp === "number") {
+      out.push({ topic: a.topic, partition: a.partition, timestamp: a.timestamp - overlapMs });
+    } else if (typeof a.offset === "number" && a.offset >= 0) {
+      out.push({ topic: a.topic, partition: a.partition, offset: a.offset });
+    } else {
+      out.push({ topic: a.topic, partition: a.partition, timestamp: floorTs });
+    }
+  }
+  return out;
+}
+
+/** What a restart needs that the day file cannot tell it. */
+interface CollectorState {
+  lastEventId?: string;
+  resumeFloorTs?: number;
+  openGaps?: OpenGap[];
+}
+
+export const STATE_FILE = "collector-state.json";
 
 /** UTC calendar day, "YYYY-MM-DD". */
 export function utcDay(ms: number): string {
@@ -142,8 +266,12 @@ export interface CollectorOptions {
   fetchFn?: typeof fetch;
   now?: () => number;
   gapToleranceMs?: number;
+  /** Wall time the lowest open hole must go unfilled before it is final (see GapTracker). */
+  gapSettleMs?: number;
   /** On resume, re-request this much before the last seen event and de-duplicate. */
   sinceOverlapMs?: number;
+  /** How often the resume cursor and open holes are written to collector-state.json. */
+  stateFlushMs?: number;
   /** No bytes for this long = the connection is dead; abort and reconnect. */
   watchdogMs?: number;
   idRingSize?: number;
@@ -174,7 +302,13 @@ export class WikimediaCollector {
   private readonly log: (msg: string) => void;
   private readonly seen = new Set<string>();
   private readonly seenOrder: string[] = [];
+  private readonly stateFlushMs: number;
   private maxTs: number | undefined;
+  /** The SSE id of the last event taken in; the resume cursor. */
+  private lastEventId: string | undefined;
+  /** Where a topic that has delivered nothing yet ("offset -1") must resume from. */
+  private resumeFloorTs: number | undefined;
+  private lastStateFlush = 0;
   private out: WriteStream | undefined;
   private outDay: string | undefined;
   private readonly gzipJobs: Promise<void>[] = [];
@@ -182,8 +316,9 @@ export class WikimediaCollector {
   constructor(private readonly opts: CollectorOptions) {
     this.fetchFn = opts.fetchFn ?? fetch;
     this.now = opts.now ?? Date.now;
-    this.gapTracker = new GapTracker(opts.gapToleranceMs ?? 10_000);
+    this.gapTracker = new GapTracker(opts.gapToleranceMs ?? 10_000, opts.gapSettleMs ?? 600_000);
     this.sinceOverlapMs = opts.sinceOverlapMs ?? 60_000;
+    this.stateFlushMs = opts.stateFlushMs ?? 5_000;
     this.watchdogMs = opts.watchdogMs ?? 90_000;
     this.idRingSize = opts.idRingSize ?? 50_000;
     this.backoffMinMs = opts.backoffMinMs ?? 1_000;
@@ -201,9 +336,21 @@ export class WikimediaCollector {
    * Recover "what did I last see" from the newest raw day file: seeds the
    * de-dup ring and the gap tracker's reference point, so a restart neither
    * duplicates the resubscription overlap nor hides the downtime as quiet.
+   * The resume cursor and still-open holes come from collector-state.json.
    * Leftover raw files from earlier days (a crash before rollover) are gzipped.
    */
   private restoreFromDisk(): void {
+    const statePath = join(this.opts.dir, STATE_FILE);
+    if (existsSync(statePath)) {
+      try {
+        const s = JSON.parse(readFileSync(statePath, "utf8")) as CollectorState;
+        this.lastEventId = s.lastEventId;
+        this.resumeFloorTs = s.resumeFloorTs;
+        this.gapTracker.restore(s.openGaps ?? [], this.now());
+      } catch (err) {
+        this.log(`${STATE_FILE} unreadable, resuming by time: ${(err as Error).message}`);
+      }
+    }
     const raws = readdirSync(this.opts.dir).filter((f) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)).sort();
     if (raws.length === 0) return;
     const today = utcDay(this.now());
@@ -275,8 +422,7 @@ export class WikimediaCollector {
       return;
     }
     this.remember(rec.eid);
-    const gap = this.gapTracker.observe(rec.ts);
-    if (gap !== null) {
+    for (const gap of this.gapTracker.observe(rec.ts, this.now())) {
       this.stats.gaps++;
       appendFileSync(join(this.opts.dir, "gaps.jsonl"), JSON.stringify(gap) + "\n");
       this.log(`gap ${new Date(gap.fromTs).toISOString()} → ${new Date(gap.toTs).toISOString()}`);
@@ -286,12 +432,50 @@ export class WikimediaCollector {
     this.stats.written++;
   }
 
+  /**
+   * Persist what a restart needs: the resume cursor and the holes still open.
+   * Written via a temp file + rename so a crash never leaves it torn. A stale
+   * copy only re-reads a few seconds (the de-dup ring absorbs them) or keeps a
+   * hole open that the replay then treats as blind — both the safe side.
+   */
+  private flushState(force = false): void {
+    const now = this.now();
+    if (!force && now - this.lastStateFlush < this.stateFlushMs) return;
+    this.lastStateFlush = now;
+    const state: CollectorState = {
+      lastEventId: this.lastEventId,
+      resumeFloorTs: this.resumeFloorTs,
+      openGaps: this.gapTracker.openGaps(),
+    };
+    const path = join(this.opts.dir, STATE_FILE);
+    writeFileSync(`${path}.tmp`, JSON.stringify(state) + "\n");
+    renameSync(`${path}.tmp`, path);
+  }
+
+  /**
+   * How to resume: per-topic positions once the stream has told us them
+   * (see resumeAssignments), else `since` from the LOWEST still-open hole —
+   * never the running maximum alone, which a quiet topic can drag ahead of the
+   * backlog still being read.
+   */
+  private resumeRequest(): { url: string; headers: Record<string, string> } {
+    if (this.lastEventId !== undefined) {
+      const floor = this.resumeFloorTs ?? this.now() - this.sinceOverlapMs;
+      const assignments = resumeAssignments(this.lastEventId, this.sinceOverlapMs, floor);
+      if (assignments !== null) return { url: STREAM_URL, headers: { "Last-Event-ID": JSON.stringify(assignments) } };
+    }
+    const from = this.gapTracker.lowestOpenFrom() ?? this.maxTs;
+    if (from === undefined) {
+      this.resumeFloorTs = this.now() - this.sinceOverlapMs;
+      return { url: STREAM_URL, headers: {} };
+    }
+    this.resumeFloorTs = from - this.sinceOverlapMs;
+    return { url: `${STREAM_URL}?since=${new Date(this.resumeFloorTs).toISOString()}`, headers: {} };
+  }
+
   /** One connection attempt: returns when the stream ends or errors. */
   private async connectOnce(signal: AbortSignal): Promise<void> {
-    const url =
-      this.maxTs === undefined
-        ? STREAM_URL
-        : `${STREAM_URL}?since=${new Date(this.maxTs - this.sinceOverlapMs).toISOString()}`;
+    const { url, headers } = this.resumeRequest();
     const conn = new AbortController();
     const onOuterAbort = () => conn.abort();
     signal.addEventListener("abort", onOuterAbort, { once: true });
@@ -304,7 +488,7 @@ export class WikimediaCollector {
     }, Math.max(1, Math.min(this.watchdogMs / 3, 10_000)));
     try {
       const res = await this.fetchFn(url, {
-        headers: { Accept: "text/event-stream", "User-Agent": USER_AGENT },
+        headers: { Accept: "text/event-stream", "User-Agent": USER_AGENT, ...headers },
         signal: conn.signal,
       });
       if (!res.ok || res.body === null) throw new Error(`HTTP ${res.status}`);
@@ -316,6 +500,8 @@ export class WikimediaCollector {
         if (done) return;
         lastByteAt = this.now();
         for (const payload of parser.push(decoder.decode(value, { stream: true }))) this.ingest(payload);
+        if (parser.lastEventId !== undefined) this.lastEventId = parser.lastEventId;
+        this.flushState();
       }
     } finally {
       clearInterval(dog);
@@ -346,6 +532,7 @@ export class WikimediaCollector {
   }
 
   async close(): Promise<void> {
+    this.flushState(true);
     const out = this.out;
     this.out = undefined;
     this.outDay = undefined;

@@ -191,6 +191,20 @@ describe("loading a collector directory", () => {
     assert.equal(sliceEvents(all.events, d1, d1 + 1).length, 1); // half-open
   });
 
+  it("holes the collector has not finalized (collector-state.json) are blind too; an unreadable state is refused", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wiki-"));
+    const d = Date.parse("2026-10-01T12:00:00Z");
+    writeFileSync(join(dir, "2026-10-01.jsonl"),
+      JSON.stringify({ ts: d, value: 0, wiki: "enwiki", type: "edit", namespace: 0, eid: "a" }) + "\n");
+    writeFileSync(join(dir, "gaps.jsonl"), JSON.stringify({ kind: "gap", fromTs: d, toTs: d + 60_000 }) + "\n");
+    writeFileSync(join(dir, "collector-state.json"),
+      JSON.stringify({ lastEventId: "[]", openGaps: [{ fromTs: d + 120_000, toTs: d + 180_000 }] }));
+    const s = await loadWikiDir(dir);
+    assert.deepEqual(s.gaps, [{ fromTs: d, toTs: d + 60_000 }, { fromTs: d + 120_000, toTs: d + 180_000 }]);
+    writeFileSync(join(dir, "collector-state.json"), "{torn");
+    await assert.rejects(loadWikiDir(dir));
+  });
+
   it("an interrupted rollover (raw file AND a truncated .gz for one day) reads the raw file once", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wiki-"));
     const d = Date.parse("2026-10-01T12:00:00Z");

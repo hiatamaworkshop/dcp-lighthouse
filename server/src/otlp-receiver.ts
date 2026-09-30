@@ -198,8 +198,7 @@ export class OtlpReceiver {
     if (fresh.length === 0) return parsed;
     const lines: string[] = [];
     for (const r of fresh) {
-      const gap = this.gapTracker.observe(r.ts);
-      if (gap !== null) {
+      for (const gap of this.gapTracker.observe(r.ts, this.now())) {
         this.stats.gaps++;
         appendFileSync(join(this.opts.dir, "gaps.jsonl"), JSON.stringify(gap) + "\n");
       }

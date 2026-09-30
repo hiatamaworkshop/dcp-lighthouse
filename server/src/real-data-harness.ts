@@ -157,6 +157,16 @@ async function loadDayFiles(
       }
     }
   }
+  // Holes the collector has not finalized yet (collector-state.json) may still
+  // be filled — but until they are, nothing was seen there: blind, not quiet.
+  const statePath = join(dir, "collector-state.json");
+  if (existsSync(statePath)) {
+    // Unreadable = refuse, not skip: skipping would read its holes as calm.
+    const s = JSON.parse(readFileSync(statePath, "utf8")) as { openGaps?: GapSpan[] };
+    for (const g of s.openGaps ?? []) {
+      if (g.toTs > lo && g.fromTs < hi) gaps.push({ fromTs: g.fromTs, toTs: g.toTs });
+    }
+  }
   return { events, gaps };
 }
 
