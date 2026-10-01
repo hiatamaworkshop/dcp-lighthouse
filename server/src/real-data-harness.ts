@@ -475,6 +475,12 @@ export interface InjectionResult {
   power: number;
   /** Mean of the (exactly computed) shift in the target window's mean, over scored trials. */
   meanShiftTruth: number;
+  /**
+   * Mean Šidák family the curator actually corrected for (selection.scoredWindowCount),
+   * over scored trials. H2's knob is G, but only scorable windows enter the family:
+   * on thin keys G can grow while this does not, and then G is not what was tested.
+   */
+  meanFamilySize: number;
 }
 
 /** Top `n` values of `key` by event count, most frequent first. */
@@ -512,9 +518,10 @@ export function runInjectionPower(stream: LoadedStream, opts: InjectionOptions):
 
   const out: InjectionResult = {
     planned: trials.length + blind, blindByGap: blind, targetThin: 0, unusableReference: 0,
-    trials: 0, detected: 0, power: 0, meanShiftTruth: 0,
+    trials: 0, detected: 0, power: 0, meanShiftTruth: 0, meanFamilySize: 0,
   };
   let shiftSum = 0;
+  let familySum = 0;
   trials.forEach((t, i) => {
     const ref = sliceEvents(stream.events, t.refFrom, t.obsFrom);
     const obs = sliceEvents(stream.events, t.obsFrom, t.obsTo).map((e) => ({ ...e }));
@@ -545,6 +552,7 @@ export function runInjectionPower(stream: LoadedStream, opts: InjectionOptions):
     if (!pkg.referenceUsable) { out.unusableReference++; return; }
     out.trials++;
     shiftSum += after - before;
+    familySum += pkg.selection.scoredWindowCount;
     const hit = statisticalTiles(pkg).some(
       (tile) => tile.regionStart < w1 && tile.regionEnd > w0 && (!grouped || tile.group === opts.target.value),
     );
@@ -552,6 +560,7 @@ export function runInjectionPower(stream: LoadedStream, opts: InjectionOptions):
   });
   out.power = out.trials > 0 ? out.detected / out.trials : 0;
   out.meanShiftTruth = out.trials > 0 ? shiftSum / out.trials : 0;
+  out.meanFamilySize = out.trials > 0 ? familySum / out.trials : 0;
   return out;
 }
 

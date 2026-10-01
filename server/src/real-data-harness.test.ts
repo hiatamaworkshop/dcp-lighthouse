@@ -145,6 +145,20 @@ describe("injection power on a known stream", () => {
     assert.equal(r.planned, r.blindByGap + r.targetThin + r.unusableReference + r.trials);
   });
 
+  it("the family counts only scorable windows: thin keys add groups but not family (H2's G is nominal there)", () => {
+    // big ≈ 29 evt/s fills every 1 s window; each of 20 tiny keys ≈ 0.15 evt/s never reaches MIN_VALID_COUNT.
+    const wikis: Record<string, number> = { big: 200 };
+    for (let k = 0; k < 20; k++) wikis[`tiny${k}`] = 1;
+    const s = synthesizeStream({ durationMs: HOUR, seed: 35, wikis });
+    const r = runInjectionPower(s, {
+      lens: { window_ms: 1_000, group_by: ["wiki"] },
+      target: { key: "wiki", value: "big" }, fraction: 0, seed: 3,
+    });
+    assert.ok(r.trials > 50);
+    // 21 groups × 10 windows nominally; only big's ~10 windows are scored.
+    assert.ok(r.meanFamilySize >= 9 && r.meanFamilySize <= 11, `family = ${r.meanFamilySize}`);
+  });
+
   it("restricting to the top G keys keeps the target and drops the rest", () => {
     const s = synthesizeStream({ durationMs: 10 * 60_000, seed: 34 });
     const top = topKeyValues(s.events, "wiki", 2);

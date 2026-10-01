@@ -80,17 +80,20 @@ for (const [label, lens] of [
   );
 }
 
+// The null control (fraction 0, same windows, same target) and the family the
+// curator actually corrected for are printed beside each power: a power read
+// alone hides how much of it the target window lights up with nothing planted,
+// and whether growing G grew the family at all (thin keys are never scored).
 console.log("\n— H2: power vs number of groups (target = busiest wiki, 80% of its window's events → 0) —");
 const target = topKeyValues(stream.events, "wiki", 1)[0];
 for (const g of [4, 16, 64, 256]) {
   const restricted = { ...stream, events: restrictToKeyValues(stream.events, "wiki", topKeyValues(stream.events, "wiki", g)) };
-  const r = runInjectionPower(restricted, {
-    lens: { window_ms: 1_000, group_by: ["wiki"] },
-    target: { key: "wiki", value: target },
-    fraction: 0.8,
-  });
+  const base = { lens: { window_ms: 1_000, group_by: ["wiki"] }, target: { key: "wiki", value: target } };
+  const r = runInjectionPower(restricted, { ...base, fraction: 0.8 });
+  const n = runInjectionPower(restricted, { ...base, fraction: 0 });
   console.log(
     `G=${g}: power ${pct(r.power)} (${r.detected}/${r.trials}), shift ${r.meanShiftTruth.toFixed(3)}, ` +
-      `${r.targetThin} thin, ${r.blindByGap} blind, ${r.unusableReference} unusable`,
+      `${r.targetThin} thin, ${r.blindByGap} blind, ${r.unusableReference} unusable | ` +
+      `null control ${pct(n.power)} (${n.detected}/${n.trials}) | family ${r.meanFamilySize.toFixed(1)}`,
   );
 }
