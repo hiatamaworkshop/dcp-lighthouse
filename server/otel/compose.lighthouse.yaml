@@ -1,0 +1,28 @@
+# OTel Demo compose override for H4 (loaded last, after compose.yaml + compose.extras.yaml):
+#   docker compose -f compose.yaml -f compose.extras.yaml -f <this file> up -d
+#
+# checkout ships with a 20M limit and GOMEMLIMIT=16MiB. On a 16-thread host the
+# Go runtime's per-P overhead leaves no headroom under that limit: the GC runs
+# back to back (observed 2026-10-01: ~580% CPU, no checkout span ever emitted,
+# every /api/checkout failed at the proxy), so payment never sees a charge and
+# H4's target group is empty. Raising the limit and capping GOMAXPROCS restores it.
+#
+# load-generator: the default 5 users check out about once per 20 s (2 payment
+# spans each), so a 10 s payment window never reaches MIN_VALID_COUNT (3) and
+# H4's wiring check cannot score. 50 HTTP users ≈ 0.5 checkouts/s. Browser
+# (Playwright) users are dropped: heavy on CPU and spans, and they add nothing
+# to the payment path the HTTP users don't.
+services:
+  load-generator:
+    environment:
+      - LOCUST_USERS=50
+      - LOCUST_BROWSER_TRAFFIC_ENABLED=false
+
+  checkout:
+    deploy:
+      resources:
+        limits:
+          memory: 80M
+    environment:
+      - GOMEMLIMIT=64MiB
+      - GOMAXPROCS=2

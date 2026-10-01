@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { parseDuration } from "./otel-flag-schedule.js";
 import {
   flagExclusion,
+  h4Verdict,
   HOLDOUT_FROM_DAY,
   loadFlagTruth,
   loadOtelDir,
@@ -72,6 +73,7 @@ console.log(
 );
 
 const offRate = new Map<number, number>();
+let wiring = { detected: 0, trials: 0 };
 let design = 0;
 for (const p of [1, 0.5, 0.1]) {
   // One seed for every p: the p = 0.1 sample is then a subset of the p = 0.5 one.
@@ -79,6 +81,7 @@ for (const p of [1, 0.5, 0.1]) {
   const nul = runNullCalibration(thinned, { lens, spanMs, shuffleReps: 0, exclude, seed });
   const det = runFlagDetection(thinned, spans, { lens, spanMs, settleMs, target: { key: "service", value: target } });
   offRate.set(p, nul.real.rate);
+  if (p === 1) wiring = { detected: det.detected, trials: det.trials };
   design = nul.designTarget;
   console.log(
     `p=${p}: OFF alarm ${pct(nul.real.rate)} (${nul.real.flagged}/${nul.real.trials}) design ${pct(nul.designTarget)} | ` +
@@ -88,11 +91,9 @@ for (const p of [1, 0.5, 0.1]) {
   );
 }
 
-// The pre-registered rule, applied mechanically (ROADMAP_BRIEF.md 2026-09-27 (3) H4).
-const r1 = offRate.get(1) ?? 0;
-const r01 = offRate.get(0.1) ?? 0;
-const verdict = r1 > design
-  ? "outside the rule: p=1 already exceeds the design rate (the unweighted model is off before weights enter)"
-  : r01 > design ? "SUPPORTED (weighted windows exceed the design rate, unweighted do not)"
-  : "REJECTED (both at or under the design rate)";
+// The pre-registered rule, applied mechanically once the p = 1 wiring check passes
+// (ROADMAP_BRIEF.md 2026-09-27 (3) H4, revision 2026-10-01 (2)).
+const verdict = h4Verdict({
+  offRateP1: offRate.get(1) ?? 0, offRateP01: offRate.get(0.1) ?? 0, design, wiring,
+});
 console.log(`\nH4 (pre-registered rule): ${verdict}`);

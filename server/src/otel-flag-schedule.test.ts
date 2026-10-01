@@ -61,6 +61,15 @@ describe("flagd configuration", () => {
     assert.deepEqual(describeFlag(config(), "paymentFailure", "90%"), { resting: "off", restingValue: 0, value: 0.95 });
   });
 
+  it("rests at an explicit variant (H4 rests at 10%), not at whatever the flag was last left on", () => {
+    assert.deepEqual(describeFlag(config(), "paymentFailure", "50%", "10%"), { resting: "10%", restingValue: 0.1, value: 0.5 });
+    // A run that died while ON leaves defaultVariant at the fault variant; an explicit rest does not care.
+    const leftOn = withVariant(config(), "paymentFailure", "50%");
+    assert.deepEqual(describeFlag(leftOn, "paymentFailure", "50%", "10%").resting, "10%");
+    assert.throws(() => describeFlag(config(), "paymentFailure", "50%", "5%"), /no variant "5%" to rest at/);
+    assert.throws(() => describeFlag(config(), "paymentFailure", "50%", "50%"), /resting variant/);
+  });
+
   it("switches like flagd-ui's Storage: defaultVariant, or the 'then' branch of a ternary targeting; input untouched", () => {
     const c = config();
     const a = withVariant(c, "paymentFailure", "50%");

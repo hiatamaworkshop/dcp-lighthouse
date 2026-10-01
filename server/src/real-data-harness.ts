@@ -703,6 +703,34 @@ export function runFlagDetection(
   return out;
 }
 
+/**
+ * H4's pre-registered rule, applied mechanically — but only after the wiring
+ * check passes. The pre-registration calls a p = 1 miss "a wiring problem to
+ * fix first, not a statistical result"; the 2026-10-01 rehearsal printed
+ * SUPPORTED over a run whose p = 1 detection was 0/1. The check passes when at
+ * least one ON span was scored and more than half of the scored spans were
+ * detected in the target group: broken wiring detects (almost) nothing, so a
+ * majority tells "wired" from "not" without turning into a power claim
+ * (pre-registration revision 2026-10-01 (2)).
+ */
+export function h4Verdict(o: {
+  offRateP1: number;
+  offRateP01: number;
+  design: number;
+  wiring: { detected: number; trials: number };
+}): string {
+  if (o.wiring.trials === 0) return "NO VERDICT: no ON span could be scored at p=1 (wiring check not run)";
+  if (2 * o.wiring.detected <= o.wiring.trials) {
+    return `NO VERDICT: wiring check failed (p=1 detected ${o.wiring.detected}/${o.wiring.trials}) — fix ingest or value mapping first`;
+  }
+  if (o.offRateP1 > o.design) {
+    return "outside the rule: p=1 already exceeds the design rate (the unweighted model is off before weights enter)";
+  }
+  return o.offRateP01 > o.design
+    ? "SUPPORTED (weighted windows exceed the design rate, unweighted do not)"
+    : "REJECTED (both at or under the design rate)";
+}
+
 // ── φ and lag-1 autocorrelation ─────────────────────────────────────────────
 
 export interface DispersionOptions {

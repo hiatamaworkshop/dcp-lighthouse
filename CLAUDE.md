@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済・実データ較正期間の第0段階を実装済・収集器の再開欠陥 (2026-09-30) 修正済・H4 のフラグ切替器/コレクタ設定/レポート整備済・H2 の報告に対照と実効 family を併記 (2026-10-01) (テスト484件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済・実データ較正期間の第0段階を実装済・収集器の再開欠陥 (2026-09-30) 修正済・H4 のフラグ切替器/コレクタ設定/レポート整備済・H2 の報告に対照と実効 family を併記 (2026-10-01)・H4 の予行で配線確認の障害 3 件を除去 (テスト487件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -154,6 +154,7 @@ dcp-lighthouse/
                                  ← 起動口 (レポートは保留日を --holdout なしで拒否)
   server/otel/
       otelcol-config-lighthouse.yml ← OTel Demo のコレクタ extras (traces → 受け口へ OTLP/JSON)
+      compose.lighthouse.yaml    ← OTel Demo の compose 上書き (checkout の GC 空回り回避・負荷 50 HTTP ユーザ)
     ── ドメイン適用 (Phase 1) ──
       mock-stream-generator.ts   ← MockStreamGenerator
       testor-adapter.ts          ← test_result:v1 への正規化

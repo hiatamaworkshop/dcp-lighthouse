@@ -80,11 +80,17 @@ export interface FlagdConfig {
  * The flag's resting variant and the value `variant` carries. Throws with the
  * names that DO exist — the Demo renamed paymentServiceFailure to paymentFailure,
  * and a label is not its value ("90%" is 0.95), so both are checked up front.
+ *
+ * `rest` names the resting variant explicitly (H4 rests at "10%", 2026-10-01: a
+ * payment that never fails gives a zero-variance reference the curator cannot
+ * score against). Without it the flag's CURRENT defaultVariant is taken — which
+ * is whatever the last write left, so a run that died while ON would rest ON.
  */
 export function describeFlag(
   config: FlagdConfig,
   flag: string,
   variant: string,
+  rest?: string,
 ): { resting: string; restingValue: unknown; value: unknown } {
   const def = config.flags[flag];
   if (def === undefined) {
@@ -94,7 +100,10 @@ export function describeFlag(
   if (!(variant in variants)) {
     throw new RangeError(`flag "${flag}" has no variant "${variant}"; variants: ${Object.keys(variants).join(", ")}`);
   }
-  const resting = def.defaultVariant;
+  if (rest !== undefined && !(rest in variants)) {
+    throw new RangeError(`flag "${flag}" has no variant "${rest}" to rest at; variants: ${Object.keys(variants).join(", ")}`);
+  }
+  const resting = rest ?? def.defaultVariant;
   if (resting === undefined || !(resting in variants)) throw new RangeError(`flag "${flag}" has no usable defaultVariant`);
   if (resting === variant) throw new RangeError(`"${variant}" is the flag's resting variant; pick a fault variant`);
   return { resting, restingValue: variants[resting], value: variants[variant] };

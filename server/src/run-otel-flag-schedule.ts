@@ -4,14 +4,16 @@
  * flagd-ui's API and confirms against flagd.
  *
  *   cd server && npm run build && node dist/run-otel-flag-schedule.js \
- *     --flag paymentFailure --variant 50% --lead 30m --on 10m --off 50m --cycles 23
+ *     --flag paymentFailure --variant 50% --rest 10% --lead 30m --on 10m --off 50m --cycles 23
  *
- * Defaults are those values (≈ 24 h). --base is the Demo's Envoy (default
+ * Defaults are those values (≈ 24 h). --rest is the variant between faults: 10%,
+ * not off — a payment that never fails gives the curator a zero-variance
+ * reference it will not score against (pre-registration revision 2026-10-01 (2)). --base is the Demo's Envoy (default
  * http://localhost:8080). The truth goes to OTEL_DATA_DIR/flags.jsonl.
  *
  * The flag is put to its resting variant (and that logged) before the schedule
  * starts, and again on Ctrl+C — so a run always opens and closes on a known
- * OFF. Don't touch flagd-ui (UI or its scheduler) while this runs: its writes
+ * resting state. Don't touch flagd-ui (UI or its scheduler) while this runs: its writes
  * would change flags behind the truth log's back.
  */
 import { join } from "node:path";
@@ -31,6 +33,7 @@ function arg(name: string, fallback: string): string {
 
 const flag = arg("flag", "paymentFailure");
 const variant = arg("variant", "50%");
+const rest = arg("rest", "10%");
 const base = arg("base", "http://localhost:8080");
 const steps = planFlagSchedule({
   leadMs: parseDuration(arg("lead", "30m")),
@@ -41,7 +44,7 @@ const steps = planFlagSchedule({
 const dir = process.env.OTEL_DATA_DIR ?? join(process.cwd(), "..", "data", "otel");
 const client = new FlagdClient(base);
 
-const { resting, restingValue, value } = describeFlag(await client.read(), flag, variant);
+const { resting, restingValue, value } = describeFlag(await client.read(), flag, variant, rest);
 
 async function set(state: "on" | "off"): Promise<void> {
   const target = state === "on" ? variant : resting;

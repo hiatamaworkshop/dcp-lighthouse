@@ -218,7 +218,7 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       - 待ち: 探索日レポートの実行、保留期間の最終確認、OTel Demo の実走 (1 日)
       - 詳細は ROADMAP_BRIEF.md 2026-09-27 (3), 2026-09-29 〜 (3), 2026-09-30
 
-現在テスト計 484 件、全 green。
+現在テスト計 487 件、全 green。
 
 ## 実データ較正期間の運用
 
@@ -230,8 +230,20 @@ node dist/run-wikimedia-collector.js       # Wikimedia の常駐収集 (data/wik
 node dist/run-real-data-report.js --from 2026-09-29 --to 2026-10-02   # H1 (φ・R_real vs FA_shuffle)・H2 (検出力 vs G)
 node dist/run-real-data-report.js --from 2026-10-03 --to 2026-10-05 --holdout   # 保留期間: 最終確認 1 回だけ
 node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
-node dist/run-otel-flag-log.js paymentServiceFailure on   # 障害フラグ切替の真値ログ (data/otel/flags.jsonl)
+node dist/run-otel-flag-schedule.js        # H4 の障害フラグ切替 (既定: paymentFailure 50%、休止 10%、≒ 24 h)。真値は data/otel/flags.jsonl
+node dist/run-otel-report.js --from 2026-10-03 --to 2026-10-03 --holdout   # H4。p=1 の配線確認が通らなければ判定を出さない
 ```
+
+OTel Demo (open-telemetry/opentelemetry-demo、事前登録で読んだのは 858f76f) は最小構成・観測スタック無しで、
+lighthouse の上書きを最後に重ねて起動する (Demo のディレクトリで):
+
+```sh
+OTEL_COLLECTOR_CONFIG_EXTRAS=<repo>/server/otel/otelcol-config-lighthouse.yml \n  docker compose --env-file .env -f compose.yaml -f compose.extras.yaml -f <repo>/server/otel/compose.lighthouse.yaml up -d
+```
+
+上書き (`compose.lighthouse.yaml`) は checkout の GC 空回り (16 スレッド機で上限 20M に張り付き、決済が 1 件も通らない) の回避と、
+負荷生成器を HTTP 型 50 ユーザにする設定 (既定の 5 ユーザでは payment の 10 s 窓が採点の下限に届かない)。
+Docker のメモリは合計 1.5 GB 程度、受け口のデータは 1 日 約 1,500 万スパン / 2.4 GB。
 
 `WIKI_DATA_DIR` / `OTEL_DATA_DIR` / `PORT` で置き場所とポートを変えられる。
 

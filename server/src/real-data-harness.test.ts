@@ -13,6 +13,7 @@ import {
   dispersionProfile,
   flagExclusion,
   fnv1a32,
+  h4Verdict,
   loadFlagTruth,
   loadWikiDir,
   planTrials,
@@ -340,6 +341,28 @@ describe("fault-flag truth (H4 / measurement ③)", () => {
     assert.equal(withEx.planned, withEx.real.trials + withEx.real.unusableReference + withEx.excluded);
     assert.ok(withEx.real.rate < 0.09, `OFF rate with exclusion = ${withEx.real.rate}`);
     assert.ok(without.real.rate > 2 * withEx.real.rate, `${without.real.rate} vs ${withEx.real.rate}`);
+  });
+
+  it("a target that never fails at rest cannot be detected at all: the zero-variance reference is not scored (why H4 rests at 10%)", () => {
+    // The real Demo's payment at flag OFF: every span succeeds. Same ON spans, same 50% fault.
+    const clean = synthesizeStream({ startTs: t0, durationMs: 250 * MIN, seed: 51, wikis: { payment: 1, cart: 1 }, p: 1 });
+    const r2 = mulberry32(52);
+    const hit = {
+      ...clean,
+      events: clean.events.map((e) =>
+        e.keys!.wiki === "payment" && spans.some((s) => e.ts >= s.fromTs && e.ts < s.toTs) && r2() < 0.5 ? { ...e, value: 0 } : e),
+    };
+    assert.equal(runFlagDetection(hit, spans, opts).detected, 0);
+  });
+
+  it("the H4 verdict waits for the wiring check: no scored span or a minority detected gives no verdict", () => {
+    const rates = { offRateP1: 0.02, offRateP01: 0.2, design: 0.0455 };
+    assert.match(h4Verdict({ ...rates, wiring: { detected: 0, trials: 0 } }), /^NO VERDICT: no ON span/);
+    assert.match(h4Verdict({ ...rates, wiring: { detected: 0, trials: 1 } }), /^NO VERDICT: wiring check failed \(p=1 detected 0\/1\)/);
+    assert.match(h4Verdict({ ...rates, wiring: { detected: 5, trials: 10 } }), /^NO VERDICT/); // half is not a majority
+    assert.match(h4Verdict({ ...rates, wiring: { detected: 6, trials: 10 } }), /^SUPPORTED/);
+    assert.match(h4Verdict({ ...rates, offRateP01: 0.03, wiring: { detected: 6, trials: 10 } }), /^REJECTED/);
+    assert.match(h4Verdict({ ...rates, offRateP1: 0.06, wiring: { detected: 6, trials: 10 } }), /^outside the rule/);
   });
 
   it("an ON span too short for settle + span, or whose reference overlaps an earlier span's tail, is not scored", () => {
