@@ -168,6 +168,7 @@ dcp-lighthouse/
       ab-fixture.ts / ab-harness.ts / ab-strategy-b.ts / run-ab-strategy-b.ts / anthropic-ask.ts
   server/scripts/
       run-wiki-collector.ps1     ← 収集器のタスクスケジューラ入口 (conhost --headless・data/logs/)
+      run-h4-day.ps1             ← H4 判定日の無人実行 (コンテナ退避 → 受け口 → Demo → 切替器 → 片付け)
   dashboard/             ← ブラウザ UI (HTML + JS)
   .claude/skills/        ← run-lighthouse (ダッシュボード実地検証) / wiki-collector-ops (収集器の点検・運用)
     index.html

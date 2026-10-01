@@ -238,12 +238,19 @@ OTel Demo (open-telemetry/opentelemetry-demo、事前登録で読んだのは 85
 lighthouse の上書きを最後に重ねて起動する (Demo のディレクトリで):
 
 ```sh
-OTEL_COLLECTOR_CONFIG_EXTRAS=<repo>/server/otel/otelcol-config-lighthouse.yml \n  docker compose --env-file .env -f compose.yaml -f compose.extras.yaml -f <repo>/server/otel/compose.lighthouse.yaml up -d
+OTEL_COLLECTOR_CONFIG_EXTRAS=<repo>/server/otel/otelcol-config-lighthouse.yml \
+  docker compose --env-file .env -f compose.yaml -f compose.extras.yaml -f <repo>/server/otel/compose.lighthouse.yaml up -d
 ```
 
 上書き (`compose.lighthouse.yaml`) は checkout の GC 空回り (16 スレッド機で上限 20M に張り付き、決済が 1 件も通らない) の回避と、
 負荷生成器を HTTP 型 50 ユーザにする設定 (既定の 5 ユーザでは payment の 10 s 窓が採点の下限に届かない)。
 Docker のメモリは合計 1.5 GB 程度、受け口のデータは 1 日 約 1,500 万スパン / 2.4 GB。
+
+H4 の判定日は `server/scripts/run-h4-day.ps1` が無人で回す (1 回限りのタスクから
+`conhost.exe --headless powershell.exe ... -File server/scripts/run-h4-day.ps1 -Node <node.exe> -DemoDir <Demo>`)。
+指定したコンテナを止めてメモリを空け、受け口 → Demo → 切替器 (`-StartUtc` に開始) と起動し、
+`-EndUtc` に受け口と Demo を止めて元のコンテナを戻す。既定の時刻では ON 区間がすべて UTC 2026-10-03 に収まる。
+`-Node` には nvm の中継ではなく実体の `node.exe` を渡す (中継の PID を止めても子の受け口が残る)。
 
 `WIKI_DATA_DIR` / `OTEL_DATA_DIR` / `PORT` で置き場所とポートを変えられる。
 
