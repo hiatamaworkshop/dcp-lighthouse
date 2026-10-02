@@ -21,7 +21,8 @@ param(
   [string]$EndUtc = "2026-10-04T00:10:00Z",
   [string]$DataDir = "",
   [string]$ScheduleArgs = "",  # one string: `-File` cannot pass an array (e.g. "--lead 1m --cycles 1" for a dry run)
-  [string[]]$Pause = @("cairn-qdrant", "engram-gateway", "engram-qdrant")
+  [string[]]$Pause = @("cairn-qdrant", "engram-gateway", "engram-qdrant"),
+  [int]$DockerWaitSec = 600
 )
 # Windows PowerShell 5.1 turns a native command's stderr into terminating errors under "Stop",
 # and docker compose writes its progress to stderr. Exit codes are checked by hand instead.
@@ -72,6 +73,20 @@ if (Get-NetTCPConnection -LocalPort 4318 -State Listen -ErrorAction SilentlyCont
   L "refusing: :4318 is already taken (an earlier receiver?)"; exit 2
 }
 
+# After a reboot Docker Desktop may not be up yet (2026-10-02: an unexpected restart left it down for
+# minutes; without this the day would start the receiver, fail every docker call and idle until the end).
+function EngineUp { & docker.exe version --format "{{.Server.Version}}" 2>&1 | Out-Null; return ($LASTEXITCODE -eq 0) }
+if (-not (EngineUp)) {
+  L "docker engine not reachable; starting Docker Desktop and waiting up to $DockerWaitSec s"
+  if (-not (Get-Process "Docker Desktop" -ErrorAction SilentlyContinue)) {
+    Start-Process "$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
+  }
+  $until = [DateTime]::UtcNow.AddSeconds($DockerWaitSec)
+  while (-not (EngineUp) -and [DateTime]::UtcNow -lt $until) { Start-Sleep -Seconds 10 }
+  if (-not (EngineUp)) { L "docker engine never came up; nothing started"; exit 1 }
+  L "docker engine up"
+}
+
 $paused = @()
 foreach ($c in $Pause) {
   $t = Get-Date
@@ -88,8 +103,13 @@ if ($receiver.HasExited) {
   foreach ($c in $paused) { & docker.exe start $c 2>&1 | Out-Null }
   exit 1
 }
-$rc = Compose ($compose + @("up", "-d"))
-L "demo up: exit $rc"
+# A freshly started Docker can answer `version` before its VM serves compose; retry rather than idle all day.
+for ($try = 1; $try -le 3; $try++) {
+  $rc = Compose ($compose + @("up", "-d"))
+  L "demo up (try $try): exit $rc"
+  if ($rc -eq 0) { break }
+  Start-Sleep -Seconds 30
+}
 
 $ready = $false
 for ($i = 0; $i -lt 90 -and -not $ready; $i++) {
