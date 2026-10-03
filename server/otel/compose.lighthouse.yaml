@@ -26,3 +26,15 @@ services:
     environment:
       - GOMEMLIMIT=64MiB
       - GOMAXPROCS=2
+
+  # product-catalog ships with the same 20M / GOMEMLIMIT=16MiB as checkout and spins the same way
+  # (2026-10-03: ~450% CPU, "context deadline exceeded", no span emitted). Every frontend page and
+  # checkout flow waits on it, so payment fell from ~780 to ~3 spans per 10 min on the judgment day.
+  product-catalog:
+    deploy:
+      resources:
+        limits:
+          memory: 80M
+    environment:
+      - GOMEMLIMIT=64MiB
+      - GOMAXPROCS=2
