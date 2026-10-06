@@ -13,19 +13,19 @@
  * Options: --flag (paymentFailure) --target (payment, the service the fault
  * should show in) --settle (30s) --window (10s) --span (60s) --seed (1).
  * Data and flags.jsonl come from OTEL_DATA_DIR (default <repo>/data/otel).
- * The holdout rule is the same as run-real-data-report's.
+ * The holdout rule is the same as run-real-data-report's (stage1RangeRefusal).
  */
 import { join } from "node:path";
 import { parseDuration } from "./otel-flag-schedule.js";
 import {
   flagExclusion,
   h4Verdict,
-  HOLDOUT_FROM_DAY,
   loadFlagTruth,
   loadOtelDir,
   runFlagDetection,
   runNullCalibration,
   thinByTrace,
+  stage1RangeRefusal,
 } from "./real-data-harness.js";
 
 function arg(name: string, fallback?: string): string | undefined {
@@ -40,11 +40,9 @@ if (fromDay === undefined || toDay === undefined) {
   console.error("usage: run-otel-report --from YYYY-MM-DD --to YYYY-MM-DD [--holdout] [--flag F] [--target SERVICE]");
   process.exit(2);
 }
-if (toDay >= HOLDOUT_FROM_DAY && !holdout) {
-  console.error(
-    `refusing: ${toDay} reaches the holdout (${HOLDOUT_FROM_DAY}…). ` +
-      `Exploration must stop before it; --holdout is the single final look.`,
-  );
+const refusal = stage1RangeRefusal(fromDay, toDay, holdout);
+if (refusal !== undefined) {
+  console.error(refusal);
   process.exit(2);
 }
 

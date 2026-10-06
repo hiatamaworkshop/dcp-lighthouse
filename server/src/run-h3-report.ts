@@ -38,6 +38,11 @@ if (holdout && (fromDay !== H3_HOLDOUT_FROM_DAY || toDay !== H3_HOLDOUT_TO_DAY))
   console.error(`refusing: --holdout reads exactly ${H3_HOLDOUT_FROM_DAY}…${H3_HOLDOUT_TO_DAY}, H3's judgment days.`);
   process.exit(2);
 }
+// The single look spent on a half-collected holdout cannot be taken back.
+if (holdout && Date.now() < Date.parse(`${H3_HOLDOUT_TO_DAY}T00:00:00Z`) + 86_400_000) {
+  console.error(`refusing: H3's holdout runs until the end of ${H3_HOLDOUT_TO_DAY} (UTC); it is not complete yet.`);
+  process.exit(2);
+}
 if (!holdout && toDay >= H3_HOLDOUT_FROM_DAY) {
   console.error(
     `refusing: ${toDay} reaches H3's holdout (${H3_HOLDOUT_FROM_DAY}…). ` +

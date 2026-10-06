@@ -24,6 +24,7 @@ import {
   runInjectionPower,
   runNullCalibration,
   shuffleValues,
+  stage1RangeRefusal,
   sliceEvents,
   synthesizeStream,
   thinByTrace,
@@ -400,6 +401,23 @@ describe("H3: alarms against the preceding span, by hour of day", () => {
     assert.ok(r.bins[0].slope > 3 * r.bins[6].slope && r.bins[12].slope > 3 * r.bins[18].slope);
   });
 
+  it("a sharp step lands on the o'clock it happens at, not the hour before it", () => {
+    // p jumps 0.2 → 0.8 at 12:00Z and back at 00:00Z. A trial starting at 11:50 straddles 12:00;
+    // filed under 11 (floored) it would light up an hour whose slope is 0 (seen: 83% there, r 0.74).
+    const rng = mulberry32(3);
+    const events = [];
+    for (let t = midnight; t < midnight + 3 * DAY; t += 500) {
+      events.push({ ts: t, value: rng() < (new Date(t).getUTCHours() >= 12 ? 0.8 : 0.2) ? 1 : 0, keys: { wiki: "a" } });
+    }
+    const r = runDiurnalAlarms({ events, gaps: [] }, { spanMs: HOUR, lens: { window_ms: 60_000 } });
+    // A 60-minute span still half-straddles a step 30 min away, so neighbours light partly (≈ 30–50%);
+    // what must hold is that the step's own o'clock is the one that lights fully.
+    assert.equal(r.bins[0].rate, 1);
+    assert.equal(r.bins[12].rate, 1);
+    for (const b of r.bins) if (b.hour % 12 !== 0) assert.ok(b.rate < 0.6, `${b.hour}Z at ${b.rate}`);
+    assert.ok(r.correlation > 0.8, `r = ${r.correlation}`);
+  });
+
   it("a flat iid stream: near the design rate and never SUPPORTED", () => {
     for (const seed of [2, 3, 5, 6]) {
       const r = run({ seed });
@@ -432,5 +450,18 @@ describe("H3: alarms against the preceding span, by hour of day", () => {
       synthesizeStream({ durationMs: HOUR, seed: 9 }),
       synthesizeStream({ durationMs: HOUR, seed: 9, diurnalAmplitude: 0 }),
     );
+  });
+});
+
+describe("stage 1's reports after their holdout was spent", () => {
+  it("open outside both holdouts, refused on any day touching either, and --holdout refused outright", () => {
+    assert.equal(stage1RangeRefusal("2026-09-29", "2026-10-02", false), undefined);
+    assert.equal(stage1RangeRefusal("2026-10-06", "2026-10-10", false), undefined);
+    assert.equal(stage1RangeRefusal("2026-10-14", "2026-10-20", false), undefined);
+    assert.match(stage1RangeRefusal("2026-10-02", "2026-10-03", false) ?? "", /stage 1's holdout/);
+    assert.match(stage1RangeRefusal("2026-10-05", "2026-10-06", false) ?? "", /stage 1's holdout/);
+    assert.match(stage1RangeRefusal("2026-10-10", "2026-10-11", false) ?? "", /H3's holdout/);
+    assert.match(stage1RangeRefusal("2026-09-29", "2026-10-20", false) ?? "", /holdout/);
+    assert.match(stage1RangeRefusal("2026-10-03", "2026-10-05", true) ?? "", /spent/);
   });
 });

@@ -61,6 +61,33 @@ export const HOLDOUT_FROM_DAY = "2026-10-03";
 export const H3_HOLDOUT_FROM_DAY = "2026-10-11";
 export const H3_HOLDOUT_TO_DAY = "2026-10-13";
 
+/** Stage 1's holdout ended here; its single look was spent on 2026-10-06. */
+export const HOLDOUT_TO_DAY = "2026-10-05";
+
+/**
+ * The gate for stage 1's reports (run-real-data-report, run-otel-report) now
+ * that their holdout is spent (decided 2026-10-06): exploration may read any
+ * day OUTSIDE the two holdouts — stage 1's (looked at once, never again) and
+ * H3's (its one look belongs to run-h3-report) — and `--holdout` is refused
+ * outright. Before this, these reports refused every day from 2026-10-03 on,
+ * which also locked out the exploration days the next statistical task needs.
+ * Returns the refusal message, or undefined when the range may be read.
+ */
+export function stage1RangeRefusal(fromDay: string, toDay: string, holdout: boolean): string | undefined {
+  if (holdout) {
+    return `refusing: stage 1's holdout (${HOLDOUT_FROM_DAY}…${HOLDOUT_TO_DAY}) was spent on 2026-10-06 — it had one look`;
+  }
+  for (const [from, to, what] of [
+    [HOLDOUT_FROM_DAY, HOLDOUT_TO_DAY, "stage 1's holdout"],
+    [H3_HOLDOUT_FROM_DAY, H3_HOLDOUT_TO_DAY, "H3's holdout"],
+  ] as const) {
+    if (fromDay <= to && toDay >= from) {
+      return `refusing: ${fromDay}…${toDay} touches ${what} (${from}…${to}); explore outside it`;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Read a collector directory: `YYYY-MM-DD.jsonl` (today, raw) and
  * `YYYY-MM-DD.jsonl.gz` (rolled) day files plus gaps.jsonl. `fromDay`/`toDay`
@@ -744,7 +771,10 @@ export function h4Verdict(o: {
 const HOUR_MS = 3_600_000;
 
 export interface DiurnalBin {
-  /** UTC hour of the observation's start — the boundary the reference is compared across. */
+  /**
+   * The UTC o'clock nearest the observation's start: the hour boundary
+   * h:00 the trial's reference and observation straddle most symmetrically.
+   */
   hour: number;
   trials: number;
   flagged: number;
@@ -766,9 +796,12 @@ export interface DiurnalResult {
 
 /**
  * H3's measurement: lay "preceding span vs this span" trials over the
- * recording, bucket their alarms by the UTC hour the observation starts in,
- * and correlate the per-hour alarm rate with how steeply the diurnal curve
- * moves at that hour. Trials step by `strideMs` (default span / 6) and so
+ * recording, bucket their alarms by the o'clock nearest the observation's
+ * start, and correlate the per-hour alarm rate with how steeply the diurnal
+ * curve moves across that o'clock. Nearest, not the hour the start falls in:
+ * a trial starting at 11:50 compares 10:50–11:50 with 11:50–12:50, i.e. it
+ * straddles 12:00 and must be read against |c(12) − c(11)|. Flooring put it
+ * under 11 and smeared every sharp step into the flat hour before it. Trials step by `strideMs` (default span / 6) and so
  * overlap — they share events, which is fine for a rate per hour but means the
  * trial count is not a sample size.
  *
@@ -798,7 +831,7 @@ export function runDiurnalAlarms(
   for (const t of trials) {
     const ref = sliceEvents(stream.events, t.refFrom, t.obsFrom);
     const obs = sliceEvents(stream.events, t.obsFrom, t.obsTo);
-    scoreInto(arms[new Date(t.obsFrom).getUTCHours()], curator.curate(applyLens(obs, opts.lens), applyLens(ref, opts.lens)));
+    scoreInto(arms[new Date(t.obsFrom + HOUR_MS / 2).getUTCHours()], curator.curate(applyLens(obs, opts.lens), applyLens(ref, opts.lens)));
   }
   const bins = arms.map((a, hour): DiurnalBin => ({
     hour, trials: a.trials, flagged: a.flagged, rate: a.trials > 0 ? a.flagged / a.trials : 0,

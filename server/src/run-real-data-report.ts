@@ -7,22 +7,20 @@
  * FA_shuffle) and H2's power-vs-G curve. Data comes from WIKI_DATA_DIR
  * (default <repo>/data/wikimedia).
  *
- * The holdout is enforced here, not left to discipline: days on or after
- * HOLDOUT_FROM_DAY (days 5–7 of the collection) are refused unless
- * `--holdout` is passed, and passing it is the one final look the
- * pre-registration allows. Do not pass it to "just check" — nothing is
- * tuned on a holdout number, and a peek that changes a parameter afterwards
- * voids the period's conclusions.
+ * The holdout is enforced here, not left to discipline (stage1RangeRefusal):
+ * stage 1's holdout (days 5–7) had its one look on 2026-10-06 and is now
+ * refused outright, as are H3's holdout days; every other day is open to
+ * exploration.
  */
 import { join } from "node:path";
 import {
   dispersionProfile,
-  HOLDOUT_FROM_DAY,
   loadWikiDir,
   restrictToKeyValues,
   runInjectionPower,
   runNullCalibration,
   topKeyValues,
+  stage1RangeRefusal,
 } from "./real-data-harness.js";
 
 function arg(name: string): string | undefined {
@@ -37,11 +35,9 @@ if (fromDay === undefined || toDay === undefined) {
   console.error("usage: run-real-data-report --from YYYY-MM-DD --to YYYY-MM-DD [--holdout]");
   process.exit(2);
 }
-if (toDay >= HOLDOUT_FROM_DAY && !holdout) {
-  console.error(
-    `refusing: ${toDay} reaches the holdout (${HOLDOUT_FROM_DAY}…). ` +
-      `Exploration must stop before it; --holdout is the single final look.`,
-  );
+const refusal = stage1RangeRefusal(fromDay, toDay, holdout);
+if (refusal !== undefined) {
+  console.error(refusal);
   process.exit(2);
 }
 
