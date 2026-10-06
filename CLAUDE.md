@@ -150,7 +150,7 @@ dcp-lighthouse/
       real-data-harness.ts       ← 再生ハーネス: R_real vs FA_shuffle・注入・φ/ラグ1・間引き再生・
                                    フラグ真値 (ON 区間の除外と検出)
       run-wikimedia-collector.ts / run-otlp-receiver.ts / run-otel-flag-log.ts / run-otel-flag-schedule.ts /
-      run-real-data-report.ts / run-otel-report.ts
+      run-real-data-report.ts / run-otel-report.ts / run-h3-report.ts
                                  ← 起動口 (レポートは保留日を --holdout なしで拒否)
   server/otel/
       otelcol-config-lighthouse.yml ← OTel Demo のコレクタ extras (traces → 受け口へ OTLP/JSON)
@@ -514,7 +514,8 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
   **H2 保留** (機械的には棄却だが実効 family が 24.1→25.7 で機序が発動していない、改訂 2026-10-01 規則 2)。
   **H4 規則外** (配線 20/23 は通過、ただし p=1 の OFF 警報率が既に 9.1% > 4.55%)。
   欠落は 0。次の統計課題は **過分散を織り込んだ帰無分布**。収集は第 2 段階 (H3) に向けて継続 (user 判断)、
-  H3 の探索/保留区間は未決。詳細は ROADMAP_BRIEF.md 2026-10-06
+  H3 は改訂 2026-10-06 で探索 10-07〜10-10・保留 10-11〜10-13 に (`run-h3-report`、飽和なら保留)。
+  探索データでは 60 分の腕が全時間帯 100% で飽和 = 過分散の帰無が先に要る。詳細は ROADMAP_BRIEF.md 2026-10-06, 2026-10-06 (2)
 - **予定: 実データ較正期間 (2026-09-27 事前登録・第0段階: Wikimedia 収集器・再生ハーネス/指標 (φ・ラグ1・シャッフル帰無・注入) は実装・合成検算済 2026-09-29、ログオン時起動のタスク登録済。H4 用の OTLP 受け口・真値ログ・p 別の間引き再生も実装済 2026-09-29、OTel Demo の実走は第1段階の1日分)** — 統計層の前提、特に「窓内の事象は独立」
   が実データで成り立つかを、事前に固定した仮説で検証する (実データで調整する期間ではない)。
   データ源は Wikimedia EventStreams (無料・認証不要の SSE、value = bot 編集か否か) と

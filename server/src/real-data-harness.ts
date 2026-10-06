@@ -54,6 +54,14 @@ const DAY_MS = 86_400_000;
 export const HOLDOUT_FROM_DAY = "2026-10-03";
 
 /**
+ * H3's own period (pre-registration revision 2026-10-06): days 1–4 from
+ * 2026-10-07 are exploration, 2026-10-11…13 the holdout. Stage 1's holdout
+ * (above) was spent on H1/H2/H4, so H3 cannot reuse it — it gets a fresh one.
+ */
+export const H3_HOLDOUT_FROM_DAY = "2026-10-11";
+export const H3_HOLDOUT_TO_DAY = "2026-10-13";
+
+/**
  * Read a collector directory: `YYYY-MM-DD.jsonl` (today, raw) and
  * `YYYY-MM-DD.jsonl.gz` (rolled) day files plus gaps.jsonl. `fromDay`/`toDay`
  * are inclusive UTC days; omitted = everything present.
@@ -731,6 +739,126 @@ export function h4Verdict(o: {
     : "REJECTED (both at or under the design rate)";
 }
 
+// ── H3: diurnal drift against the preceding equal-length span ──────────────
+
+const HOUR_MS = 3_600_000;
+
+export interface DiurnalBin {
+  /** UTC hour of the observation's start — the boundary the reference is compared across. */
+  hour: number;
+  trials: number;
+  flagged: number;
+  rate: number;
+  /** Mean value (bot share) of every event whose ts falls in this UTC hour, pooled over days. */
+  level: number;
+  /** |level(hour) − level(hour − 1)|: how far the diurnal curve moves across the boundary. */
+  slope: number;
+}
+
+export interface DiurnalResult {
+  bins: DiurnalBin[];
+  /** Pearson over the bins that hold trials; NaN when either side has no variance. */
+  correlation: number;
+  blindByGap: number;
+  unusableReference: number;
+  designTarget: number;
+}
+
+/**
+ * H3's measurement: lay "preceding span vs this span" trials over the
+ * recording, bucket their alarms by the UTC hour the observation starts in,
+ * and correlate the per-hour alarm rate with how steeply the diurnal curve
+ * moves at that hour. Trials step by `strideMs` (default span / 6) and so
+ * overlap — they share events, which is fine for a rate per hour but means the
+ * trial count is not a sample size.
+ *
+ * The curve is the bot share per UTC hour, because that is the statistic the
+ * curator compares; the arrival volume's curve is not used (decided before H3
+ * data was read, revision 2026-10-06).
+ */
+export function runDiurnalAlarms(
+  stream: LoadedStream,
+  opts: { spanMs: number; lens: QObserveParams; strideMs?: number; baseZThreshold?: number },
+): DiurnalResult {
+  const baseZ = opts.baseZThreshold ?? 2.0;
+  const curator = newCurator(baseZ);
+  const sum = new Array<number>(24).fill(0);
+  const cnt = new Array<number>(24).fill(0);
+  for (const e of stream.events) {
+    const h = new Date(e.ts).getUTCHours();
+    sum[h] += e.value;
+    cnt[h]++;
+  }
+  const level = sum.map((s, h) => (cnt[h] > 0 ? s / cnt[h] : NaN));
+
+  const { trials, blind } = planTrials(stream.events, stream.gaps, {
+    spanMs: opts.spanMs, strideMs: opts.strideMs ?? opts.spanMs / 6,
+  });
+  const arms = Array.from({ length: 24 }, tally);
+  for (const t of trials) {
+    const ref = sliceEvents(stream.events, t.refFrom, t.obsFrom);
+    const obs = sliceEvents(stream.events, t.obsFrom, t.obsTo);
+    scoreInto(arms[new Date(t.obsFrom).getUTCHours()], curator.curate(applyLens(obs, opts.lens), applyLens(ref, opts.lens)));
+  }
+  const bins = arms.map((a, hour): DiurnalBin => ({
+    hour, trials: a.trials, flagged: a.flagged, rate: a.trials > 0 ? a.flagged / a.trials : 0,
+    level: level[hour], slope: Math.abs(level[hour] - level[(hour + 23) % 24]),
+  }));
+  const used = bins.filter((b) => b.trials > 0 && Number.isFinite(b.slope));
+  return {
+    bins,
+    correlation: pearson(used.map((b) => b.rate), used.map((b) => b.slope)),
+    blindByGap: blind,
+    unusableReference: arms.reduce((a, b) => a + b.unusableReference, 0),
+    designTarget: familyWiseAlpha(baseZ),
+  };
+}
+
+function pearson(x: readonly number[], y: readonly number[]): number {
+  const n = x.length;
+  if (n < 3) return NaN;
+  const mx = x.reduce((a, b) => a + b, 0) / n;
+  const my = y.reduce((a, b) => a + b, 0) / n;
+  let sxy = 0;
+  let sxx = 0;
+  let syy = 0;
+  for (let i = 0; i < n; i++) {
+    sxy += (x[i] - mx) * (y[i] - my);
+    sxx += (x[i] - mx) ** 2;
+    syy += (y[i] - my) ** 2;
+  }
+  return sxx > 0 && syy > 0 ? sxy / Math.sqrt(sxx * syy) : NaN;
+}
+
+/** The 60-minute arm's pooled alarm rate at or above this = saturated (revision 2026-10-06). */
+export const H3_SATURATION_RATE = 0.95;
+
+/**
+ * The pre-registered H3 rule on the 60-minute arm, with two cases fixed before
+ * any H3 data was read (revision 2026-10-06):
+ *  - saturated — pooled alarm rate ≥ H3_SATURATION_RATE: the rate cannot rise
+ *    where the curve is steep, so whatever r comes out is H1's dependence
+ *    speaking, not the diurnal mechanism — HELD. Pooled, not "every hour":
+ *    a dependent synthetic stream at 98–99% left a few hours under 95% and
+ *    then read as SUPPORTED (r 0.52–0.57) on the residue;
+ *  - silent — no hour alarms at all: nothing concentrates, so REJECTED
+ *    (r is undefined only because the rate has no variance).
+ */
+export function h3Verdict(r: DiurnalResult): string {
+  const scored = r.bins.filter((b) => b.trials > 0);
+  if (scored.length < 3) return "NO VERDICT: fewer than 3 hours hold scored trials";
+  const trials = scored.reduce((a, b) => a + b.trials, 0);
+  const flagged = scored.reduce((a, b) => a + b.flagged, 0);
+  if (flagged / trials >= H3_SATURATION_RATE) {
+    return `HELD: ${(100 * flagged / trials).toFixed(1)}% of trials alarm (≥ ${100 * H3_SATURATION_RATE}%) — saturated by H1's dependence, the correlation cannot speak`;
+  }
+  if (flagged === 0) return "REJECTED (no hour alarms — nothing concentrates)";
+  if (!Number.isFinite(r.correlation)) return "HELD: the correlation is undefined (no variance in rate or slope)";
+  if (r.correlation >= 0.5) return `SUPPORTED (r = ${r.correlation.toFixed(2)} ≥ 0.5)`;
+  if (r.correlation < 0.2) return `REJECTED (r = ${r.correlation.toFixed(2)} < 0.2)`;
+  return `HELD: r = ${r.correlation.toFixed(2)} lies between 0.2 and 0.5`;
+}
+
 // ── φ and lag-1 autocorrelation ─────────────────────────────────────────────
 
 export interface DispersionOptions {
@@ -866,6 +994,8 @@ export interface SyntheticOptions {
    * are over-dispersed by about (1+s)/(1−s). 0 = iid.
    */
   stickiness?: number;
+  /** p(t) = p + A·sin(2π · UTC time of day): a known diurnal curve for H3's check. 0 = flat. */
+  diurnalAmplitude?: number;
   seed?: number;
 }
 
@@ -878,6 +1008,7 @@ export function synthesizeStream(o: SyntheticOptions): LoadedStream {
   const total = names.reduce((a, k) => a + wikis[k], 0);
   const p = o.p ?? 0.5;
   const s = o.stickiness ?? 0;
+  const a = o.diurnalAmplitude ?? 0;
   const events: LensEvent[] = [];
   const t0 = o.startTs ?? 1_800_000_000_000;
   let t = t0;
@@ -885,7 +1016,8 @@ export function synthesizeStream(o: SyntheticOptions): LoadedStream {
   for (;;) {
     t += Math.max(1, Math.round((-Math.log(1 - rng()) / rate) * 1000));
     if (t >= t0 + o.durationMs) break;
-    const value = rng() < s ? prev : rng() < p ? 1 : 0;
+    const pt = a === 0 ? p : p + a * Math.sin((2 * Math.PI * (t % DAY_MS)) / DAY_MS);
+    const value = rng() < s ? prev : rng() < pt ? 1 : 0;
     prev = value;
     let r = rng() * total;
     let wiki = names[names.length - 1];

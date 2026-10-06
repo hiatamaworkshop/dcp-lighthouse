@@ -13,10 +13,12 @@ import {
   dispersionProfile,
   flagExclusion,
   fnv1a32,
+  h3Verdict,
   h4Verdict,
   loadFlagTruth,
   loadWikiDir,
   planTrials,
+  runDiurnalAlarms,
   runFlagDetection,
   restrictToKeyValues,
   runInjectionPower,
@@ -27,6 +29,7 @@ import {
   thinByTrace,
   thinEvents,
   topKeyValues,
+  type DiurnalResult,
   type TracedEvent,
 } from "./real-data-harness.js";
 import { mulberry32 } from "./calibration.js";
@@ -375,5 +378,59 @@ describe("fault-flag truth (H4 / measurement ③)", () => {
     const r = runFlagDetection(faulted, close, opts);
     assert.equal(r.refContaminated, 1);
     assert.equal(r.trials, 1);
+  });
+});
+
+describe("H3: alarms against the preceding span, by hour of day", () => {
+  const DAY = 24 * HOUR;
+  const midnight = 1_800_000_000_000 - (1_800_000_000_000 % DAY);
+  const run = (o: { diurnalAmplitude?: number; stickiness?: number; seed: number }) =>
+    runDiurnalAlarms(
+      synthesizeStream({ startTs: midnight, durationMs: 3 * DAY, rate: 2, ...o }),
+      { spanMs: HOUR, lens: { window_ms: 60_000 } },
+    );
+  const pooled = (r: DiurnalResult) =>
+    r.bins.reduce((a, b) => a + b.flagged, 0) / r.bins.reduce((a, b) => a + b.trials, 0);
+
+  it("a known diurnal curve: alarms concentrate where it is steep, and the rule reads SUPPORTED", () => {
+    const r = run({ diurnalAmplitude: 0.3, seed: 2 });
+    assert.ok(r.correlation >= 0.5, `r = ${r.correlation}`);
+    assert.match(h3Verdict(r), /^SUPPORTED/);
+    // The curve the measurement reconstructs is the one planted: steepest near 00Z/12Z, flat near 06Z/18Z.
+    assert.ok(r.bins[0].slope > 3 * r.bins[6].slope && r.bins[12].slope > 3 * r.bins[18].slope);
+  });
+
+  it("a flat iid stream: near the design rate and never SUPPORTED", () => {
+    for (const seed of [2, 3, 5, 6]) {
+      const r = run({ seed });
+      assert.ok(pooled(r) < 0.12, `seed ${seed}: ${pooled(r)}`);
+      assert.doesNotMatch(h3Verdict(r), /^SUPPORTED/);
+    }
+  });
+
+  it("dependence on top of a diurnal curve saturates the arm: HELD, not read through the residue", () => {
+    for (const seed of [1, 2, 4, 5]) {
+      const r = run({ diurnalAmplitude: 0.3, stickiness: 0.5, seed });
+      assert.ok(pooled(r) >= 0.95, `seed ${seed}: ${pooled(r)}`);
+      assert.match(h3Verdict(r), /^HELD: .*saturated/);
+    }
+  });
+
+  it("verdict edges: silent arm is REJECTED, too few hours gets NO VERDICT, the middle band is HELD", () => {
+    const bins = (rates: number[]) => rates.map((rate, hour) => ({
+      hour, trials: 10, flagged: Math.round(rate * 10), rate, level: 0.5, slope: hour / 100,
+    }));
+    const base = { blindByGap: 0, unusableReference: 0, designTarget: 0.0455 };
+    assert.match(h3Verdict({ ...base, bins: bins(new Array(24).fill(0)), correlation: NaN }), /^REJECTED \(no hour/);
+    assert.match(h3Verdict({ ...base, bins: bins([0.1, 0.2]), correlation: 1 }), /^NO VERDICT/);
+    assert.match(h3Verdict({ ...base, bins: bins(new Array(24).fill(0.1)), correlation: 0.3 }), /^HELD: r = 0.30/);
+    assert.match(h3Verdict({ ...base, bins: bins(new Array(24).fill(0.1)), correlation: 0.1 }), /^REJECTED \(r/);
+  });
+
+  it("the diurnal knob at 0 leaves the synthetic stream byte-identical", () => {
+    assert.deepEqual(
+      synthesizeStream({ durationMs: HOUR, seed: 9 }),
+      synthesizeStream({ durationMs: HOUR, seed: 9, diurnalAmplitude: 0 }),
+    );
   });
 });
