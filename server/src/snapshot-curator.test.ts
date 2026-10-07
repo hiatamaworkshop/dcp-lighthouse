@@ -13,7 +13,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { applyLens, MIN_VALID_COUNT, type LensEvent, type LensResult } from "./lens.js";
-import { SnapshotCurator, type SnapshotPackage } from "./snapshot-curator.js";
+import { SnapshotCurator, studentUpperTail, type SnapshotPackage } from "./snapshot-curator.js";
 
 const ev = (ts: number, value: number): LensEvent => ({ ts, value });
 
@@ -1255,5 +1255,114 @@ describe("SnapshotCurator — agg_func: median is unscorable, not silently score
     assert.equal(pkg.aggFuncUnscored, true);
     assert.deepEqual(pkg.tiles, []);
     assert.equal(pkg.unscoredGroups, undefined, "the whole-package flag replaces the group-level one here, not alongside it");
+  });
+});
+
+// ── overdispersed null (2026-10-07) ─────────────────────────────────────────
+
+/**
+ * A random-effects stream: each 1s window draws its own latent pass rate
+ * around `center` with sd `latentSd`, then `perWindow` Bernoulli events at it.
+ * latentSd 0 is the iid stream every earlier calibration used; > 0 is the
+ * shape H1 found on real data (events inside a window share more than the
+ * reference rate). `dropAt` forces one window's latent rate to `dropTo`.
+ */
+function clusteredResult(
+  seed: number,
+  fromTs: number,
+  windows: number,
+  perWindow: number,
+  latentSd: number,
+  drop?: { at: number; to: number },
+): LensResult {
+  const rand = rng32(seed);
+  const events: LensEvent[] = [];
+  for (let k = 0; k < windows; k++) {
+    const u1 = rand() || 1e-12;
+    const u2 = rand();
+    let p = 0.6 + latentSd * Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
+    if (drop !== undefined && k === drop.at) p = drop.to;
+    p = Math.min(0.98, Math.max(0.02, p));
+    for (let i = 0; i < perWindow; i++) {
+      events.push({ ts: fromTs + k * 1000 + Math.floor(rand() * 1000), value: rand() < p ? 1 : 0 });
+    }
+  }
+  return applyLens(events, { window_ms: 1000, align: "epoch" });
+}
+
+describe("SnapshotCurator — overdispersed null (events in a window are not independent)", () => {
+  const SEEDS = 300;
+  const fires = (pkg: SnapshotPackage) => pkg.tiles.some((t) => t.shapeTag === "spike" || t.shapeTag === "dip");
+  const rate = (nullModel: "independent" | "overdispersed", latentSd: number) => {
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false, nullModel });
+    let n = 0;
+    for (let s = 1; s <= SEEDS; s++) {
+      if (fires(curator.curate(clusteredResult(s * 104729, 10_000, 10, 35, latentSd), clusteredResult(s * 7919, 0, 10, 35, latentSd)))) n++;
+    }
+    return n / SEEDS;
+  };
+
+  it("holds the design rate on a clustered null that the independent model floods", () => {
+    // Measured (1000 seeds): independent 48.9%, overdispersed 5.0% against a 4.55% design.
+    const independent = rate("independent", 0.1);
+    const overdispersed = rate("overdispersed", 0.1);
+    assert.ok(independent > 0.35, `independent model must be visibly broken here — got ${independent}`);
+    assert.ok(overdispersed < 0.08, `overdispersed must sit near design — got ${overdispersed}`);
+  });
+
+  it("is conservative, not liberal, on the iid stream it no longer assumes", () => {
+    // τ̂² clears its clamp by chance on about half of iid references; the price is
+    // a lower rate (and power), never a higher one. Measured: 4.1% → 2.4%.
+    assert.ok(rate("overdispersed", 0) <= rate("independent", 0));
+  });
+
+  it("still catches a window whose latent rate collapses", () => {
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false, nullModel: "overdispersed" });
+    let hit = 0;
+    for (let s = 1; s <= 100; s++) {
+      const pkg = curator.curate(
+        clusteredResult(s * 104729, 10_000, 10, 35, 0.1, { at: 4, to: 0.05 }),
+        clusteredResult(s * 7919, 0, 10, 35, 0.1),
+      );
+      if (pkg.tiles.some((t) => t.shapeTag === "dip" && t.regionStart === 14_000)) hit++;
+    }
+    // Measured 82% at 1000 seeds (independent: 100%, at the cost of the flood above).
+    assert.ok(hit >= 65, `a 0.6 → 0.05 collapse must still fire most of the time — ${hit}/100`);
+  });
+
+  it("estimates τ² from the reference alone — the observation cannot widen its own yardstick", () => {
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false, nullModel: "overdispersed" });
+    const reference = clusteredResult(11, 0, 10, 35, 0.1);
+    const calm = curator.curate(clusteredResult(12, 10_000, 10, 35, 0), reference);
+    const wild = curator.curate(clusteredResult(12, 10_000, 10, 35, 0.3), reference);
+    assert.ok(calm.overdispersion![0].tau2 > 0);
+    assert.equal(wild.overdispersion![0].tau2, calm.overdispersion![0].tau2);
+  });
+
+  it("is bit-identical to the independent model where the reference shows no excess spread", () => {
+    // Every reference window at exactly the same mix → MSB ≤ MSW → τ̂² clamps to 0.
+    const even: LensEvent[] = [];
+    for (let k = 0; k < 10; k++) for (let i = 0; i < 20; i++) even.push({ ts: k * 1000 + i * 40, value: i % 4 === 0 ? 0 : 1 });
+    const reference = applyLens(even, { window_ms: 1000, align: "epoch" });
+    const observation = clusteredResult(5, 10_000, 10, 20, 0.2);
+    const a = new SnapshotCurator({ spikeZThreshold: 2.0 }).curate(observation, reference);
+    const b = new SnapshotCurator({ spikeZThreshold: 2.0, nullModel: "overdispersed" }).curate(observation, reference);
+    assert.deepEqual(b.overdispersion, [{ tau2: 0 }]);
+    const { overdispersion: _, generatedAt: _b, ...restB } = b;
+    const { generatedAt: _a, ...restA } = a;
+    assert.deepEqual(restB, restA);
+  });
+
+  it("the default carries no overdispersion field at all", () => {
+    const pkg = new SnapshotCurator().curate(clusteredResult(3, 10_000, 10, 35, 0.1), clusteredResult(4, 0, 10, 35, 0.1));
+    assert.equal(pkg.overdispersion, undefined);
+  });
+});
+
+describe("studentUpperTail", () => {
+  it("matches reference Student-t tails", () => {
+    for (const [t, df, expected] of [[2, 5, 0.05097], [1, 1, 0.25], [3, 10, 0.006672], [5, 3, 0.007696], [0, 7, 0.5]]) {
+      assert.ok(Math.abs(studentUpperTail(t, df) - expected) < 2e-6, `P(T_${df} > ${t})`);
+    }
   });
 });

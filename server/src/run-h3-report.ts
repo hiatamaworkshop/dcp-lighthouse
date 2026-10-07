@@ -12,12 +12,20 @@
  * H3 has its own holdout (H3_HOLDOUT_FROM_DAY…H3_HOLDOUT_TO_DAY): days in it are
  * refused without `--holdout`, and `--holdout` must cover exactly those days —
  * it is the single final look, as for stage 1.
+ *
+ * The judgment's null model is H3_NULL_MODEL ("overdispersed", revision
+ * 2026-10-07 (2)) and is the default here. `--null-model independent` is for
+ * exploration comparisons only; `--holdout` refuses any other model, and prints
+ * the independent 60-minute arm beside the verdict as a reference line (the
+ * single look covers both, so the switch's effect stays on record).
  */
 import { join } from "node:path";
 import {
   H3_HOLDOUT_FROM_DAY,
   H3_HOLDOUT_TO_DAY,
+  H3_NULL_MODEL,
   h3Verdict,
+  curatorForNullModel,
   loadWikiDir,
   runDiurnalAlarms,
 } from "./real-data-harness.js";
@@ -30,8 +38,14 @@ function arg(name: string): string | undefined {
 const fromDay = arg("from");
 const toDay = arg("to");
 const holdout = process.argv.includes("--holdout");
+const nullModel = arg("null-model") ?? H3_NULL_MODEL;
+const curator = curatorForNullModel(nullModel);
 if (fromDay === undefined || toDay === undefined) {
-  console.error("usage: run-h3-report --from YYYY-MM-DD --to YYYY-MM-DD [--holdout]");
+  console.error("usage: run-h3-report --from YYYY-MM-DD --to YYYY-MM-DD [--holdout] [--null-model independent|overdispersed]");
+  process.exit(2);
+}
+if (holdout && nullModel !== H3_NULL_MODEL) {
+  console.error(`refusing: H3's judgment uses the ${H3_NULL_MODEL} null (revision 2026-10-07 (2)); --null-model ${nullModel} is exploration only.`);
   process.exit(2);
 }
 if (holdout && (fromDay !== H3_HOLDOUT_FROM_DAY || toDay !== H3_HOLDOUT_TO_DAY)) {
@@ -59,12 +73,12 @@ const hours = stream.events.length > 0
 const pct = (x: number) => `${(100 * x).toFixed(1)}%`;
 console.log(
   `${stream.events.length} events over ${hours.toFixed(1)} h, ${stream.gaps.length} collection gaps ` +
-    `(${fromDay}…${toDay}${holdout ? ", HOLDOUT" : ""})`,
+    `(${fromDay}…${toDay}${holdout ? ", HOLDOUT" : ""}, null model: ${nullModel})`,
 );
 
 let verdict = "";
 for (const [label, spanMs, windowMs] of [["60 min", 3_600_000, 60_000], ["1 min", 60_000, 1_000]] as const) {
-  const r = runDiurnalAlarms(stream, { spanMs, lens: { window_ms: windowMs } });
+  const r = runDiurnalAlarms(stream, { spanMs, lens: { window_ms: windowMs }, curator });
   const trials = r.bins.reduce((a, b) => a + b.trials, 0);
   const flagged = r.bins.reduce((a, b) => a + b.flagged, 0);
   console.log(
@@ -81,4 +95,15 @@ for (const [label, spanMs, windowMs] of [["60 min", 3_600_000, 60_000], ["1 min"
   }
   if (spanMs === 3_600_000) verdict = h3Verdict(r);
 }
-console.log(`\nH3 (pre-registered rule, 60-minute arm): ${verdict}`);
+console.log(`\nH3 (pre-registered rule, 60-minute arm, ${nullModel} null): ${verdict}`);
+if (holdout) {
+  // Reference only — the verdict above is the judgment. Printed in the same
+  // single look so the null-model switch's effect is on record beside it.
+  const ind = runDiurnalAlarms(stream, { spanMs: 3_600_000, lens: { window_ms: 60_000 } });
+  const t = ind.bins.reduce((a, b) => a + b.trials, 0);
+  const f = ind.bins.reduce((a, b) => a + b.flagged, 0);
+  console.log(
+    `reference (independent null, not the judgment): alarm ${pct(t > 0 ? f / t : 0)} (${f}/${t}) | ` +
+      `r ${ind.correlation.toFixed(3)} | the rule would read: ${h3Verdict(ind)}`,
+  );
+}

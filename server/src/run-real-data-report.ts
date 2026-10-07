@@ -15,6 +15,7 @@
 import { join } from "node:path";
 import {
   dispersionProfile,
+  curatorForNullModel,
   loadWikiDir,
   restrictToKeyValues,
   runInjectionPower,
@@ -31,8 +32,11 @@ function arg(name: string): string | undefined {
 const fromDay = arg("from");
 const toDay = arg("to");
 const holdout = process.argv.includes("--holdout");
+// Absent = the pre-registered independent null; "overdispersed" = the 2026-10-07 between-window-variance null.
+const nullModel = arg("null-model");
+const curator = curatorForNullModel(nullModel);
 if (fromDay === undefined || toDay === undefined) {
-  console.error("usage: run-real-data-report --from YYYY-MM-DD --to YYYY-MM-DD [--holdout]");
+  console.error("usage: run-real-data-report --from YYYY-MM-DD --to YYYY-MM-DD [--holdout] [--null-model independent|overdispersed]");
   process.exit(2);
 }
 const refusal = stage1RangeRefusal(fromDay, toDay, holdout);
@@ -49,7 +53,7 @@ const hours = stream.events.length > 0
 const pct = (x: number) => `${(100 * x).toFixed(1)}%`;
 console.log(
   `${stream.events.length} events over ${hours.toFixed(1)} h, ${stream.gaps.length} collection gaps ` +
-    `(${fromDay}…${toDay}${holdout ? ", HOLDOUT" : ""})`,
+    `(${fromDay}…${toDay}${holdout ? ", HOLDOUT" : ""}, null model: ${nullModel ?? "independent"})`,
 );
 
 console.log("\n— H1: dependence —");
@@ -67,7 +71,7 @@ for (const [label, lens] of [
   ["mixed 10s", { window_ms: 10_000 }],
 ] as const) {
   const spanMs = lens.window_ms === 10_000 ? 300_000 : 10_000;
-  const r = runNullCalibration(stream, { lens, spanMs, shuffleReps: 3 });
+  const r = runNullCalibration(stream, { lens, spanMs, shuffleReps: 3, curator });
   console.log(
     `${label} (span ${spanMs / 1000}s): R_real ${pct(r.real.rate)} (${r.real.flagged}/${r.real.trials}) ` +
       `FA_shuffle ${pct(r.shuffled.rate)} (${r.shuffled.flagged}/${r.shuffled.trials}) ` +
@@ -85,8 +89,8 @@ const target = topKeyValues(stream.events, "wiki", 1)[0];
 for (const g of [4, 16, 64, 256]) {
   const restricted = { ...stream, events: restrictToKeyValues(stream.events, "wiki", topKeyValues(stream.events, "wiki", g)) };
   const base = { lens: { window_ms: 1_000, group_by: ["wiki"] }, target: { key: "wiki", value: target } };
-  const r = runInjectionPower(restricted, { ...base, fraction: 0.8 });
-  const n = runInjectionPower(restricted, { ...base, fraction: 0 });
+  const r = runInjectionPower(restricted, { ...base, fraction: 0.8, curator });
+  const n = runInjectionPower(restricted, { ...base, fraction: 0, curator });
   console.log(
     `G=${g}: power ${pct(r.power)} (${r.detected}/${r.trials}), shift ${r.meanShiftTruth.toFixed(3)}, ` +
       `${r.targetThin} thin, ${r.blindByGap} blind, ${r.unusableReference} unusable | ` +

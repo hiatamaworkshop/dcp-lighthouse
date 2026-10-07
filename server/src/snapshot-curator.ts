@@ -221,6 +221,15 @@ export interface SnapshotPackage {
    * never on offer, so a reader stops treating "no spikes" as evidence.
    */
   unreachableTails: UnreachableTail[];
+  /**
+   * Present only under `nullModel: "overdispersed"`: the between-window
+   * variance τ̂² each scoring unit's gate added, estimated from that unit's
+   * reference windows (group absent = the ungrouped stream). A τ̂² of 0 means
+   * the reference showed no spread beyond independent sampling and that unit
+   * was gated exactly as under "independent". Carried so a package can say how
+   * much of its yardstick is the dependence it allowed for.
+   */
+  overdispersion?: Array<{ group?: string; tau2: number }>;
   /** The curated tiles, sorted by regionStart ascending. */
   tiles: SnapshotTile[];
 }
@@ -309,6 +318,22 @@ export interface CurationOptions {
    * itself window-by-window is meaningless.
    */
   divergenceZThreshold?: number;
+  /**
+   * What the spike/dip gate assumes about events inside one window (default
+   * "independent", the model every figure up to 2026-10-06 was measured under).
+   *
+   * "overdispersed" drops the assumption that a window's events are independent
+   * draws at the reference rate — the assumption H1 found false on real data
+   * (ROADMAP_BRIEF.md 2026-10-06: φ 7.63 at 10 s, R_real 99.8% vs FA_shuffle
+   * 5.0%). Each window then has its own latent rate, scattered around the
+   * reference's with a between-window variance τ² estimated from the
+   * REFERENCE windows alone (one-way ANOVA, see betweenWindowVariance), and the
+   * gate asks whether the observation window is a plausible NEW window from
+   * that population: τ² is added to the normal path's standard error and folded
+   * into the exact path's Dirichlet concentration. Where the reference shows no
+   * excess spread (τ̂² = 0) the gate is bit-identical to "independent".
+   */
+  nullModel?: "independent" | "overdispersed";
 }
 
 // ── SnapshotCurator ─────────────────────────────────────────────────────────
@@ -325,6 +350,7 @@ export class SnapshotCurator {
       maxTiles: opts.maxTiles ?? 12,
       includeBaseline: opts.includeBaseline !== false,
       divergenceZThreshold: opts.divergenceZThreshold ?? 1.5,
+      nullModel: opts.nullModel ?? "independent",
     };
   }
 
@@ -452,6 +478,10 @@ export class SnapshotCurator {
     // reference — paired by label, which is why applyLens puts every group on a
     // shared grid and sorts groups deterministically.
     const { units, unscoredGroups } = buildScoringUnits(observation, reference, refStats);
+    const overdispersed = this.opts.nullModel === "overdispersed";
+    if (overdispersed) {
+      for (const unit of units) unit.ref = { ...unit.ref, ...betweenWindowVariance(unit.refWindows) };
+    }
 
     // ── 1. Spikes and dips ────────────────────────────────────
     // Each window is scored against the reference population via a standard
@@ -483,7 +513,7 @@ export class SnapshotCurator {
       // — the correction belongs to the tail probability, not to the effect
       // size Brain reads.
       const lattice = detectLattice(unit.windows, unit.refWindows);
-      const model = categoricalModel(unit.windows, unit.refWindows);
+      const model = categoricalModel(unit.windows, unit.refWindows, unit.ref);
 
       collectUnreachableTails(unit, effectiveZThreshold, lattice, model, unreachableTails);
 
@@ -599,6 +629,14 @@ export class SnapshotCurator {
         effectiveZThreshold,
       },
       unreachableTails,
+      ...(overdispersed
+        ? {
+            overdispersion: units.map((u) => ({
+              ...(u.group !== undefined ? { group: u.group } : {}),
+              tau2: u.ref.tau2 ?? 0,
+            })),
+          }
+        : {}),
       tiles: capped,
     };
   }
@@ -688,6 +726,161 @@ interface RefStats {
   count: number;
   /** Kish effective sample size of the pool — what standard errors divide by. */
   effectiveN: number;
+  /**
+   * Between-window variance of the latent rate (value units²). Set only under
+   * `nullModel: "overdispersed"` (betweenWindowVariance); absent or 0 = the
+   * independent-events model.
+   */
+  tau2?: number;
+  /**
+   * Σnₖ²/N² over the reference windows — how much of τ² survives into the
+   * reference mean itself (1/K for K equal windows). Paired with tau2.
+   */
+  refShare?: number;
+  /**
+   * Degrees of freedom τ̂² was estimated with (Satterthwaite, from MSB's K−1).
+   * Paired with tau2; the gate reads it to widen the tail (studentize).
+   */
+  tau2Df?: number;
+}
+
+/**
+ * One-way random-effects ANOVA over the reference windows: how much the
+ * windows' means spread beyond what independent sampling inside each window
+ * explains. That excess is τ², the variance of the windows' own latent rates.
+ *
+ *   MSB = Σ nₖ(mₖ − m̄)² / (K − 1)       between windows
+ *   MSW = Σ nₖ·s²ₖ      / (N − K)       within windows
+ *   τ̂²  = max(0, (MSB − MSW) / n₀),     n₀ = (N − Σnₖ²/N) / (K − 1)
+ *
+ * The textbook moment estimator (the DerSimonian–Laird form for unequal
+ * cluster sizes): under independence E[MSB] = E[MSW], so τ̂² is 0 up to
+ * noise, and the max(0, ·) clamp means a reference with no excess spread
+ * leaves the gate untouched — that is what keeps synthetic iid calibration
+ * bit-identical whenever the clamp lands.
+ *
+ * Read from the REFERENCE windows only, never the observation: estimating the
+ * spread from the windows being scored would let an anomaly widen its own
+ * error bar — the self-reference comparisonSE's doc already rules out.
+ *
+ * nₖ is the window's effective n (its count when unweighted) and s²ₖ its
+ * weighted population variance, so `nₖ·s²ₖ` is exactly the within-window sum
+ * of squares on unweighted data. Windows with no events carry no information
+ * and are skipped; fewer than two informative windows, or no within-window
+ * degrees of freedom, give no estimate (τ̂² = 0, i.e. the independent model).
+ *
+ * τ̂² is itself an estimate from K windows, and with the RC-sized reference
+ * (10 one-second windows) a noisy one: plugged in as if known, it left the
+ * standardized deviations of real Wikimedia windows at variance ≈1.45 instead
+ * of 1 (ROADMAP_BRIEF.md 2026-10-07). `tau2Df` carries how many degrees of
+ * freedom it rests on so the gate can studentize: Var(τ̂²) ≈ 2·MSB²/((K−1)n₀²)
+ * gives ν = (K−1)(1 − MSW/MSB)² — near K−1 when the excess spread is
+ * unmistakable, near 0 when τ̂² barely clears the clamp (and then τ̂² is also
+ * small, so studentizeZ's Satterthwaite combination still lands near ∞).
+ */
+function betweenWindowVariance(windows: readonly WindowStat[]): { tau2: number; refShare: number; tau2Df: number } {
+  const ws = windows.filter((w) => w.count > 0 && effectiveN(w) > 0);
+  const K = ws.length;
+  const ns = ws.map(effectiveN);
+  const N = ns.reduce((s, n) => s + n, 0);
+  const sumN2 = ns.reduce((s, n) => s + n * n, 0);
+  const refShare = N > 0 ? sumN2 / (N * N) : 1;
+  if (K < 2 || !(N - K > 0)) return { tau2: 0, refShare, tau2Df: Infinity };
+
+  const grand = ws.reduce((s, w, k) => s + ns[k] * w.mean, 0) / N;
+  const ssb = ws.reduce((s, w, k) => s + ns[k] * (w.mean - grand) ** 2, 0);
+  const ssw = ws.reduce((s, w, k) => s + ns[k] * Math.max(0, w.sumSq / weightTotal(w) - w.mean * w.mean), 0);
+  const msb = ssb / (K - 1);
+  const msw = ssw / (N - K);
+  const n0 = (N - sumN2 / N) / (K - 1);
+  const tau2 = n0 > 0 ? Math.max(0, (msb - msw) / n0) : 0;
+  if (!(tau2 > 0)) return { tau2: 0, refShare, tau2Df: Infinity };
+  return { tau2, refShare, tau2Df: (K - 1) * (1 - msw / msb) ** 2 };
+}
+
+/**
+ * Turn a z computed with τ̂² plugged in as if known into the normal z with the
+ * same tail under the Student-t that τ̂²'s uncertainty implies.
+ *
+ * Satterthwaite: the squared standard error is A + B, A = the independent-
+ * sampling part (estimated from hundreds of events — treated as exact) and
+ * B = τ̂²·(1 + refShare) on ν = tau2Df degrees of freedom, so
+ * df = (A + B)² / (B²/ν). As B → 0 the df runs to ∞ and the z comes back
+ * unchanged, which is how this stays continuous with "independent".
+ *
+ * Applied after the exact path as well as the normal one. That composition is
+ * an approximation — the exact tail handles the window's discreteness and skew
+ * at a plug-in concentration, the t handles the concentration being estimated
+ * — and is not an exact predictive; it is the smallest step that gives the
+ * K−1 degrees of freedom a voice at all.
+ */
+function studentizeZ(z: number, w: WindowStat, ref: RefStats): number {
+  const tau2 = ref.tau2 ?? 0;
+  const nu = ref.tau2Df ?? Infinity;
+  if (!(tau2 > 0) || !Number.isFinite(nu) || !Number.isFinite(z)) return z;
+  const a = ref.variance * (1 / effectiveN(w) + 1 / ref.effectiveN);
+  const b = tau2 * (1 + (ref.refShare ?? 0));
+  const df = ((a + b) * (a + b)) / ((b * b) / nu);
+  if (!(df > 0) || df > 1e6) return z;
+  const tail = studentUpperTail(Math.abs(z), df);
+  return Math.sign(z) * -normalQuantile(tail);
+}
+
+/** P(T > t) for t ≥ 0 under Student-t with `df` degrees of freedom: ½·I_{df/(df+t²)}(df/2, ½). */
+export function studentUpperTail(t: number, df: number): number {
+  return 0.5 * regularizedIncompleteBeta(df / (df + t * t), df / 2, 0.5);
+}
+
+/** I_x(a, b) via the Lentz continued fraction (Numerical Recipes betacf), symmetry-swapped for convergence. */
+function regularizedIncompleteBeta(x: number, a: number, b: number): number {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const lnFront = logGamma(a + b) - logGamma(a) - logGamma(b) + a * Math.log(x) + b * Math.log(1 - x);
+  if (x > (a + 1) / (a + b + 2)) return 1 - (Math.exp(lnFront) * betaContinuedFraction(1 - x, b, a)) / b;
+  return (Math.exp(lnFront) * betaContinuedFraction(x, a, b)) / a;
+}
+
+function betaContinuedFraction(x: number, a: number, b: number): number {
+  const tiny = 1e-300;
+  let c = 1;
+  let d = 1 - ((a + b) * x) / (a + 1);
+  if (Math.abs(d) < tiny) d = tiny;
+  d = 1 / d;
+  let h = d;
+  for (let m = 1; m <= 300; m++) {
+    const m2 = 2 * m;
+    let aa = (m * (b - m) * x) / ((a + m2 - 1) * (a + m2));
+    d = 1 + aa * d;
+    if (Math.abs(d) < tiny) d = tiny;
+    c = 1 + aa / c;
+    if (Math.abs(c) < tiny) c = tiny;
+    d = 1 / d;
+    h *= d * c;
+    aa = (-(a + m) * (a + b + m) * x) / ((a + m2) * (a + m2 + 1));
+    d = 1 + aa * d;
+    if (Math.abs(d) < tiny) d = tiny;
+    c = 1 + aa / c;
+    if (Math.abs(c) < tiny) c = tiny;
+    d = 1 / d;
+    const delta = d * c;
+    h *= delta;
+    if (Math.abs(delta - 1) < 1e-14) break;
+  }
+  return h;
+}
+
+/** ln Γ(x) for x > 0, Lanczos (g = 7, n = 9; ~1e-15 relative). */
+function logGamma(x: number): number {
+  const g = [
+    0.99999999999980993, 676.5203681218851, -1259.1392167224028, 771.32342877765313, -176.61502916214059,
+    12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6, 1.5056327351493116e-7,
+  ];
+  if (x < 0.5) return Math.log(Math.PI / Math.abs(Math.sin(Math.PI * x))) - logGamma(1 - x);
+  const xx = x - 1;
+  let s = g[0];
+  for (let i = 1; i < 9; i++) s += g[i] / (xx + i);
+  const t = xx + 7.5;
+  return 0.5 * Math.log(2 * Math.PI) + (xx + 0.5) * Math.log(t) - t + Math.log(s);
 }
 
 /**
@@ -903,7 +1096,15 @@ function collectUnreachableTails(
  * 10x on evidence that does not support it.
  */
 function comparisonSE(w: WindowStat, ref: RefStats): number {
-  return Math.sqrt(ref.variance * (1 / effectiveN(w) + 1 / ref.effectiveN));
+  const independent = ref.variance * (1 / effectiveN(w) + 1 / ref.effectiveN);
+  // Overdispersed null: the window's own latent rate is off the population's
+  // by τ², and the reference mean carries τ² too, shrunk by refShare (≈1/K).
+  // ref.variance stays the TOTAL event variance rather than the within-window
+  // part, which counts τ² once more over n — a slight overstatement, kept so
+  // that τ̂² = 0 reproduces "independent" exactly.
+  const tau2 = ref.tau2 ?? 0;
+  if (!(tau2 > 0)) return Math.sqrt(independent);
+  return Math.sqrt(independent + tau2 * (1 + (ref.refShare ?? 0)));
 }
 
 /**
@@ -1013,7 +1214,7 @@ function gate(
   model: CategoricalModel | null,
 ): number {
   const exact = model === null ? null : exactZ(w, model);
-  return exact ?? gateZ(w, ref, se, lattice?.step ?? null);
+  return studentizeZ(exact ?? gateZ(w, ref, se, lattice?.step ?? null), w, ref);
 }
 
 /**
@@ -1027,6 +1228,11 @@ interface CategoricalModel {
   levels: 2 | 3;
   /** Reference events at each level, pooled over every reference window. */
   refCounts: number[];
+  /**
+   * Overdispersed null only: τ² in step units² and the reference's refShare,
+   * which exactZ folds into the Dirichlet concentration. Absent = independent.
+   */
+  overdispersion?: { tau2Step: number; refShare: number };
 }
 
 /**
@@ -1071,7 +1277,11 @@ function levelCounts(w: WindowStat, min: number, step: number, levels: 2 | 3): n
  * mapping (1 / 0.5 / 0), which is not two-valued and therefore never reached
  * detectLattice's continuity correction either (2026-09-27 review).
  */
-function categoricalModel(observation: readonly WindowStat[], reference: readonly WindowStat[]): CategoricalModel | null {
+function categoricalModel(
+  observation: readonly WindowStat[],
+  reference: readonly WindowStat[],
+  ref: RefStats,
+): CategoricalModel | null {
   const all = [...observation, ...reference].filter((w) => w.count > 0);
   if (all.length === 0 || reference.every((w) => w.count === 0)) return null;
   let min = Infinity;
@@ -1091,7 +1301,10 @@ function categoricalModel(observation: readonly WindowStat[], reference: readonl
       const c = levelCounts(w, min, step, levels)!;
       for (let i = 0; i < levels; i++) refCounts[i] += c[i];
     }
-    return { min, step, levels, refCounts };
+    const tau2 = ref.tau2 ?? 0;
+    return tau2 > 0
+      ? { min, step, levels, refCounts, overdispersion: { tau2Step: tau2 / (step * step), refShare: ref.refShare ?? 0 } }
+      : { min, step, levels, refCounts };
   }
   return null;
 }
@@ -1138,7 +1351,7 @@ function exactZ(w: WindowStat, model: CategoricalModel): number | null {
   if (c === null) return null;
   const x = c.reduce((s, ci, i) => s + i * ci, 0);
 
-  const alpha = model.refCounts.map((r) => r + 0.5);
+  const alpha = concentration(model.refCounts.map((r) => r + 0.5), model.overdispersion);
   const A = alpha.reduce((s, a) => s + a, 0);
   // Cumulative tables, so each composition costs a few additions:
   //   logFact[j] = ln j!,  g[i][j] = ln Γ(αᵢ + j) − ln Γ(αᵢ).
@@ -1178,6 +1391,37 @@ function exactZ(w: WindowStat, model: CategoricalModel): number | null {
   // Each side from its own tail sum, never as 1 − (the other): the tail that
   // matters is the small one, and subtracting it from 1 would round it away.
   return x < expected ? normalQuantile(below + 0.5 * at) : -normalQuantile(above + 0.5 * at);
+}
+
+/**
+ * The Dirichlet parameters of exactZ's null, widened for an overdispersed
+ * reference by lowering the total concentration and keeping the proportions.
+ *
+ * Under Dirichlet(α) with A = Σα, the window's latent score-rate Σ i·θᵢ has
+ * variance s²/(A+1), s² being the categorical variance (step units) at the
+ * proportions α/A. Under independence that is all of it — the posterior
+ * uncertainty of the reference rate. The overdispersed null adds the window's
+ * own latent deviation τ² and τ²'s share in the reference mean:
+ *
+ *   V = s²/(A+1) + τ²·(1 + refShare),   and A' + 1 = s²/V
+ *
+ * so the beta-binomial (2 levels) / Dirichlet-multinomial (3) is moment-matched
+ * to the same predictive variance comparisonSE uses on the normal path. One
+ * concentration for every level means the 3-level case assumes the latent
+ * rates co-vary like a Dirichlet does — the simplest overdispersed multinomial,
+ * not a fitted one. τ² = 0 returns α untouched (bit-identical).
+ */
+function concentration(alpha: number[], od: CategoricalModel["overdispersion"]): number[] {
+  if (od === undefined || !(od.tau2Step > 0)) return alpha;
+  const A = alpha.reduce((s, a) => s + a, 0);
+  const meanStep = alpha.reduce((s, a, i) => s + i * a, 0) / A;
+  const s2 = alpha.reduce((s, a, i) => s + i * i * a, 0) / A - meanStep * meanStep;
+  if (!(s2 > 0)) return alpha;
+  const v = s2 / (A + 1) + od.tau2Step * (1 + od.refShare);
+  // A' below ~1e-6 would make the predictive a pair of point masses; the
+  // floor only guards the arithmetic (lgamma of ~0), it is not a tuning knob.
+  const scaled = Math.max(1e-6, s2 / v - 1);
+  return alpha.map((a) => (a * scaled) / A);
 }
 
 /**

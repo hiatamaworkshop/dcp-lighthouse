@@ -310,6 +310,27 @@ function newCurator(baseZ: number): SnapshotCurator {
   return new SnapshotCurator({ spikeZThreshold: baseZ, includeBaseline: true });
 }
 
+/**
+ * The `--null-model` flag shared by the report entry points: absent or
+ * "independent" = the curator every pre-registered figure was measured with
+ * (returns undefined so each harness builds its own default, unchanged);
+ * "overdispersed" = the between-window-variance null (2026-10-07).
+ */
+/**
+ * The null model H3's judgment is read under (revision 2026-10-07 (2), user
+ * approved): the independent null saturated the 60-minute arm at 100% on
+ * exploration data, leaving the pre-registered correlation nothing to measure.
+ */
+export const H3_NULL_MODEL = "overdispersed";
+
+export function curatorForNullModel(name: string | undefined, baseZ = 2.0): SnapshotCurator | undefined {
+  if (name === undefined || name === "independent") return undefined;
+  if (name === "overdispersed") {
+    return new SnapshotCurator({ spikeZThreshold: baseZ, includeBaseline: true, nullModel: "overdispersed" });
+  }
+  throw new RangeError(`unknown --null-model "${name}" (independent | overdispersed)`);
+}
+
 // ── Shuffle null ────────────────────────────────────────────────────────────
 
 /**
@@ -811,10 +832,10 @@ export interface DiurnalResult {
  */
 export function runDiurnalAlarms(
   stream: LoadedStream,
-  opts: { spanMs: number; lens: QObserveParams; strideMs?: number; baseZThreshold?: number },
+  opts: { spanMs: number; lens: QObserveParams; strideMs?: number; baseZThreshold?: number; curator?: SnapshotCurator },
 ): DiurnalResult {
   const baseZ = opts.baseZThreshold ?? 2.0;
-  const curator = newCurator(baseZ);
+  const curator = opts.curator ?? newCurator(baseZ);
   const sum = new Array<number>(24).fill(0);
   const cnt = new Array<number>(24).fill(0);
   for (const e of stream.events) {
