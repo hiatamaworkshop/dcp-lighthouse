@@ -1353,6 +1353,37 @@ describe("SnapshotCurator — overdispersed null (events in a window are not ind
     assert.deepEqual(restB, restA);
   });
 
+  it("gates step tiles too: the ratio rule alone fires on a clustered null, the gated rule does not", () => {
+    // Measured (300 seeds, latent sd 0.15): independent 25 step packages, overdispersed 0.
+    const steps = (nullModel: "independent" | "overdispersed") => {
+      const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false, nullModel });
+      let n = 0;
+      for (let s = 1; s <= SEEDS; s++) {
+        const pkg = curator.curate(clusteredResult(s * 104729, 10_000, 10, 35, 0.15), clusteredResult(s * 7919, 0, 10, 35, 0.15));
+        if (pkg.tiles.some((t) => t.shapeTag === "step_up" || t.shapeTag === "step_down")) n++;
+      }
+      return n;
+    };
+    assert.ok(steps("independent") >= 15, "the ungated ratio rule must be visibly firing here");
+    assert.ok(steps("overdispersed") <= 3);
+  });
+
+  it("still reports a sustained step when the reference shows no excess spread", () => {
+    // τ̂² = 0 → the step gate is the independent-sampling one, which a 0.75 → 0.2
+    // drop over five 20-event windows clears by a wide margin.
+    const even: LensEvent[] = [];
+    for (let k = 0; k < 10; k++) for (let i = 0; i < 20; i++) even.push({ ts: k * 1000 + i * 40, value: i % 4 === 0 ? 0 : 1 });
+    const reference = applyLens(even, { window_ms: 1000, align: "epoch" });
+    const drop: LensEvent[] = [];
+    for (let k = 0; k < 10; k++) for (let i = 0; i < 20; i++) drop.push({ ts: 10_000 + k * 1000 + i * 40, value: k >= 5 ? (i % 5 === 0 ? 1 : 0) : (i % 4 === 0 ? 0 : 1) });
+    const pkg = new SnapshotCurator({ spikeZThreshold: 2.0, nullModel: "overdispersed" }).curate(
+      applyLens(drop, { window_ms: 1000, align: "epoch" }),
+      reference,
+    );
+    assert.deepEqual(pkg.overdispersion, [{ tau2: 0 }]);
+    assert.ok(pkg.tiles.some((t) => t.shapeTag === "step_down" && t.regionStart === 15_000));
+  });
+
   it("the default carries no overdispersion field at all", () => {
     const pkg = new SnapshotCurator().curate(clusteredResult(3, 10_000, 10, 35, 0.1), clusteredResult(4, 0, 10, 35, 0.1));
     assert.equal(pkg.overdispersion, undefined);

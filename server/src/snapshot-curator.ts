@@ -332,6 +332,10 @@ export interface CurationOptions {
    * that population: τ² is added to the normal path's standard error and folded
    * into the exact path's Dirichlet concentration. Where the reference shows no
    * excess spread (τ̂² = 0) the gate is bit-identical to "independent".
+   *
+   * Step tiles are gated too under "overdispersed": the stepThreshold ratio
+   * still defines the shape, and the run must also clear the spike/dip gate
+   * with τ² in its error (see the call to detectSteps).
    */
   nullModel?: "independent" | "overdispersed";
 }
@@ -549,8 +553,18 @@ export class SnapshotCurator {
       }
 
       // ── 2. Sustained step changes ──────────────────────────────
+      // Under the overdispersed null a step is also a STATISTICAL claim: the
+      // ratio rule still defines the shape (≥ stepThreshold, ≥ stepWindowCount
+      // windows), but the run must clear the same Šidák gate spike/dip use,
+      // against an SE that carries τ². Under "independent" the ratio rule alone
+      // decides, exactly as every pre-2026-10-07 figure was measured. On real
+      // Wikimedia data the ungated ratio rule was most of what remained after
+      // the overdispersed spike/dip gate (ROADMAP_BRIEF.md 2026-10-07).
       tiles.push(
-        ...detectSteps(unit.windows, unit.ref, this.opts.stepThreshold, this.opts.stepWindowCount, unit.group),
+        ...detectSteps(
+          unit.windows, unit.ref, this.opts.stepThreshold, this.opts.stepWindowCount, unit.group,
+          overdispersed ? effectiveZThreshold : undefined,
+        ),
       );
 
       // ── 3. Gaps ────────────────────────────────────────────────
@@ -815,10 +829,14 @@ function betweenWindowVariance(windows: readonly WindowStat[]): { tau2: number; 
  * K−1 degrees of freedom a voice at all.
  */
 function studentizeZ(z: number, w: WindowStat, ref: RefStats): number {
+  return studentizeWith(z, ref.variance * (1 / effectiveN(w) + 1 / ref.effectiveN), ref);
+}
+
+/** studentizeZ with the independent-sampling part `a` of the squared SE given directly (a step run's, say). */
+function studentizeWith(z: number, a: number, ref: RefStats): number {
   const tau2 = ref.tau2 ?? 0;
   const nu = ref.tau2Df ?? Infinity;
   if (!(tau2 > 0) || !Number.isFinite(nu) || !Number.isFinite(z)) return z;
-  const a = ref.variance * (1 / effectiveN(w) + 1 / ref.effectiveN);
   const b = tau2 * (1 + (ref.refShare ?? 0));
   const df = ((a + b) * (a + b)) / ((b * b) / nu);
   if (!(df > 0) || df > 1e6) return z;
@@ -1501,6 +1519,7 @@ function detectSteps(
   threshold: number,
   minRun: number,
   group?: string,
+  gateZ?: number,
 ): SnapshotTile[] {
   if (windows.length < minRun) return [];
   // No yardstick, no comparison — mirrors spike/dip's silent skip when the
@@ -1527,8 +1546,19 @@ function detectSteps(
     const runMean = run.reduce((s, w) => s + w.mean * weightTotal(w), 0) / runSumW;
     const shift = Math.abs(runMean - ref.mean) / (ref.mean || 1);
     const shapeTag: ShapeTag = dir > 0 ? "step_up" : "step_down";
-    const se = Math.sqrt(ref.variance * (1 / runEffectiveN + 1 / ref.effectiveN));
+    const independentVar = ref.variance * (1 / runEffectiveN + 1 / ref.effectiveN);
+    const se = Math.sqrt(independentVar);
     const z = se > 0 ? Math.abs(runMean - ref.mean) / se : 0;
+    if (gateZ !== undefined) {
+      // Overdispersed null only (see the gateZ note at the call site). The run's
+      // latent level is ONE draw of τ², not m independent ones: consecutive
+      // windows are autocorrelated on real data (lag-1 0.17–0.33), so dividing
+      // τ² by the run length would credit a sustained drift with evidence it
+      // does not carry. Conservative by construction.
+      const odVar = independentVar + (ref.tau2 ?? 0) * (1 + (ref.refShare ?? 0));
+      const zGate = odVar > 0 ? studentizeWith(Math.abs(runMean - ref.mean) / Math.sqrt(odVar), independentVar, ref) : 0;
+      if (zGate < gateZ) return;
+    }
     tiles.push({
       label: `${tag}${shapeTag} t=${windows[start].windowStart}–${windows[end].windowEnd} (${(shift * 100).toFixed(1)}% shift)`,
       shapeTag,
