@@ -147,7 +147,7 @@ Earlier drafts of this document conflated the three. They are distinct because e
 
 All three live in a dedicated `$Q` registry, all three are written through the same `set()` call, all three appear in the swap-history stream the dashboard renders. The layering is conceptual, not mechanical.
 
-> **Implementation note.** `$Q` does *not* ride on the existing field-mapping layer (`FieldMapping` in `dcp-wrap`). That layer has one clean responsibility — resolving source paths to schema fields — and mixing observation parameters into it would muddy it. `$Q` is its own small registry that `$ST` collectors and the ingestion bus read from. This keeps the "single responsibility per shadow" principle intact down to the implementation.
+> **Implementation note.** `$Q` does *not* ride on the existing field-mapping layer (`FieldMapping` in `dcp-core`). That layer has one clean responsibility — resolving source paths to schema fields — and mixing observation parameters into it would muddy it. `$Q` is its own small registry that `$ST` collectors and the ingestion bus read from. This keeps the "single responsibility per shadow" principle intact down to the implementation.
 
 ### Row format
 

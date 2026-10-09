@@ -1,7 +1,7 @@
 /**
  * Minimal OTLP/HTTP (JSON) trace receiver for the real-data calibration
  * period's H4 (ROADMAP_BRIEF.md 2026-09-27 (3), source B: OpenTelemetry Demo).
- * Lighthouse-side only; touches no dcp-wrap core.
+ * Lighthouse-side only; touches no dcp-core core.
  *
  * What one span becomes, fixed by the pre-registration:
  *   ts     = the span's END time (the moment its status is known)

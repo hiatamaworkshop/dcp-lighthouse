@@ -6,7 +6,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { StCollector, SimpleMonitor } from "dcp-wrap";
+import { StCollector, SimpleMonitor } from "dcp-core";
 import { QRegistry } from "./q-registry.js";
 import { bindObserveWindow, type WindowControllable } from "./q-collector-binding.js";
 

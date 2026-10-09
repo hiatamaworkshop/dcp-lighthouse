@@ -1,7 +1,7 @@
 /**
  * Wikimedia EventStreams collector for the real-data calibration period
  * (ROADMAP_BRIEF.md 2026-09-27 (3), stage 0). Lighthouse-side only; touches no
- * dcp-wrap core.
+ * dcp-core core.
  *
  * What it keeps, fixed as "v1" by the pre-registration: `ts`, `value` (1 = bot
  * edit, 0 = human), and the group keys `wiki` / `type` / `namespace`, plus the

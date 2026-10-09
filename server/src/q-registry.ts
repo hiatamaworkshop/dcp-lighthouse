@@ -1,7 +1,7 @@
 /**
  * $Q registry — observation-parameter store for the lighthouse layer.
  *
- * Lives entirely on the lighthouse side. The dcp-wrap core exposes only neutral
+ * Lives entirely on the lighthouse side. The dcp-core core exposes only neutral
  * extension points (StCollector.setWindowMs, IngestionBus.tap,
  * PipelineControl.onExtraDecision) and never names $Q. This registry is the
  * thing $ST collectors and the ingestion bus read their lens parameters from.

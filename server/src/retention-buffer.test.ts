@@ -10,7 +10,7 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { IngestionBus } from "dcp-wrap";
+import { IngestionBus } from "dcp-core";
 import { RetentionBuffer, type EventExtractor } from "./retention-buffer.js";
 import type { LensEvent } from "./lens.js";
 

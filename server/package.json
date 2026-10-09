@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.117.1",
-    "dcp-wrap": "file:../../dcp-wrap"
+    "dcp-core": "file:../../dcp-core"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

@@ -5,7 +5,7 @@
 灯台モデル (Lighthouse Model) のパイロット実装
 DCP Pipeline を観測層として、マルチエージェント開発時代のテスト/コード品質ストリームを扱う
 
-**親プロジェクト**: dcp-wrap (DCP Pipeline コア) — 非公開
+**親プロジェクト**: dcp-core (DCP Pipeline コア) — 非公開
 **姉妹プロジェクト**: dcp-minecraft (高頻度ストリーム処理の実証) — 非公開
 > 非公開プロジェクトはローカルに並べて置く前提。参照は名前で行い、パス表記はしない。
 
@@ -208,17 +208,17 @@ Minecraft で検証済みのパターン。
 
 ## 注意事項
 
-- **dcp-wrap には汎用拡張点のみ整備済み (2026-05-28)。$Q ロジック本体は灯台側に置く** — コアは $Q を名指ししない素のフックだけ持ち、配線は灯台側で行う方針 (user 指示)。コアに足した3つ (デフォルト挙動不変、テスト57件パス):
+- **dcp-core には汎用拡張点のみ整備済み (2026-05-28)。$Q ロジック本体は灯台側に置く** — コアは $Q を名指ししない素のフックだけ持ち、配線は灯台側で行う方針 (user 指示)。コアに足した3つ (デフォルト挙動不変、テスト57件パス):
   - `StCollector.getWindowMs() / setWindowMs()` — `windowMs` を mutable 化、running 中は timer 再起動。$Q[observe] の window 動的変更を灯台側が呼ぶ口
   - `IngestionBus.tap(observer): () => void` — push を覗く read-only フック。retention buffer 本体はコアに無し → 灯台側が tap で ring buffer を実装 (Step 2)
   - `PipelineControl.onExtraDecision(type, handler): () => void` — 未知 outbound type を登録ハンドラへ委譲。灯台側が `observe_update`/`replay` を登録。PostBox/OutboundType は未変更
-  - テストは `dcp-wrap/src/extension-points.test.ts` (13件)
+  - テストは `dcp-core/src/extension-points.test.ts` (13件)
 - **まだコアに無い = 灯台側で埋める範囲**:
   - $Q レジストリ本体 (置き場所も含め灯台側設計)。`FieldMapping` は path 解決専用なので相乗りさせない
   - StCollector の group_by 集計 (現状 pass/fail カウントのみ)
   - tap の上に載せる ring buffer / retroactive re-observation ロジック (一番アーキ的に重い)
   - `observe_update`/`replay` の OutboundMessage 定義と発行・適用ロジック (onExtraDecision で受ける側)
-- dcp-wrap を触るときは両プロジェクトで動作確認する。Phase 0 (Step 1-3b) の拡張点変更は Minecraft デモで確認済み (既存44テストを壊さない)
+- dcp-core を触るときは両プロジェクトで動作確認する。Phase 0 (Step 1-3b) の拡張点変更は Minecraft デモで確認済み (既存44テストを壊さない)
 - 本番 AST 解析・mutation score・実テストランナー統合はすべて将来。パイロットは観測層の証明に集中
 - primary Brain は RuleBrain 固定。ClaudeBrain は実装済みだが shadow 併走のみで、昇格は `/brain` のログを根拠に別途判断する
 
@@ -540,7 +540,7 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
   OpenTelemetry Demo (障害フラグで真値あり、最小限の OTLP 受け口を灯台側に作る)。
   仮説は H1 依存 (過分散・自己相関) / H2 group 数の爆発 / H3 日周変動 / H4 サンプリング重み。
   **5〜7 日目は保留期間、閾値で実データを黙らせない、収集の欠落は盲目として扱う**。
-  すべて灯台側で dcp-wrap のコアは触らない。詳細は ROADMAP_BRIEF.md 2026-09-27 (3)
+  すべて灯台側で dcp-core のコアは触らない。詳細は ROADMAP_BRIEF.md 2026-09-27 (3)
   - **収集の取りこぼしと修正 (2026-09-30)** — OS 再起動後、タスクが出したコンソール窓を閉じて収集器が停止。
     遡り取得では**静かな方の Kafka トピック (codfw) が先に「今」へ着く**ため、最大時刻基準の欠落検知が
     偽の穴 7 件を出し、さらに遡り取得中の再接続が `since=最大時刻−60s` で本流 (eqiad) の

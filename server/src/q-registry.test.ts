@@ -1,5 +1,5 @@
 /**
- * $Q registry tests. Mirrors the dcp-wrap convention: node:test, no extra deps,
+ * $Q registry tests. Mirrors the dcp-core convention: node:test, no extra deps,
  * run via `tsc && node --test dist/*.test.js`.
  */
 

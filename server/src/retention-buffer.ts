@@ -5,7 +5,7 @@
  * Sits on IngestionBus.tap (the core's read-only seam) and keeps raw events for
  * retention_window_ms so a past segment can be re-observed under a different
  * $Q[observe] lens after the fact. The core holds no buffer — this is where the
- * lighthouse builds one. dcp-wrap never names $Q or retention.
+ * lighthouse builds one. dcp-core never names $Q or retention.
  *
  * Two-zone design (user, 2026-05-28): full-resolution FRESHNESS ZONE inside
  * retention_window_ms, where fine-window recovery of a coarse-window-averaged

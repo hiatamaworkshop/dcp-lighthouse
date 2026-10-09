@@ -336,4 +336,4 @@ Resolved during design discussion (recorded here for traceability):
 
 ## 14. Next steps
 
-Document is stabilized and the project structure exists. Remaining work is implementation, in the order specified in `LIGHTHOUSE_MODEL.md` §8 (Phase 0: core mechanism on Minecraft baseline → Phase 1: `test_result:v1` domain). The immediate next action is Phase 0 Step 1 — making `$ST` collectors read `$Q[observe]` from a dedicated `$Q` registry in `dcp-wrap` (not the existing `FieldMapping` layer, which stays single-purpose), validated against the existing Minecraft demo without breaking its tests.
+Document is stabilized and the project structure exists. Remaining work is implementation, in the order specified in `LIGHTHOUSE_MODEL.md` §8 (Phase 0: core mechanism on Minecraft baseline → Phase 1: `test_result:v1` domain). The immediate next action is Phase 0 Step 1 — making `$ST` collectors read `$Q[observe]` from a dedicated `$Q` registry in `dcp-core` (not the existing `FieldMapping` layer, which stays single-purpose), validated against the existing Minecraft demo without breaking its tests.

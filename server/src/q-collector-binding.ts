@@ -1,7 +1,7 @@
 /**
  * $Q[observe] → StCollector binding (Phase 0 Step 1).
  *
- * The lighthouse side owns all $Q logic; dcp-wrap stays neutral. The core
+ * The lighthouse side owns all $Q logic; dcp-core stays neutral. The core
  * exposes only StCollector.getWindowMs()/setWindowMs() — it never reads $Q.
  * This binding is the wire that connects them: it reads the observe-layer
  * window for a watched schema from the QRegistry and pushes it onto the

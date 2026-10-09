@@ -5,7 +5,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 
 ## 位置づけ
 
-- 親プロジェクト: **dcp-wrap** (DCP Pipeline コア) — 非公開
+- 親プロジェクト: **dcp-core** (DCP Pipeline コア) — 非公開
 - 姉妹プロジェクト: **dcp-minecraft** (高頻度ストリーム処理の実証) — 非公開
 
 dcp-minecraft が「DCP Stream を止めずに観測層を被せられる」ことを示したのを受け、
