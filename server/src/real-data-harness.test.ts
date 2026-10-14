@@ -30,6 +30,7 @@ import {
   curatorForNullModel,
   sliceEvents,
   synthesizeStream,
+  runContrastDiurnal,
   thinByTrace,
   thinEvents,
   topKeyValues,
@@ -516,5 +517,30 @@ describe("run-h3-report after H3's holdout was spent (2026-10-14)", () => {
     assert.equal(h3RangeRefusal("2026-10-14", "2026-10-14", false), undefined);
     assert.match(h3RangeRefusal("2026-10-10", "2026-10-11", false) ?? "", /H3's holdout/);
     assert.match(h3RangeRefusal("2026-10-01", "2026-10-03", false) ?? "", /stage 1's holdout/);
+  });
+});
+
+describe("periodic references as contrasts (F1, 2026-10-14 (11))", () => {
+  const DAY = 24 * HOUR;
+  const base = { spanMs: HOUR, windowMs: 60_000, historyMs: 48 * HOUR, strideMs: HOUR / 2 };
+  const rate = (r: { flagged: number; trials: number }) => r.flagged / r.trials;
+  const by = (rs: ReturnType<typeof runContrastDiurnal>) => Object.fromEntries(rs.map((r) => [r.reference, r]));
+
+  it("holds the design rate under every reference on a flat iid stream", () => {
+    const s = synthesizeStream({ durationMs: 4 * DAY, rate: 4, seed: 51, startTs: Date.UTC(2030, 0, 1) });
+    for (const r of runContrastDiurnal(s, base)) {
+      assert.ok(r.trials > 50, `${r.reference}: ${r.trials} trials`);
+      assert.ok(rate(r) <= 0.08, `${r.reference}: ${r.flagged}/${r.trials}`);
+    }
+  });
+
+  it("where a fixed diurnal curve dominates, the previous day keeps the power the preceding span loses to γ̂", () => {
+    // The positive control for the real-data reading: with the curve repeating
+    // exactly, the variogram's lags absorb its slope as variance and the
+    // preceding comparison goes deaf; the same hour a day earlier cancels it.
+    const s = synthesizeStream({ durationMs: 4 * DAY, rate: 4, seed: 52, startTs: Date.UTC(2030, 0, 1), diurnalAmplitude: 0.3 });
+    const shifted = by(runContrastDiurnal(s, { ...base, injectDelta: 0.08 }));
+    assert.ok(rate(shifted["previous-day"]) > 0.6, `previous-day ${shifted["previous-day"].flagged}/${shifted["previous-day"].trials}`);
+    assert.ok(rate(shifted.preceding) < 0.2, `preceding ${shifted.preceding.flagged}/${shifted.preceding.trials}`);
   });
 });

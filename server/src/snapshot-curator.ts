@@ -1335,7 +1335,7 @@ function isReferenceUsable(ref: RefStats): boolean {
  * bar rose from 2.00σ to 2.27σ because of one companion that was structurally
  * silent.
  */
-function isScorable(w: WindowStat): boolean {
+export function isScorable(w: WindowStat): boolean {
   return w.count >= MIN_VALID_COUNT && effectiveN(w) > 0;
 }
 
@@ -1793,7 +1793,7 @@ function medianCount(windows: readonly WindowStat[]): number {
  * per-window alpha to alpha' = 1-(1-alpha)^(1/n), then convert back to a z.
  * n<=1 is a no-op (the formula already reduces to alpha'=alpha there).
  */
-function sidakCorrectedThreshold(baseZ: number, n: number): number {
+export function sidakCorrectedThreshold(baseZ: number, n: number): number {
   if (n <= 1) return baseZ;
   const alpha = familyWiseAlpha(baseZ);
   const alphaCorrected = 1 - Math.pow(1 - alpha, 1 / n);

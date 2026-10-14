@@ -26,10 +26,10 @@ import { createGunzip } from "node:zlib";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
 import {
-  applyLens, floorToWindow, MIN_VALID_COUNT, resolveAlign, type LensEvent, type LensResult, type WindowStat,
+  applyLens, effectiveN, floorToWindow, MIN_VALID_COUNT, resolveAlign, weightTotal, type LensEvent, type LensResult, type WindowStat,
 } from "./lens.js";
 import type { QObserveParams } from "./q-registry.js";
-import { SnapshotCurator, familyWiseAlpha, type SnapshotPackage, type SnapshotTile } from "./snapshot-curator.js";
+import { SnapshotCurator, familyWiseAlpha, isScorable, studentUpperTail, type SnapshotPackage, type SnapshotTile } from "./snapshot-curator.js";
 import { mulberry32 } from "./calibration.js";
 
 // ── Loading ─────────────────────────────────────────────────────────────────
@@ -878,14 +878,7 @@ export function runDiurnalAlarms(
 ): DiurnalResult {
   const baseZ = opts.baseZThreshold ?? 2.0;
   const curator = opts.curator ?? newCurator(baseZ);
-  const sum = new Array<number>(24).fill(0);
-  const cnt = new Array<number>(24).fill(0);
-  for (const e of stream.events) {
-    const h = new Date(e.ts).getUTCHours();
-    sum[h] += e.value;
-    cnt[h]++;
-  }
-  const level = sum.map((s, h) => (cnt[h] > 0 ? s / cnt[h] : NaN));
+  const level = hourlyLevel(stream);
 
   const strideMs = opts.strideMs ?? opts.spanMs / 6;
   const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs: opts.spanMs, strideMs });
@@ -914,6 +907,261 @@ export function runDiurnalAlarms(
     unusableReference: arms.reduce((a, b) => a + b.unusableReference, 0),
     designTarget: familyWiseAlpha(baseZ),
   };
+}
+
+// ── F1: periodic references, as contrasts (ROADMAP_BRIEF.md 2026-10-14 (2) item 3) ──
+
+/**
+ * What an observation window is compared against (runContrastDiurnal):
+ *  - "preceding": the span before, pooled — the control, what production does;
+ *  - "previous-day": the same span 24 h earlier, pooled;
+ *  - "diff-in-diff": this window's move from the span before, against the same
+ *    move a day earlier — (m_o − m̄_pre) − (m_{o−24h} − m̄_{pre−24h}), which
+ *    cancels a level that differs from one day to the next.
+ */
+export type ContrastReference = "preceding" | "previous-day" | "diff-in-diff";
+
+export const CONTRAST_REFERENCES: readonly ContrastReference[] = ["preceding", "previous-day", "diff-in-diff"];
+
+export interface ContrastDiurnalResult extends DiurnalResult {
+  reference: ContrastReference;
+  trials: number;
+  flagged: number;
+  /** Observation windows that could not be scored (no events, or a partner window missing). */
+  unscoredWindows: number;
+}
+
+/** Mean bot share per UTC hour, pooled over days — the curve H3 correlates with. */
+function hourlyLevel(stream: LoadedStream): number[] {
+  const sum = new Array<number>(24).fill(0);
+  const cnt = new Array<number>(24).fill(0);
+  for (const e of stream.events) {
+    const h = new Date(e.ts).getUTCHours();
+    sum[h] += e.value;
+    cnt[h]++;
+  }
+  return sum.map((s, h) => (cnt[h] > 0 ? s / cnt[h] : NaN));
+}
+
+/**
+ * The three references side by side, through ONE scorer, so they differ by the
+ * reference alone. Each observation window is a contrast Σλᵢmᵢ with Σλᵢ = 0
+ * (the window +1, its reference weighted −nₖ/N, and for diff-in-diff the
+ * day-earlier pair with the opposite signs); under the variogram null its
+ * variance is −ΣᵢΣⱼλᵢλⱼγ(tᵢ − tⱼ) + Σλᵢ²vᵢ (2026-10-14 (2)), γ̂ estimated the
+ * way the curator does (pairs of windows, sampling variance subtracted) from
+ * `historyMs` of windows ending where the observation starts, with γ̂'s own
+ * error carried as the curator does (blocks → Satterthwaite Student-t) and
+ * Šidák over the scored windows. No exact tails: an exploration scorer, not
+ * the curator — read the arms against each other.
+ *
+ * Trials are those for which all three references exist: the observation,
+ * the span before it, both a day earlier, and the full history, gap-free.
+ */
+export function runContrastDiurnal(
+  stream: LoadedStream,
+  opts: {
+    spanMs: number; windowMs: number; historyMs: number; strideMs?: number; baseZThreshold?: number;
+    /**
+     * Power instead of false alarms: add this to the mean of the observation's
+     * second half (window level, sampling variance unchanged), so every arm is
+     * asked to find the same shift. Absent = the null.
+     */
+    injectDelta?: number;
+  },
+): ContrastDiurnalResult[] {
+  const baseZ = opts.baseZThreshold ?? 2.0;
+  const W = opts.windowMs;
+  const strideMs = opts.strideMs ?? opts.spanMs / 6;
+  const grid = gridFor(stream, { window_ms: W }, opts.spanMs, strideMs);
+  if (DAY_MS % W !== 0 || opts.historyMs % W !== 0) throw new RangeError(`a day and historyMs must be multiples of window_ms ${W}`);
+  const level = hourlyLevel(stream);
+
+  // Every window once, by grid index.
+  const all = grid.slice(-Infinity, Infinity).windows;
+  const origin = all.length > 0 ? all[0].windowStart : 0;
+  const len = all.length > 0 ? Math.round((all[all.length - 1].windowStart - origin) / W) + 1 : 0;
+  const m = new Float64Array(len).fill(NaN);
+  const v = new Float64Array(len);
+  const n = new Float64Array(len);
+  for (const w of all) {
+    if (!isScorable(w) || !(effectiveN(w) > 1)) continue;
+    const i = Math.round((w.windowStart - origin) / W);
+    m[i] = w.mean;
+    v[i] = Math.max(0, w.sumSq / weightTotal(w) - w.mean * w.mean) / (effectiveN(w) - 1);
+    n[i] = effectiveN(w);
+  }
+
+  const K = opts.spanMs / W;
+  const D = DAY_MS / W;
+  const H = opts.historyMs / W;
+  const lags = new Set<number>();
+  for (let h = 1; h <= 2 * K; h++) lags.add(h);
+  for (let h = D - 2 * K; h <= D + 2 * K; h++) lags.add(h);
+  const lagList = [...lags];
+
+  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs: opts.spanMs, strideMs });
+  const out = CONTRAST_REFERENCES.map((reference) => ({ reference, arms: Array.from({ length: 24 }, () => ({ trials: 0, flagged: 0 })), unscored: 0 }));
+  let extraBlind = 0;
+
+  // γ̂'s own error, as the curator carries it (latentModel): the history is cut
+  // into BLOCKS, each block's γ̂ (pairs starting in it) gives its own contrast
+  // variance, and their spread sets the degrees of freedom of a Satterthwaite
+  // Student-t. The day-lag γ̂ only has pairs starting in the history's first
+  // historyMs − 24 h, so blocks without them drop out of that arm's df — which
+  // is the honest count: a day-lag is known from as many days as the history has.
+  const B = 8;
+  const familyAlpha = familyWiseAlpha(baseZ);
+  const maxLag = D + 2 * K;
+  type Pts = Array<[number, number]>;
+  /** Σ w·γ(i − j) over a point set. */
+  const toSet = (gg: Float64Array, i: number, S: Pts): number => {
+    let s = 0;
+    for (const [j, w] of S) s += w * gg[Math.abs(i - j)];
+    return s;
+  };
+  /** ΣΣ wᵢwⱼγ(i − j) between two point sets. */
+  const between = (gg: Float64Array, S: Pts, T: Pts): number => {
+    let s = 0;
+    for (const [i, w] of S) s += w * toSet(gg, i, T);
+    return s;
+  };
+
+  for (const t of trials) {
+    const O = Math.round((t.obsFrom - origin) / W);
+    if (O - H < 0 || O - D - K < 0 || overlapsGap(stream.gaps, t.obsFrom - DAY_MS - opts.spanMs, t.obsTo - DAY_MS)) {
+      extraBlind++;
+      continue;
+    }
+    // γ̂ at the lags these contrasts reach, from the history before the observation — whole and per block.
+    const blockLen = H / B;
+    const gamma = new Float64Array(maxLag + 1).fill(NaN);
+    const gammaB = Array.from({ length: B }, () => new Float64Array(maxLag + 1).fill(NaN));
+    gamma[0] = 0;
+    for (const gb of gammaB) gb[0] = 0;
+    const bs = new Float64Array(B);
+    const bc = new Float64Array(B);
+    for (const h of lagList) {
+      let s = 0;
+      let c = 0;
+      bs.fill(0);
+      bc.fill(0);
+      for (let a = O - H; a + h < O; a++) {
+        const ma = m[a];
+        const mb = m[a + h];
+        if (Number.isNaN(ma) || Number.isNaN(mb)) continue;
+        const term = 0.5 * (ma - mb) ** 2 - 0.5 * (v[a] + v[a + h]);
+        s += term;
+        c++;
+        const b = Math.min(B - 1, Math.floor((a - (O - H)) / blockLen));
+        bs[b] += term;
+        bc[b]++;
+      }
+      if (c > 0) gamma[h] = Math.max(0, s / c);
+      for (let b = 0; b < B; b++) if (bc[b] > 0) gammaB[b][h] = Math.max(0, bs[b] / bc[b]);
+    }
+    const versions = [gamma, ...gammaB];
+    const pooled = (from: number): Pts => {
+      let N = 0;
+      for (let i = from; i < from + K; i++) if (!Number.isNaN(m[i])) N += n[i];
+      const ws: Pts = [];
+      if (N > 0) for (let i = from; i < from + K; i++) if (!Number.isNaN(m[i])) ws.push([i, n[i] / N]);
+      return ws;
+    };
+    const P = pooled(O - K);
+    const Y = pooled(O - D);
+    const Q = pooled(O - D - K);
+    const wv = (S: Pts): number => S.reduce((s, [i, w]) => s + w * w * v[i], 0);
+    const wm = (S: Pts, f: (i: number) => number): number => S.reduce((s, [i, w]) => s + w * f(i), 0);
+    // The fixed sets' self and cross terms, once per trial and γ version.
+    const PP = versions.map((gg) => between(gg, P, P));
+    const YY = versions.map((gg) => between(gg, Y, Y));
+    const QQ = versions.map((gg) => between(gg, Q, Q));
+    const PQ = versions.map((gg) => between(gg, P, Q));
+    const hourBin = new Date(t.obsFrom + HOUR_MS / 2).getUTCHours();
+    const delta = opts.injectDelta ?? 0;
+    const mean = (i: number): number => (delta !== 0 && i >= O + K / 2 && i < O + K ? m[i] + delta : m[i]);
+
+    for (const arm of out) {
+      // latent per γ version (index 0 = the whole history), sampling, estimate.
+      const cs: Array<{ est: number; sampling: number; latent: number[] }> = [];
+      for (let o = O; o < O + K; o++) {
+        if (Number.isNaN(m[o])) { arm.unscored++; continue; }
+        let est: number;
+        let sampling: number;
+        let latent: number[];
+        if (arm.reference === "preceding") {
+          if (P.length === 0) { arm.unscored++; continue; }
+          est = mean(o) - wm(P, mean);
+          sampling = v[o] + wv(P);
+          latent = versions.map((gg, k) => 2 * toSet(gg, o, P) - PP[k]);
+        } else if (arm.reference === "previous-day") {
+          if (Y.length === 0) { arm.unscored++; continue; }
+          est = mean(o) - wm(Y, mean);
+          sampling = v[o] + wv(Y);
+          latent = versions.map((gg, k) => 2 * toSet(gg, o, Y) - YY[k]);
+        } else {
+          const b = o - D;
+          if (P.length === 0 || Q.length === 0 || Number.isNaN(m[b])) { arm.unscored++; continue; }
+          // λ = e_o − P − e_b + Q:  −λᵀΓλ = −PP − QQ + 2oP + 2ob − 2oQ − 2Pb + 2PQ + 2bQ
+          est = mean(o) - wm(P, mean) - m[b] + wm(Q, mean);
+          sampling = v[o] + wv(P) + v[b] + wv(Q);
+          latent = versions.map((gg, k) =>
+            -PP[k] - QQ[k] + 2 * toSet(gg, o, P) + 2 * gg[D] - 2 * toSet(gg, o, Q) - 2 * toSet(gg, b, P) + 2 * PQ[k] + 2 * toSet(gg, b, Q));
+        }
+        if (Number.isNaN(latent[0]) || !(Math.max(0, latent[0]) + sampling > 0)) { arm.unscored++; continue; }
+        cs.push({ est, sampling, latent });
+      }
+      if (cs.length === 0) continue;
+
+      // Degrees of freedom for the latent part, from the blocks' mean contrast variance.
+      const vbar = cs.reduce((s, c) => s + Math.max(0, c.latent[0]), 0) / cs.length;
+      const vb: number[] = [];
+      for (let k = 1; k <= B; k++) {
+        const xs = cs.map((c) => c.latent[k]);
+        if (xs.every((x) => Number.isFinite(x))) vb.push(xs.reduce((s, x) => s + Math.max(0, x), 0) / xs.length);
+      }
+      let nu = 1;
+      if (vb.length >= 2) {
+        const mb = vb.reduce((s, x) => s + x, 0) / vb.length;
+        const s2 = vb.reduce((s, x) => s + (x - mb) ** 2, 0) / (vb.length - 1);
+        nu = s2 > 0 ? (2 * vb.length * vbar * vbar) / s2 : Infinity;
+      }
+
+      // Two-sided tail per window against the Šidák per-window budget.
+      const perWindow = 1 - (1 - familyAlpha) ** (1 / cs.length);
+      let alarm = false;
+      for (const c of cs) {
+        const lat = Math.max(0, c.latent[0]);
+        const z = Math.abs(c.est) / Math.sqrt(lat + c.sampling);
+        const df = lat > 0 && Number.isFinite(nu) ? (lat + c.sampling) ** 2 / (lat ** 2 / nu) : Infinity;
+        const tail = df > 1e6 ? familyWiseAlpha(z) : 2 * studentUpperTail(z, df);
+        if (tail <= perWindow) { alarm = true; break; }
+      }
+      const bin = arm.arms[hourBin];
+      bin.trials++;
+      if (alarm) bin.flagged++;
+    }
+  }
+
+  return out.map((arm) => {
+    const bins = arm.arms.map((a, hour): DiurnalBin => ({
+      hour, trials: a.trials, flagged: a.flagged, rate: a.trials > 0 ? a.flagged / a.trials : 0,
+      level: level[hour], slope: Math.abs(level[hour] - level[(hour + 23) % 24]),
+    }));
+    const used = bins.filter((b) => b.trials > 0 && Number.isFinite(b.slope));
+    return {
+      reference: arm.reference,
+      bins,
+      correlation: pearson(used.map((b) => b.rate), used.map((b) => b.slope)),
+      blindByGap: blind + extraBlind,
+      unusableReference: 0,
+      designTarget: familyWiseAlpha(baseZ),
+      trials: bins.reduce((s, b) => s + b.trials, 0),
+      flagged: bins.reduce((s, b) => s + b.flagged, 0),
+      unscoredWindows: arm.unscored,
+    };
+  });
 }
 
 // ── Variogram null: trials on one grid, with history ───────────────────────
