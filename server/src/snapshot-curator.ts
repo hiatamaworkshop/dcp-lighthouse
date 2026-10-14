@@ -80,6 +80,19 @@ export interface SnapshotTile {
    * and on the package-level baseline tile.
    */
   group?: string;
+  /**
+   * Spike/dip tiles under `nullModel: "variogram"` only: the window's event
+   * count over the median count of the reference windows it was scored
+   * against. A description, not a gate — nothing fires or stays quiet on it.
+   *
+   * Why (ROADMAP_BRIEF.md 2026-10-14 (7)): on real data the variogram null is
+   * calibrated in windows of ordinary volume, and its excess alarms at 10 s sit
+   * in windows whose volume moved with their rate (≥ 2× the reference's median:
+   * 7–35% past 3σ, against 0.2–0.3% at ordinary volume). That is the stream's
+   * make-up changing — a real event, kept as one (user decision) — and this
+   * field lets a reader tell it from a rate moving at steady volume.
+   */
+  volumeRatio?: number;
 }
 
 // ── Snapshot package ────────────────────────────────────────────────────────
@@ -363,7 +376,9 @@ export interface CurationOptions {
    * mean — see latentModel. A flat γ = τ² reproduces "overdispersed"'s
    * τ²(1 + refShare) exactly. Step tiles only describe windows the gate fired
    * on and are not tested (2026-10-14 (6)). Heavy-tailed latent moves are NOT
-   * covered (γ is a second moment; 2026-10-14 (4)).
+   * covered (γ is a second moment; 2026-10-14 (4)): on real data they sit in
+   * windows whose volume moved too, kept as real events and labelled with
+   * SnapshotTile.volumeRatio (2026-10-14 (7)).
    */
   nullModel?: "independent" | "overdispersed" | "variogram";
 }
@@ -576,6 +591,15 @@ export class SnapshotCurator {
 
       collectUnreachableTails(unit, effectiveZThreshold, lattice, model, unreachableTails, (w) => refFor(unit, w));
 
+      // Under "variogram", each spike/dip says how its volume compares with the
+      // reference's typical window (SnapshotTile.volumeRatio).
+      const typicalCount = unit.latent === undefined ? undefined : medianCount(unit.refWindows);
+      const volume = (w: WindowStat): { volumeRatio?: number; note: string } => {
+        if (!(typicalCount !== undefined && typicalCount > 0)) return { note: "" };
+        const volumeRatio = w.count / typicalCount;
+        return { volumeRatio, note: ` Volume ${volumeRatio.toFixed(2)}× the reference's median window.` };
+      };
+
       // Windows the gate fired on, by direction — what a step may describe
       // under "variogram".
       const gatedDir = new Map<WindowStat, 1 | -1>();
@@ -588,27 +612,31 @@ export class SnapshotCurator {
         const gated = gate(w, wref, se, lattice, model);
         if (gated >= effectiveZThreshold) {
           gatedDir.set(w, 1);
+          const v = volume(w);
           tiles.push({
             label: `${tag}spike at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${unit.ref.mean.toFixed(3)})`,
             shapeTag: "spike",
             regionStart: w.windowStart,
             regionEnd: w.windowEnd,
             windows: [w],
-            description: `Window mean ${w.mean.toFixed(3)} is ${z.toFixed(1)}σ above the reference baseline (${unit.ref.mean.toFixed(3)})${inGroup}. Count: ${w.count}.`,
+            description: `Window mean ${w.mean.toFixed(3)} is ${z.toFixed(1)}σ above the reference baseline (${unit.ref.mean.toFixed(3)})${inGroup}. Count: ${w.count}.${v.note}`,
             magnitude: z,
             ...(unit.group !== undefined ? { group: unit.group } : {}),
+            ...(v.volumeRatio !== undefined ? { volumeRatio: v.volumeRatio } : {}),
           });
         } else if (gated <= -effectiveZThreshold) {
           gatedDir.set(w, -1);
+          const v = volume(w);
           tiles.push({
             label: `${tag}dip at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${unit.ref.mean.toFixed(3)})`,
             shapeTag: "dip",
             regionStart: w.windowStart,
             regionEnd: w.windowEnd,
             windows: [w],
-            description: `Window mean ${w.mean.toFixed(3)} is ${Math.abs(z).toFixed(1)}σ below the reference baseline (${unit.ref.mean.toFixed(3)})${inGroup}. Count: ${w.count}.`,
+            description: `Window mean ${w.mean.toFixed(3)} is ${Math.abs(z).toFixed(1)}σ below the reference baseline (${unit.ref.mean.toFixed(3)})${inGroup}. Count: ${w.count}.${v.note}`,
             magnitude: Math.abs(z),
             ...(unit.group !== undefined ? { group: unit.group } : {}),
+            ...(v.volumeRatio !== undefined ? { volumeRatio: v.volumeRatio } : {}),
           });
         }
       }
@@ -1722,6 +1750,13 @@ function concentration(alpha: number[], od: CategoricalModel["overdispersion"], 
   // floor only guards the arithmetic (lgamma of ~0), it is not a tuning knob.
   const scaled = Math.max(1e-6, s2 / v - 1);
   return alpha.map((a) => (a * scaled) / A);
+}
+
+/** Median event count of `windows` (the upper middle for an even count); 0 when empty. */
+function medianCount(windows: readonly WindowStat[]): number {
+  if (windows.length === 0) return 0;
+  const counts = windows.map((w) => w.count).sort((a, b) => a - b);
+  return counts[counts.length >> 1];
 }
 
 /**

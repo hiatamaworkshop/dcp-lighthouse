@@ -1574,6 +1574,36 @@ describe("SnapshotCurator — variogram null (the latent rate drifts over time)"
     assert.ok(pkg.tiles.some((x) => x.shapeTag === "dip" && x.regionStart >= step.regionStart));
   });
 
+  it("labels each spike/dip with its volume against the reference's median window", () => {
+    // The drop window carries 3× the events: a rate moving WITH its volume
+    // (2026-10-14 (7)). A rate moving at steady volume reads 1×.
+    for (const [mult, want] of [[3, 3], [1, 1]] as const) {
+      const t = latentTrial(11, { H: 200, K: 10, per: 100, rho: 0, sd: 0, drop: { at: 4, to: 0.2 } });
+      const target = t.observation.windows[4];
+      const scaled = { ...target, count: target.count * mult, sumSq: target.sumSq * mult };
+      const observation = { ...t.observation, windows: t.observation.windows.map((w) => (w === target ? scaled : w)) };
+      const pkg = curatorFor("variogram").curate(observation, t.reference, { history: t.history });
+      const dip = pkg.tiles.find((x) => x.shapeTag === "dip" && x.regionStart === target.windowStart);
+      assert.ok(dip, `×${mult}: the drop must fire`);
+      const typical = [...t.reference.windows.map((w) => w.count)].sort((a, b) => a - b)[t.reference.windows.length >> 1];
+      assert.equal(dip.volumeRatio, scaled.count / typical);
+      assert.ok(Math.abs(dip.volumeRatio! - want) < 0.25, `×${mult}: volumeRatio ${dip.volumeRatio}`);
+      assert.match(dip.description, /Volume \d+\.\d\d× the reference's median window\./);
+    }
+  });
+
+  it("leaves the other nulls' tiles without a volume label", () => {
+    const t = latentTrial(11, { H: 200, K: 10, per: 100, rho: 0, sd: 0, drop: { at: 4, to: 0.2 } });
+    for (const m of ["independent", "overdispersed"] as const) {
+      const pkg = curatorFor(m).curate(t.observation, t.reference, { history: t.history });
+      assert.ok(pkg.tiles.some((x) => x.shapeTag === "dip"), `${m}: the drop must fire`);
+      for (const x of pkg.tiles) {
+        assert.equal(x.volumeRatio, undefined);
+        assert.doesNotMatch(x.description, /Volume/);
+      }
+    }
+  });
+
   it("leaves the other nulls' packages without a variogram field, history or not", () => {
     const t = latentTrial(5, { H: 50, K: 10, per: 35, rho: 0, sd: 0.1 });
     for (const m of ["independent", "overdispersed"] as const) {
