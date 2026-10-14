@@ -5627,8 +5627,8 @@ curator のコンストラクタ引数。07-25 の「隠れレンズ」と同じ
 | 6 | `run-h3-report`・`run-real-data-report` が `--null-model variogram` を受け付けるのに履歴を渡さない (自由度 1 の別物が黙って出る) | `curatorForNullModel` が履歴を渡す呼び手 (`{ history: true }`) 以外の variogram を拒否 |
 | 7 | `run-variogram-report` の日周の節は 1 本の格子で窓に切る。`run-h3-report` (試行ごとに切る) と同じ測定ではない | 出力のラベルで明示 (下の測定どおり、数値の差は実際にはほぼ無い) |
 | 8 | `$Q[compare]` の検証が帰無・参照の一覧を型と別に手で持っていた | 型をキーにした Record から作る (型に値を足して一覧を忘れるとコンパイルエラー) |
-| 9 | `detectSteps` が variogram のモードを 2 つの引数で二重に受ける | 後回し |
-| 10 | `windowedStream` の二分探索が既存の `lowerBound` と重複 | 後回し |
+| 9 | `detectSteps` が variogram のモードを 2 つの引数で二重に受ける | 1 つの引数 `variogram?: { latent, gatedDir }` に (後続コミット) |
+| 10 | `windowedStream` の二分探索が既存の `lowerBound` と重複 | `lowerBound` をキー関数つきの汎用にして共有 (後続コミット) |
 | 11 | `c11b9f0` の件名が 77 文字 (規則 72) | push 済みなので書き換えない |
 
 **測り直し (探索日のみ)**

@@ -593,7 +593,7 @@ export class SnapshotCurator {
     // stays the honest, uncorrected z so Brain sees the real effect size.
     const scorableCount = units.reduce((n, u) => n + u.windows.filter(isScorable).length, 0);
     // Under "variogram" a step is not a test, so the family is the windows
-    // alone (see detectSteps' `describeOnly`).
+    // alone (see detectSteps' `variogram`).
     const effectiveZThreshold = sidakCorrectedThreshold(this.opts.spikeZThreshold, scorableCount);
     const unreachableTails: UnreachableTail[] = [];
 
@@ -681,7 +681,7 @@ export class SnapshotCurator {
       tiles.push(
         ...detectSteps(
           unit.windows, unit.ref, this.opts.stepThreshold, this.opts.stepWindowCount, effectiveZThreshold, unit.group,
-          unit.latent, unit.latent === undefined ? undefined : gatedDir,
+          unit.latent === undefined ? undefined : { latent: unit.latent, gatedDir },
         ),
       );
 
@@ -1857,14 +1857,16 @@ function detectSteps(
   minRun: number,
   gateZ: number,
   group?: string,
-  latent?: LatentModel,
   /**
-   * Given = describe only: a run becomes a tile when it holds a window the
-   * spike/dip gate fired on in the same direction, and is not tested itself.
-   * Its magnitude is the run's contrast z, in the same yardstick as the windows'.
+   * Given = the "variogram" null, and describe only: a run becomes a tile when
+   * it holds a window the spike/dip gate fired on in the same direction
+   * (`gatedDir`), and is not tested itself. Its magnitude is the run's contrast
+   * z under `latent`, in the same yardstick as the windows'.
    */
-  describeOnly?: ReadonlyMap<WindowStat, 1 | -1>,
+  variogram?: { latent: LatentModel; gatedDir: ReadonlyMap<WindowStat, 1 | -1> },
 ): SnapshotTile[] {
+  const latent = variogram?.latent;
+  const describeOnly = variogram?.gatedDir;
   if (windows.length < minRun) return [];
   // No yardstick, no comparison — mirrors spike/dip's silent skip when the
   // reference can't ground a z-score (buildScoringUnits applies the same

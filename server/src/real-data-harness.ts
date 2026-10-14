@@ -251,21 +251,24 @@ async function loadDayFiles(
 
 // ── Slicing and planning ────────────────────────────────────────────────────
 
-/** First index with ts >= t (events sorted by ts). */
-function lowerBound(events: readonly LensEvent[], t: number): number {
+/** First index whose key is >= t (items sorted by that key). */
+function lowerBound<T>(items: readonly T[], t: number, key: (item: T) => number): number {
   let lo = 0;
-  let hi = events.length;
+  let hi = items.length;
   while (lo < hi) {
     const mid = (lo + hi) >>> 1;
-    if (events[mid].ts < t) lo = mid + 1;
+    if (key(items[mid]) < t) lo = mid + 1;
     else hi = mid;
   }
   return lo;
 }
 
+const eventTs = (e: LensEvent): number => e.ts;
+const windowStartOf = (w: WindowStat): number => w.windowStart;
+
 /** Events in [from, to) — half-open, so adjacent spans never share a boundary event. */
 export function sliceEvents(events: readonly LensEvent[], from: number, to: number): LensEvent[] {
-  return events.slice(lowerBound(events, from), lowerBound(events, to));
+  return events.slice(lowerBound(events, from, eventTs), lowerBound(events, to, eventTs));
 }
 
 function overlapsGap(gaps: readonly GapSpan[], from: number, to: number): boolean {
@@ -935,15 +938,8 @@ export function windowedStream(stream: LoadedStream, lens: QObserveParams): Wind
   const windows = seen(full.windows);
   const groups = full.groups?.map((g) => ({ ...g, windows: seen(g.windows) }));
   const cut = (ws: WindowStat[], from: number, to: number): WindowStat[] => {
-    let lo = 0;
-    let hi = ws.length;
-    while (lo < hi) {
-      const mid = (lo + hi) >> 1;
-      if (ws[mid].windowStart < from) lo = mid + 1;
-      else hi = mid;
-    }
     const out: WindowStat[] = [];
-    for (let i = lo; i < ws.length && ws[i].windowStart < to; i++) if (ws[i].windowEnd <= to) out.push(ws[i]);
+    for (let i = lowerBound(ws, from, windowStartOf); i < ws.length && ws[i].windowStart < to; i++) if (ws[i].windowEnd <= to) out.push(ws[i]);
     return out;
   };
   return {
