@@ -321,8 +321,19 @@ function statisticalTiles(pkg: SnapshotPackage): SnapshotTile[] {
   return pkg.tiles.filter((t) => STATISTICAL_TAGS.has(t.shapeTag));
 }
 
+/**
+ * Harness curators keep every tile (no `maxTiles` cap). The cap is a
+ * presentation limit for a reader, and it drops the smallest-magnitude tiles
+ * first — so a harness counting tiles by position, by group or by shape
+ * undercounts exactly the packages that alarm most. Until 2026-10-14 (9) the
+ * harness ran with the default 12: package alarm rates were unaffected (any
+ * statistical tile), but per-position counts, step counts, gap-tile counts
+ * and the targeted detections of H2 and H4 could undercount.
+ */
+const HARNESS_MAX_TILES = Infinity;
+
 function newCurator(baseZ: number): SnapshotCurator {
-  return new SnapshotCurator({ spikeZThreshold: baseZ, includeBaseline: true });
+  return new SnapshotCurator({ spikeZThreshold: baseZ, includeBaseline: true, maxTiles: HARNESS_MAX_TILES });
 }
 
 /**
@@ -338,10 +349,19 @@ function newCurator(baseZ: number): SnapshotCurator {
  */
 export const H3_NULL_MODEL = "overdispersed";
 
-export function curatorForNullModel(name: string | undefined, baseZ = 2.0): SnapshotCurator | undefined {
+export function curatorForNullModel(
+  name: string | undefined,
+  baseZ = 2.0,
+  opts: { history?: boolean } = {},
+): SnapshotCurator | undefined {
   if (name === undefined || name === "independent") return undefined;
+  if (name === "variogram" && opts.history !== true) {
+    // Without history the reference stands in for it (df 1, lags past the
+    // reference extrapolated flat) — not the null 2026-10-14 (5) measured.
+    throw new RangeError(`--null-model variogram needs history this report does not pass; use run-variogram-report`);
+  }
   if (name === "overdispersed" || name === "variogram") {
-    return new SnapshotCurator({ spikeZThreshold: baseZ, includeBaseline: true, nullModel: name });
+    return new SnapshotCurator({ spikeZThreshold: baseZ, includeBaseline: true, nullModel: name, maxTiles: HARNESS_MAX_TILES });
   }
   throw new RangeError(`unknown --null-model "${name}" (independent | overdispersed | variogram)`);
 }

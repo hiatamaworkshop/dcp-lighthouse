@@ -58,7 +58,7 @@ for (const a of ARMS) {
   for (const nullModel of ["independent", "overdispersed", "variogram"]) {
     const r = runPositionProfile(stream, {
       lens: { window_ms: a.window }, spanMs: a.span, strideMs: a.stride,
-      curator: curatorForNullModel(nullModel), historyMs: nullModel === "variogram" ? historySpans * a.span : 0,
+      curator: curatorForNullModel(nullModel, 2.0, { history: true }), historyMs: nullModel === "variogram" ? historySpans * a.span : 0,
     });
     console.log(
       `${nullModel.padEnd(14)} ${String(r.trials).padStart(6)}  ${pct(r.rate).padStart(6)}  ${pct(r.stepPackages / Math.max(1, r.trials)).padStart(5)}   ` +
@@ -68,10 +68,13 @@ for (const a of ARMS) {
   }
 }
 
-console.log("\n— H3's diurnal correlation on these days (60 min arm, one grid; exploration, not a verdict)");
+// One grid anchored at the stream's first event, for every null: the figures
+// compare the nulls with each other. They are NOT run-h3-report's numbers,
+// which window each trial from its own first event (2026-10-14 (9) review).
+console.log("\n— H3's diurnal correlation on these days (60 min arm, one grid anchored at the stream's first event; compare the nulls with each other — run-h3-report windows each trial separately, so its figures differ; exploration, not a verdict)");
 for (const nullModel of ["overdispersed", "variogram"]) {
   const r = runDiurnalAlarms(stream, {
-    spanMs: 3_600_000, lens: { window_ms: 60_000 }, curator: curatorForNullModel(nullModel),
+    spanMs: 3_600_000, lens: { window_ms: 60_000 }, curator: curatorForNullModel(nullModel, 2.0, { history: true }),
     historyMs: nullModel === "variogram" ? historySpans * 3_600_000 : 0,
   });
   const trials = r.bins.reduce((s, b) => s + b.trials, 0);

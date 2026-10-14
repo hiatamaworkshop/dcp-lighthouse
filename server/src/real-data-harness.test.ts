@@ -487,12 +487,18 @@ describe("one grid for observation, reference and history (the variogram null's 
   it("profiles alarms by position, and the variogram null stays near design on an iid stream", () => {
     const r = runPositionProfile(stream, {
       lens: { window_ms: 1_000 }, spanMs: 10_000, strideMs: 20_000,
-      curator: curatorForNullModel("variogram"), historyMs: 240_000,
+      curator: curatorForNullModel("variogram", 2.0, { history: true }), historyMs: 240_000,
     });
     assert.ok(r.trials > 150);
     assert.equal(r.blindByGap, 1);
     assert.equal(r.perWindowByPosition.length, 6);
     assert.ok(r.rate < 0.1, `iid rate ${r.rate}`);
+  });
+
+  it("refuses the variogram null to a report that passes no history (2026-10-14 (9) review)", () => {
+    assert.throws(() => curatorForNullModel("variogram"), /needs history/);
+    assert.ok(curatorForNullModel("variogram", 2.0, { history: true }) !== undefined);
+    assert.ok(curatorForNullModel("overdispersed") !== undefined);
   });
 
   it("refuses spans that would cut windows instead of silently re-gridding them", () => {

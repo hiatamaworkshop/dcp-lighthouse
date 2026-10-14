@@ -99,10 +99,13 @@ describe("Comparator.compare — the declared null", () => {
     assert.equal(bare.variogram![0].historyWindows, 10);
   });
 
-  it("refuses history on a lens whose grid is not absolute", () => {
-    assert.throws(
-      () => new Comparator().compare(buf, { window_ms: 1_000 }, { null_model: "variogram", history_ms: 30_000 }, obs),
-      /align:"epoch"/,
-    );
+  it("refuses the variogram null on a lens whose grid is not absolute, history or not", () => {
+    // Separate replays anchored at their own first events put the windows off
+    // phase; the lags would be rounded and γ read at the wrong one.
+    for (const decl of [{ null_model: "variogram" as const, history_ms: 30_000 }, { null_model: "variogram" as const }]) {
+      assert.throws(() => new Comparator().compare(buf, { window_ms: 1_000 }, decl, obs), /align:"epoch"/, JSON.stringify(decl));
+    }
+    // The other nulls read no lags.
+    assert.doesNotThrow(() => new Comparator().compare(buf, { window_ms: 1_000 }, { null_model: "overdispersed" }, obs));
   });
 });

@@ -643,3 +643,22 @@ test("isReroutedAgentBacked: an unscorable statistic never reads as backed (2026
   // if it were reported as "the model's aim was off".
   assert.equal(isReroutedAgentBacked(buf, comparator, COARSE_LENS, {}, "agent-C", GATE_NOW), true);
 });
+
+test("isReroutedAgentBacked: a real flag survives a crowded package (2026-10-14 (9) review)", () => {
+  // agent-C dips shallowly in the last observation window while 12 other
+  // agents fail outright for all three: 36+ larger tiles. A curator capped at
+  // the default 12 tiles drops agent-C's dip and the claim reads unbacked;
+  // the gate's comparator keeps every tile (index.ts's gateComparator).
+  const buf = new RetentionBuffer<AgentEvent>(agentExtractor, { retentionWindowMs: 120_000 });
+  const others = Array.from({ length: 12 }, (_, k) => `agent-X${k}`);
+  let i = 0;
+  for (let ts = 0; ts < GATE_NOW; ts += 50, i++) {
+    const natural = i % 20 === 0 ? 0 : 1;
+    buf.observe({ ts, value: ts >= 90_000 ? i % 2 : natural, agentId: "agent-C" }, "s");
+    for (const a of others) buf.observe({ ts, value: ts >= 70_000 ? 0 : natural, agentId: a }, "s");
+  }
+  const capped = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true });
+  assert.equal(isReroutedAgentBacked(buf, capped, COARSE_LENS, {}, "agent-C", GATE_NOW), false, "the cap cuts agent-C's dip");
+  const uncapped = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true, maxTiles: Infinity });
+  assert.equal(isReroutedAgentBacked(buf, uncapped, COARSE_LENS, {}, "agent-C", GATE_NOW), true);
+});

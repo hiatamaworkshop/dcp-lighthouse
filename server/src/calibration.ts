@@ -207,7 +207,7 @@ function buildTrial(
       buf, rng, historyFrom, obsTo, shape,
       injected === null ? null : { passRate: injected.passRate, fromTs: obsTo - shape.spanMs / 5 },
     );
-    return { observation: buf, obsFrom: T0, obsTo, refFrom, refTo: T0, historyFrom };
+    return { observation: buf, obsFrom: T0, obsTo, refFrom, refTo: T0 - 1, historyFrom };
   }
 
   emit(buf, rng, refFrom, T0, shape.eventsPerSpan, shape.passRate, shape.agents);
@@ -222,7 +222,7 @@ function buildTrial(
     emit(buf, rng, T0, burstStart, quietEvents, shape.passRate, shape.agents);
     emit(buf, rng, burstStart, obsTo, shape.eventsPerSpan - quietEvents, injected.passRate, burstAgents);
   }
-  return { observation: buf, obsFrom: T0, obsTo, refFrom, refTo: T0, historyFrom };
+  return { observation: buf, obsFrom: T0, obsTo, refFrom, refTo: T0 - 1, historyFrom };
 }
 
 /** Does a package claim an anomaly? Baseline tiles are not claims. */

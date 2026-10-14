@@ -228,8 +228,12 @@ export interface QCompareParams {
 
 export type QParams = QObserveParams | QPipelineParams | QSchemaParams | QCompareParams;
 
-const REFERENCE_KINDS: readonly ReferenceKind[] = ["preceding"];
-const NULL_MODELS: readonly NullModel[] = ["independent", "overdispersed", "variogram"];
+// Records keyed by the unions, so adding a value to a type without adding it
+// here is a compile error rather than a runtime refusal.
+const REFERENCE_KINDS = Object.keys({ preceding: true } satisfies Record<ReferenceKind, true>) as ReferenceKind[];
+const NULL_MODELS = Object.keys(
+  { independent: true, overdispersed: true, variogram: true } satisfies Record<NullModel, true>,
+) as NullModel[];
 
 /**
  * The $Q[compare] rulebook, run on write like validateObserveParams. Unknown

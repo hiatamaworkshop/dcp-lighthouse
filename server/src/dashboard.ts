@@ -226,6 +226,11 @@ function parseQuery(url: string): URLSearchParams {
  * state — RetentionBuffer already answers arbitrary [fromTs, toTs] within
  * its retained span, the same pattern liveSpans()/Comparator.compare
  * above already use.
+ *
+ * `comparator` must not cap tiles (`maxTiles: Infinity`): the answer is read
+ * off the package's tiles, and a capped curator drops the smallest-magnitude
+ * ones first — a named agent's real flag can be among them when several
+ * agents alarm at once (2026-10-14 (9) review).
  */
 export function isReroutedAgentBacked(
   buffer: ReplaySource,

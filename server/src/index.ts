@@ -122,6 +122,11 @@ const buffer     = new RetentionBuffer<TestEvent>(testEventExtractor, {
 });
 const overlay    = new ObservationOverlay(registry);
 const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true });
+// The §A gate asks "did the curator flag this agent", which must not depend on
+// how many tiles a reader is shown: maxTiles drops the smallest first, so with
+// several agents alarming at once a real flag could be cut and the claim
+// scored unbacked (2026-10-14 (9) review). Same scoring, no cap.
+const gateComparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true, maxTiles: Infinity });
 const ruleBrain  = new RuleBrain(registry);
 
 /**
@@ -331,6 +336,17 @@ setInterval(() => {
         // This matters more once BRAIN_MODE=claude lands (ROADMAP L3): an LLM
         // Brain writing $Q is exactly the caller most likely to propose a lens
         // the rulebook refuses.
+        //
+        // A proposal without a span is refused rather than scored against
+        // itself, as it once was: the declared comparison is "the span before
+        // this one", and there is no "before" without a span — a self-referenced
+        // package would carry a comparison no $Q row names (2026-10-14 (8)).
+        // Refused BEFORE the write, so a refused request leaves $Q untouched
+        // (2026-10-14 (9) review).
+        if (proposedParams.fromTs === undefined || proposedParams.toTs === undefined) {
+          console.warn(`[brain] replay REFUSED — no fromTs/toTs, so no preceding reference to compare against`);
+          continue;
+        }
         try {
           registry.set(d.qProposal.scope, proposedParams);
         } catch (err) {
@@ -346,7 +362,7 @@ setInterval(() => {
         // over unchanged (lens.ts's contract) — rebuilding a `{ window_ms }`
         // literal here would silently drop the rest of the chain once L4 adds
         // group_by and the later stages.
-        const { fromTs, toTs, ...lens } = proposedParams;
+        const { fromTs, toTs, ...lens } = proposedParams as typeof proposedParams & { fromTs: number; toTs: number };
         // Explicit reference lens (ROADMAP_BRIEF.md 2026-07-25 "参照レンズ設計"):
         // score the flagged interval against the equal-length interval
         // immediately before it, replayed through the same lens — a declared,
@@ -366,15 +382,6 @@ setInterval(() => {
         // here still reaches uncaughtException from inside setInterval and
         // still takes the server down — the exact outcome the narrower guard
         // was written to prevent, one call further along.
-        //
-        // A proposal without a span is refused rather than scored against
-        // itself, as it once was: the declared comparison is "the span before
-        // this one", and there is no "before" without a span — a self-referenced
-        // package would carry a comparison no $Q row names (2026-10-14 (8)).
-        if (fromTs === undefined || toTs === undefined) {
-          console.warn(`[brain] replay REFUSED — no fromTs/toTs, so no preceding reference to compare against`);
-          continue;
-        }
         const scope = parseScope(d.qProposal.scope);
         let pkg;
         try {
@@ -446,7 +453,7 @@ setInterval(() => {
         let backed: boolean;
         try {
           backed = isReroutedAgentBacked(
-            buffer, comparator, coarseLens, registry.getCompare("test_result:v1", "coarse") ?? {}, agentId, snapshotTs,
+            buffer, gateComparator, coarseLens, registry.getCompare("test_result:v1", "coarse") ?? {}, agentId, snapshotTs,
           );
         } catch (err) {
           console.warn(
