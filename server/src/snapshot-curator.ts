@@ -230,6 +230,21 @@ export interface SnapshotPackage {
    * much of its yardstick is the dependence it allowed for.
    */
   overdispersion?: Array<{ group?: string; tau2: number }>;
+  /**
+   * Present only under `nullModel: "variogram"`: per scoring unit, the latent
+   * semivariogram the gate used — γ̂(h) for lags 0…maxLag in windows (γ̂(0) = 0)
+   * — with what it rests on. `extrapolatedFromLag` is the first lag the history
+   * had no window pairs for (its γ̂ and every later one repeat the last
+   * estimated value, an UNDERSTATEMENT when γ is still rising); absent when
+   * every lag was estimated.
+   */
+  variogram?: Array<{
+    group?: string;
+    gamma: number[];
+    historyWindows: number;
+    df: number;
+    extrapolatedFromLag?: number;
+  }>;
   /** The curated tiles, sorted by regionStart ascending. */
   tiles: SnapshotTile[];
 }
@@ -253,6 +268,12 @@ export interface SelectionContext {
    * `globalStats.windowCount`, which counts REFERENCE windows.
    */
   scoredWindowCount: number;
+  /**
+   * Under `nullModel: "variogram"` only: step tests counted into the family
+   * (the most disjoint runs the scored windows can hold), so the Šidák family
+   * is scoredWindowCount + stepSlots. Absent = the family is the windows alone.
+   */
+  stepSlots?: number;
   /** The per-comparison two-sided z threshold, before correcting for N. */
   baseZThreshold: number;
   /**
@@ -337,8 +358,34 @@ export interface CurationOptions {
    *
    * Step tiles are gated under both models; "overdispersed" adds τ² to the
    * run's error (see detectSteps).
+   *
+   * "variogram" drops the next assumption, that those latent rates are drawn
+   * independently of each other (ROADMAP_BRIEF.md 2026-10-14 (2)(4): on real
+   * data the alarm rate climbs with the distance from the reference, 6.7‰ →
+   * 30.3‰ per window at 60 s). The latent rate is a process over time with
+   * semivariogram γ(h), estimated from a HISTORY of window summaries ending
+   * where the reference ends (curate's `context.history`), and the gate uses
+   * the variance of the actual contrast between the window and the reference
+   * mean — see latentModel. A flat γ = τ² reproduces "overdispersed"'s
+   * τ²(1 + refShare) exactly; the step run gets its own contrast rather than
+   * "one draw of τ²". Heavy-tailed latent moves are NOT covered (γ is a second
+   * moment; 2026-10-14 (4)).
    */
-  nullModel?: "independent" | "overdispersed";
+  nullModel?: "independent" | "overdispersed" | "variogram";
+}
+
+/** What curate() may read besides the two lens outputs it compares. */
+export interface CurationContext {
+  /**
+   * Window summaries of a stretch ending where the reference ends — read by
+   * `nullModel: "variogram"` only, to estimate how the latent rate varies with
+   * lag. Same lens (window_ms, group_by) as the reference and on the same
+   * grid; windows ending after the reference's last window are dropped, so an
+   * anomaly in the observation can never widen its own yardstick. Absent: the
+   * reference windows stand in, lags beyond them are extrapolated flat, and
+   * the package says so (`variogram[].extrapolatedFromLag`).
+   */
+  history?: LensResult;
 }
 
 // ── SnapshotCurator ─────────────────────────────────────────────────────────
@@ -413,7 +460,7 @@ export class SnapshotCurator {
    * windows into N×G comparisons, and letting each group carry its own fresh
    * budget would reintroduce exactly the inflation 対策A removed.
    */
-  curate(observation: LensResult, reference: LensResult = observation): SnapshotPackage {
+  curate(observation: LensResult, reference: LensResult = observation, context: CurationContext = {}): SnapshotPackage {
     const { windows, window_ms } = observation;
     const now = Date.now();
 
@@ -487,6 +534,17 @@ export class SnapshotCurator {
     if (overdispersed) {
       for (const unit of units) unit.ref = { ...unit.ref, ...betweenWindowVariance(unit.refWindows) };
     }
+    const variogram = this.opts.nullModel === "variogram";
+    if (variogram) {
+      for (const unit of units) {
+        unit.latent = latentModel(unit.windows, unit.refWindows, historyFor(context.history, unit.group, unit.refWindows), window_ms);
+      }
+    }
+    // The yardstick a given window is scored with: the unit's pooled reference,
+    // plus — under "variogram" — the latent variance of THIS window's contrast,
+    // which depends on how far the window sits from the reference.
+    const refFor = (unit: ScoringUnit, w: WindowStat): RefStats =>
+      unit.latent === undefined ? unit.ref : { ...unit.ref, ...windowLatent(unit.latent, w) };
 
     // ── 1. Spikes and dips ────────────────────────────────────
     // Each window is scored against the reference population via a standard
@@ -505,7 +563,18 @@ export class SnapshotCurator {
     // fixed as the number of scored windows N grows; the reported `magnitude`
     // stays the honest, uncorrected z so Brain sees the real effect size.
     const scorableCount = units.reduce((n, u) => n + u.windows.filter(isScorable).length, 0);
-    const effectiveZThreshold = sidakCorrectedThreshold(this.opts.spikeZThreshold, scorableCount);
+    // Under "variogram" the step tests join the family. A step run's latent
+    // part now shrinks with its length as the data says, so steps fire at their
+    // nominal rate — and as tests outside the family they added 1.4pt on top of
+    // spike/dip (10 windows, iid latent; ROADMAP_BRIEF.md 2026-10-14 (5)).
+    // Counted as the most disjoint runs the scorable windows can hold, a bound
+    // fixed before the data is read: counting the runs actually found would
+    // let the deviations choose their own family. The other nulls keep the
+    // family they were measured with.
+    const stepSlots = variogram
+      ? units.reduce((n, u) => n + Math.floor(u.windows.filter(isScorable).length / this.opts.stepWindowCount), 0)
+      : 0;
+    const effectiveZThreshold = sidakCorrectedThreshold(this.opts.spikeZThreshold, scorableCount + stepSlots);
     const unreachableTails: UnreachableTail[] = [];
 
     for (const unit of units) {
@@ -520,14 +589,15 @@ export class SnapshotCurator {
       const lattice = detectLattice(unit.windows, unit.refWindows);
       const model = categoricalModel(unit.windows, unit.refWindows, unit.ref);
 
-      collectUnreachableTails(unit, effectiveZThreshold, lattice, model, unreachableTails);
+      collectUnreachableTails(unit, effectiveZThreshold, lattice, model, unreachableTails, (w) => refFor(unit, w));
 
       for (const w of unit.windows) {
         if (!isScorable(w)) continue;
-        const se = comparisonSE(w, unit.ref);
+        const wref = refFor(unit, w);
+        const se = comparisonSE(w, wref);
         if (!(se > 0)) continue;
         const z = (w.mean - unit.ref.mean) / se;
-        const gated = gate(w, unit.ref, se, lattice, model);
+        const gated = gate(w, wref, se, lattice, model);
         if (gated >= effectiveZThreshold) {
           tiles.push({
             label: `${tag}spike at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${unit.ref.mean.toFixed(3)})`,
@@ -566,6 +636,7 @@ export class SnapshotCurator {
       tiles.push(
         ...detectSteps(
           unit.windows, unit.ref, this.opts.stepThreshold, this.opts.stepWindowCount, effectiveZThreshold, unit.group,
+          unit.latent,
         ),
       );
 
@@ -641,6 +712,7 @@ export class SnapshotCurator {
       ...(unscoredGroups.length > 0 ? { unscoredGroups } : {}),
       selection: {
         scoredWindowCount: scorableCount,
+        ...(variogram ? { stepSlots } : {}),
         baseZThreshold: this.opts.spikeZThreshold,
         effectiveZThreshold,
       },
@@ -650,6 +722,17 @@ export class SnapshotCurator {
             overdispersion: units.map((u) => ({
               ...(u.group !== undefined ? { group: u.group } : {}),
               tau2: u.ref.tau2 ?? 0,
+            })),
+          }
+        : {}),
+      ...(variogram
+        ? {
+            variogram: units.map((u) => ({
+              ...(u.group !== undefined ? { group: u.group } : {}),
+              gamma: Array.from(u.latent!.gamma),
+              historyWindows: u.latent!.historyWindows,
+              df: u.latent!.df,
+              ...(u.latent!.extrapolatedFromLag !== undefined ? { extrapolatedFromLag: u.latent!.extrapolatedFromLag } : {}),
             })),
           }
         : {}),
@@ -678,6 +761,8 @@ interface ScoringUnit {
    * observation that happens to have seen only one of the two values.
    */
   refWindows: WindowStat[];
+  /** Under `nullModel: "variogram"`: the latent process the unit's gate reads (latentModel). */
+  latent?: LatentModel;
 }
 
 /**
@@ -758,6 +843,14 @@ interface RefStats {
    * Paired with tau2; the gate reads it to widen the tail (studentize).
    */
   tau2Df?: number;
+  /**
+   * Under `nullModel: "variogram"`, set per WINDOW (windowLatent): the latent
+   * variance of this window's contrast with the reference mean, value units²,
+   * and the degrees of freedom it rests on. When present it replaces
+   * τ²·(1 + refShare) / tau2Df everywhere those are read.
+   */
+  latentVar?: number;
+  latentDf?: number;
 }
 
 /**
@@ -814,6 +907,178 @@ function betweenWindowVariance(windows: readonly WindowStat[]): { tau2: number; 
   return { tau2, refShare, tau2Df: (K - 1) * (1 - msw / msb) ** 2 };
 }
 
+/** The variogram null's latent process for one scoring unit (latentModel). */
+interface LatentModel {
+  /** γ̂(h) for h = 0…maxLag, in windows; γ̂(0) = 0. */
+  gamma: Float64Array;
+  /** A window's lag index is round((windowStart − origin) / window_ms); origin = the first reference window. */
+  origin: number;
+  window_ms: number;
+  /** Reference windows as (index, weight nₖ/N), and ΣⱼΣₖ wⱼwₖ·γ(rⱼ − rₖ). */
+  ref: Array<{ i: number; w: number }>;
+  refSelf: number;
+  df: number;
+  historyWindows: number;
+  extrapolatedFromLag?: number;
+}
+
+/** The history windows a unit reads: its own group's, else the reference standing in (CurationContext.history). */
+function historyFor(history: LensResult | undefined, group: string | undefined, refWindows: WindowStat[]): WindowStat[] {
+  if (history === undefined) return refWindows;
+  if (group === undefined) return history.windows;
+  return history.groups?.find((g) => g.label === group)?.windows ?? refWindows;
+}
+
+/**
+ * The latent rate as a process over time (ROADMAP_BRIEF.md 2026-10-14 (2)):
+ * semivariogram γ(h) = ½·E[(θ_{t+h} − θ_t)²] in window lags, estimated from
+ * the history, and the contrast variance every gate reads from it.
+ *
+ *   γ̂(h) = max(0, mean over pairs at lag h of ½(mₐ − m_b)² − ½(vₐ + v_b))
+ *
+ * vᵢ = the window's own sampling variance of its mean (Bessel: s²/n, so
+ * m(1 − m)/(n − 1) on 0/1 data) — the same job ANOVA's MSW does for τ̂².
+ * The classical (Matheron) estimator, not a robust one: the heavy-tailed moves
+ * real data showed (2026-10-14 (4)) belong to the null, and a robust scale
+ * would understate exactly the variance the gate needs.
+ *
+ * History windows ending after the reference's end are dropped (the
+ * observation must not widen its own yardstick); only scorable windows with
+ * n_eff > 1 enter (a sampling variance must exist to subtract). Lags with no
+ * pairs repeat the last estimated γ̂ and are reported (extrapolatedFromLag).
+ *
+ * Degrees of freedom, for studentizing like tau2Df: the history is cut into
+ * B ≤ 8 blocks of at least two comparison spans, each block's γ̂ gives its own
+ * mean contrast variance V̄_b over the observation windows, and ν = 2B·V̄²/s²_b
+ * (the χ² moment match). It is data-driven on purpose: on independent latent
+ * rates the blocks agree and ν is large; when the latent process wanders, the
+ * long lags are known only from a few spans' worth of history and the blocks
+ * disagree. Fewer than two blocks: ν = 1.
+ */
+function latentModel(
+  obsWindows: readonly WindowStat[],
+  refWindows: readonly WindowStat[],
+  histWindows: readonly WindowStat[],
+  window_ms: number,
+): LatentModel {
+  const origin = refWindows[0]?.windowStart ?? 0;
+  const idx = (w: WindowStat): number => Math.round((w.windowStart - origin) / window_ms);
+  const refW = refWindows.filter((w) => w.count > 0 && effectiveN(w) > 0);
+  const N = refW.reduce((s, w) => s + effectiveN(w), 0);
+  const ref = refW.map((w) => ({ i: idx(w), w: effectiveN(w) / N }));
+  const refEnd = Math.max(...refWindows.map((w) => w.windowEnd));
+  const refLo = Math.min(...ref.map((r) => r.i));
+  const refHi = Math.max(...ref.map((r) => r.i));
+  const maxLag = Math.max(1, refHi - refLo, ...obsWindows.map((w) => idx(w) - refLo));
+
+  const hist = histWindows.filter((w) => w.windowEnd <= refEnd && isScorable(w) && effectiveN(w) > 1);
+  const his = hist.map(idx);
+  const lo = his.length > 0 ? Math.min(...his) : 0;
+  const len = his.length > 0 ? Math.max(...his) - lo + 1 : 0;
+  const m = new Float64Array(len).fill(NaN);
+  const v = new Float64Array(len);
+  hist.forEach((w, k) => {
+    m[his[k] - lo] = w.mean;
+    v[his[k] - lo] = Math.max(0, w.sumSq / weightTotal(w) - w.mean * w.mean) / (effectiveN(w) - 1);
+  });
+
+  const B = Math.min(8, Math.floor(len / (2 * maxLag)));
+  const blockLen = B > 0 ? len / B : Infinity;
+  const sum = new Float64Array(maxLag + 1);
+  const cnt = new Float64Array(maxLag + 1);
+  const bsum = Array.from({ length: B }, () => new Float64Array(maxLag + 1));
+  const bcnt = Array.from({ length: B }, () => new Float64Array(maxLag + 1));
+  for (let a = 0; a < len; a++) {
+    if (Number.isNaN(m[a])) continue;
+    const b = Math.min(B - 1, Math.floor(a / blockLen));
+    for (let h = 1; h <= maxLag && a + h < len; h++) {
+      if (Number.isNaN(m[a + h])) continue;
+      const term = 0.5 * (m[a] - m[a + h]) ** 2 - 0.5 * (v[a] + v[a + h]);
+      sum[h] += term;
+      cnt[h]++;
+      if (B > 0) {
+        bsum[b][h] += term;
+        bcnt[b][h]++;
+      }
+    }
+  }
+  const curve = (s: Float64Array, c: Float64Array): { gamma: Float64Array; from?: number } => {
+    const gamma = new Float64Array(maxLag + 1);
+    let from: number | undefined;
+    for (let h = 1; h <= maxLag; h++) {
+      if (c[h] > 0) gamma[h] = Math.max(0, s[h] / c[h]);
+      else {
+        from ??= h;
+        gamma[h] = gamma[h - 1];
+      }
+    }
+    return { gamma, from };
+  };
+  const { gamma, from } = curve(sum, cnt);
+
+  const selfOf = (g: Float64Array): number => {
+    let s = 0;
+    for (const a of ref) for (const b of ref) s += a.w * b.w * g[Math.abs(a.i - b.i)];
+    return s;
+  };
+  const obsIs = obsWindows.filter(isScorable).map(idx);
+  const meanContrast = (g: Float64Array): number => {
+    if (obsIs.length === 0) return 0;
+    const self = selfOf(g);
+    let total = 0;
+    for (const i of obsIs) total += Math.max(0, contrastCross(g, ref, i, maxLag) - self);
+    return total / obsIs.length;
+  };
+  let df = 1;
+  if (B >= 2) {
+    const vb = bsum.map((s, b) => meanContrast(curve(s, bcnt[b]).gamma));
+    const vbar = meanContrast(gamma);
+    const mb = vb.reduce((s, x) => s + x, 0) / B;
+    const s2 = vb.reduce((s, x) => s + (x - mb) ** 2, 0) / (B - 1);
+    df = s2 > 0 ? (2 * B * vbar * vbar) / s2 : Infinity;
+  }
+  return {
+    gamma, origin, window_ms, ref, refSelf: selfOf(gamma), df, historyWindows: hist.length,
+    ...(from !== undefined ? { extrapolatedFromLag: from } : {}),
+  };
+}
+
+/** 2·Σₖ wₖ·γ(i − rₖ): the cross term of a window at index i with the reference mean. */
+function contrastCross(g: Float64Array, ref: LatentModel["ref"], i: number, maxLag: number): number {
+  let s = 0;
+  for (const r of ref) s += r.w * g[Math.min(maxLag, Math.abs(i - r.i))];
+  return 2 * s;
+}
+
+/**
+ * Var(θ_window − θ̄_ref) = 2·Σₖ wₖγ(o − rₖ) − ΣⱼΣₖ wⱼwₖγ(rⱼ − rₖ): the latent part
+ * of this window's comparison. Flat γ = τ² gives τ²(1 + Σwₖ²) — the
+ * overdispersed null's τ²(1 + refShare).
+ */
+function windowLatent(model: LatentModel, w: WindowStat): { latentVar: number; latentDf: number } {
+  const maxLag = model.gamma.length - 1;
+  const i = Math.round((w.windowStart - model.origin) / model.window_ms);
+  return { latentVar: Math.max(0, contrastCross(model.gamma, model.ref, i, maxLag) - model.refSelf), latentDf: model.df };
+}
+
+/** The same contrast for a step run's pooled mean (weights uⱼ = nⱼ/Σn), minus the run's own ΣΣ uᵢuⱼγ(oᵢ − oⱼ). */
+function runLatent(model: LatentModel, run: readonly WindowStat[]): { latentVar: number; latentDf: number } {
+  const maxLag = model.gamma.length - 1;
+  const ws = run.filter((w) => w.count > 0 && effectiveN(w) > 0);
+  const n = ws.reduce((s, w) => s + effectiveN(w), 0);
+  const pts = ws.map((w) => ({
+    i: Math.round((w.windowStart - model.origin) / model.window_ms),
+    u: effectiveN(w) / n,
+  }));
+  let cross = 0;
+  let self = 0;
+  for (const p of pts) {
+    cross += p.u * contrastCross(model.gamma, model.ref, p.i, maxLag);
+    for (const q of pts) self += p.u * q.u * model.gamma[Math.min(maxLag, Math.abs(p.i - q.i))];
+  }
+  return { latentVar: Math.max(0, cross - self - model.refSelf), latentDf: model.df };
+}
+
 /**
  * Turn a z computed with τ̂² plugged in as if known into the normal z with the
  * same tail under the Student-t that τ̂²'s uncertainty implies.
@@ -836,6 +1101,7 @@ function studentizeZ(z: number, w: WindowStat, ref: RefStats): number {
 
 /** studentizeZ with the independent-sampling part `a` of the squared SE given directly (a step run's, say). */
 function studentizeWith(z: number, a: number, ref: RefStats): number {
+  if (ref.latentVar !== undefined) return studentizeParts(z, a, ref.latentVar, ref.latentDf ?? Infinity);
   const tau2 = ref.tau2 ?? 0;
   const nu = ref.tau2Df ?? Infinity;
   if (!(tau2 > 0) || !Number.isFinite(nu) || !Number.isFinite(z)) return z;
@@ -844,6 +1110,14 @@ function studentizeWith(z: number, a: number, ref: RefStats): number {
   if (!(df > 0) || df > 1e6) return z;
   const tail = studentUpperTail(Math.abs(z), df);
   return Math.sign(z) * -normalQuantile(tail);
+}
+
+/** The same Satterthwaite step with the estimated part `b` and its `nu` given directly (the variogram null's). */
+function studentizeParts(z: number, a: number, b: number, nu: number): number {
+  if (!(b > 0) || !Number.isFinite(nu) || !Number.isFinite(z)) return z;
+  const df = ((a + b) * (a + b)) / ((b * b) / nu);
+  if (!(df > 0) || df > 1e6) return z;
+  return Math.sign(z) * -normalQuantile(studentUpperTail(Math.abs(z), df));
 }
 
 /** P(T > t) for t ≥ 0 under Student-t with `df` degrees of freedom: ½·I_{df/(df+t²)}(df/2, ½). */
@@ -1055,12 +1329,14 @@ function collectUnreachableTails(
   lattice: Lattice | null,
   model: CategoricalModel | null,
   out: UnreachableTail[],
+  refFor: (w: WindowStat) => RefStats = () => unit.ref,
 ): void {
   const scorable = unit.windows.filter((w) => isScorable(w) && w.range !== undefined);
   if (scorable.length === 0 || !(unit.ref.variance > 0)) return;
 
   const best = scorable.reduce((a, b) => (effectiveN(b) > effectiveN(a) ? b : a));
-  const se = comparisonSE(best, unit.ref);
+  const ref = refFor(best);
+  const se = comparisonSE(best, ref);
   if (!(se > 0)) return;
 
   const observedMax = Math.max(...scorable.map((w) => w.range!.max));
@@ -1074,8 +1350,8 @@ function collectUnreachableTails(
   // different question than the one the scoring loop asks).
   const ceiling: WindowStat = { ...best, mean: observedMax, sumSq: best.count * observedMax * observedMax };
   const floor: WindowStat = { ...best, mean: observedMin, sumSq: best.count * observedMin * observedMin };
-  const maxZ = gate(ceiling, unit.ref, se, lattice, model);
-  const minZ = gate(floor, unit.ref, se, lattice, model);
+  const maxZ = gate(ceiling, ref, se, lattice, model);
+  const minZ = gate(floor, ref, se, lattice, model);
 
   const group = unit.group !== undefined ? { group: unit.group } : {};
   if (maxZ < requiredZ) {
@@ -1117,6 +1393,7 @@ function collectUnreachableTails(
  */
 function comparisonSE(w: WindowStat, ref: RefStats): number {
   const independent = ref.variance * (1 / effectiveN(w) + 1 / ref.effectiveN);
+  if (ref.latentVar !== undefined) return Math.sqrt(independent + ref.latentVar);
   // Overdispersed null: the window's own latent rate is off the population's
   // by τ², and the reference mean carries τ² too, shrunk by refShare (≈1/K).
   // ref.variance stays the TOTAL event variance rather than the within-window
@@ -1233,7 +1510,7 @@ function gate(
   lattice: Lattice | null,
   model: CategoricalModel | null,
 ): number {
-  const exact = model === null ? null : exactZ(w, model);
+  const exact = model === null ? null : exactZ(w, model, ref.latentVar);
   return studentizeZ(exact ?? gateZ(w, ref, se, lattice?.step ?? null), w, ref);
 }
 
@@ -1364,14 +1641,18 @@ const EXACT_MAX_COUNT = 2_000;
  * counts half the probability of the observed score itself, the standard
  * remedy.
  */
-function exactZ(w: WindowStat, model: CategoricalModel): number | null {
+function exactZ(w: WindowStat, model: CategoricalModel, latentVar?: number): number | null {
   const n = w.count;
   if (!(n > 0) || n > EXACT_MAX_COUNT) return null;
   const c = levelCounts(w, model.min, model.step, model.levels);
   if (c === null) return null;
   const x = c.reduce((s, ci, i) => s + i * ci, 0);
 
-  const alpha = concentration(model.refCounts.map((r) => r + 0.5), model.overdispersion);
+  const alpha = concentration(
+    model.refCounts.map((r) => r + 0.5),
+    model.overdispersion,
+    latentVar === undefined ? undefined : latentVar / (model.step * model.step),
+  );
   const A = alpha.reduce((s, a) => s + a, 0);
   // Cumulative tables, so each composition costs a few additions:
   //   logFact[j] = ln j!,  g[i][j] = ln Γ(αᵢ + j) − ln Γ(αᵢ).
@@ -1431,13 +1712,16 @@ function exactZ(w: WindowStat, model: CategoricalModel): number | null {
  * rates co-vary like a Dirichlet does — the simplest overdispersed multinomial,
  * not a fitted one. τ² = 0 returns α untouched (bit-identical).
  */
-function concentration(alpha: number[], od: CategoricalModel["overdispersion"]): number[] {
-  if (od === undefined || !(od.tau2Step > 0)) return alpha;
+function concentration(alpha: number[], od: CategoricalModel["overdispersion"], latentStep?: number): number[] {
+  // The latent variance in step units²: the variogram null's per-window value
+  // when given, else the overdispersed null's τ²·(1 + refShare).
+  const extra = latentStep ?? (od === undefined ? 0 : od.tau2Step * (1 + od.refShare));
+  if (!(extra > 0)) return alpha;
   const A = alpha.reduce((s, a) => s + a, 0);
   const meanStep = alpha.reduce((s, a, i) => s + i * a, 0) / A;
   const s2 = alpha.reduce((s, a, i) => s + i * i * a, 0) / A - meanStep * meanStep;
   if (!(s2 > 0)) return alpha;
-  const v = s2 / (A + 1) + od.tau2Step * (1 + od.refShare);
+  const v = s2 / (A + 1) + extra;
   // A' below ~1e-6 would make the predictive a pair of point masses; the
   // floor only guards the arithmetic (lgamma of ~0), it is not a tuning knob.
   const scaled = Math.max(1e-6, s2 / v - 1);
@@ -1522,6 +1806,7 @@ function detectSteps(
   minRun: number,
   gateZ: number,
   group?: string,
+  latent?: LatentModel,
 ): SnapshotTile[] {
   if (windows.length < minRun) return [];
   // No yardstick, no comparison — mirrors spike/dip's silent skip when the
@@ -1557,8 +1842,15 @@ function detectSteps(
     // independent ones: consecutive windows are autocorrelated on real data
     // (lag-1 0.17–0.33), so dividing τ² by the run length would credit a
     // sustained drift with evidence it does not carry. Conservative by construction.
-    const odVar = independentVar + (ref.tau2 ?? 0) * (1 + (ref.refShare ?? 0));
-    const zGate = odVar > 0 ? studentizeWith(Math.abs(runMean - ref.mean) / Math.sqrt(odVar), independentVar, ref) : 0;
+    // Under "variogram" the run is a contrast of its own (runLatent): the
+    // data, not a convention, decides how much a run's length shrinks the
+    // latent part — 1/m when the latent rates are independent, not at all when
+    // they move together.
+    const gateRef = latent === undefined ? ref : { ...ref, ...runLatent(latent, run) };
+    const odVar = gateRef.latentVar !== undefined
+      ? independentVar + gateRef.latentVar
+      : independentVar + (ref.tau2 ?? 0) * (1 + (ref.refShare ?? 0));
+    const zGate = odVar > 0 ? studentizeWith(Math.abs(runMean - ref.mean) / Math.sqrt(odVar), independentVar, gateRef) : 0;
     if (zGate < gateZ) return;
     tiles.push({
       label: `${tag}${shapeTag} t=${windows[start].windowStart}–${windows[end].windowEnd} (${(shift * 100).toFixed(1)}% shift)`,

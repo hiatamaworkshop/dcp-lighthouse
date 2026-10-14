@@ -23,14 +23,17 @@ import {
   restrictToKeyValues,
   runInjectionPower,
   runNullCalibration,
+  runPositionProfile,
   shuffleValues,
   stage1RangeRefusal,
   h3RangeRefusal,
+  curatorForNullModel,
   sliceEvents,
   synthesizeStream,
   thinByTrace,
   thinEvents,
   topKeyValues,
+  windowedStream,
   type DiurnalResult,
   type TracedEvent,
 } from "./real-data-harness.js";
@@ -464,6 +467,39 @@ describe("stage 1's reports after their holdout was spent", () => {
     assert.match(stage1RangeRefusal("2026-10-10", "2026-10-11", false) ?? "", /H3's holdout/);
     assert.match(stage1RangeRefusal("2026-09-29", "2026-10-20", false) ?? "", /holdout/);
     assert.match(stage1RangeRefusal("2026-10-03", "2026-10-05", true) ?? "", /spent/);
+  });
+});
+
+describe("one grid for observation, reference and history (the variogram null's trials)", () => {
+  const stream = synthesizeStream({ durationMs: HOUR, rate: 20, seed: 3 });
+  stream.gaps.push({ fromTs: stream.events[0].ts + 600_000, toTs: stream.events[0].ts + 605_000 });
+
+  it("windows the stream once on a grid anchored at its first event, dropping windows that touch a gap", () => {
+    const first = stream.events[0].ts;
+    const all = windowedStream(stream, { window_ms: 1_000 }).slice(first, first + HOUR);
+    assert.ok(all.windows.every((w) => (w.windowStart - first) % 1_000 === 0));
+    assert.ok(all.windows.every((w) => w.windowEnd <= first + 600_000 || w.windowStart >= first + 605_000));
+    const part = windowedStream(stream, { window_ms: 1_000 }).slice(first + 10_000, first + 20_000);
+    assert.equal(part.windows.length, 10);
+    assert.deepEqual(part.windows, all.windows.filter((w) => w.windowStart >= first + 10_000 && w.windowEnd <= first + 20_000));
+  });
+
+  it("profiles alarms by position, and the variogram null stays near design on an iid stream", () => {
+    const r = runPositionProfile(stream, {
+      lens: { window_ms: 1_000 }, spanMs: 10_000, strideMs: 20_000,
+      curator: curatorForNullModel("variogram"), historyMs: 240_000,
+    });
+    assert.ok(r.trials > 150);
+    assert.equal(r.blindByGap, 1);
+    assert.equal(r.perWindowByPosition.length, 6);
+    assert.ok(r.rate < 0.1, `iid rate ${r.rate}`);
+  });
+
+  it("refuses spans that would cut windows instead of silently re-gridding them", () => {
+    assert.throws(
+      () => runPositionProfile(stream, { lens: { window_ms: 1_000 }, spanMs: 10_000, strideMs: 15_500 }),
+      RangeError,
+    );
   });
 });
 

@@ -21,7 +21,7 @@ import {
   formatCalibration,
   PILOT_AGENTS,
 } from "./calibration.js";
-import { familyWiseAlpha } from "./snapshot-curator.js";
+import { SnapshotCurator, familyWiseAlpha } from "./snapshot-curator.js";
 
 const SEEDS = 500;
 
@@ -206,6 +206,25 @@ describe("curator calibration — under retention thinning (ROADMAP L5)", () => 
     });
     assert.ok(dense.rate < heavy.rate, `density must relieve it — ${formatCalibration("dense x10", dense)}`);
     assert.ok(Math.abs(dense.rate - design) < 0.02, `restored effective count should land back near design — ${formatCalibration("dense x10", dense)}`);
+  });
+});
+
+describe("curator calibration — a latent rate that wanders (the variogram null, 2026-10-14 (5))", () => {
+  // AR(1) latent rate, lag-1 0.97 per 1 s window: dependence longer than the
+  // 30-window comparison, the shape real data showed (2026-10-14 (4)).
+  const shape = {
+    spanMs: 30_000, eventsPerSpan: 3_000, passRate: 0.5,
+    latent: { sd: 0.05, rho: 0.97, stepMs: 1_000 }, historySpans: 10,
+  };
+  const lens = { window_ms: 1_000, origin: 0 };
+  const curator = (nullModel: "overdispersed" | "variogram") =>
+    new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true, nullModel });
+
+  it("the overdispersed null floods, the variogram null holds the design rate", () => {
+    const over = measureFalseAlarmRate({ seeds: 100, lens, shape, curator: curator("overdispersed") });
+    const vario = measureFalseAlarmRate({ seeds: 100, lens, shape, curator: curator("variogram") });
+    assert.ok(over.rate > 2 * over.designTarget, formatCalibration("overdispersed", over));
+    assert.ok(vario.rate < 0.08, formatCalibration("variogram", vario));
   });
 });
 

@@ -70,9 +70,25 @@ export interface StreamShape {
    * figure was measured on, drawn from the same random sequence.
    */
   agents?: ReadonlyArray<{ id: string; passRate: number; flakyRate?: number }>;
+  /**
+   * A latent pass rate that wanders: passRate + x(t), x an AR(1) with
+   * stationary sd `sd` and lag-1 correlation `rho` per `stepMs`, clamped to
+   * [0.01, 0.99]. Events are spread evenly over each step at eventsPerSpan's
+   * density. `rho: 0` = independent latent rates (the overdispersed null's
+   * own assumption); `rho` near 1 = dependence longer than a window, the
+   * residual real data showed (ROADMAP_BRIEF.md 2026-10-14 (4)). Absent = the
+   * plain Bernoulli stream, drawn exactly as before.
+   */
+  latent?: { sd: number; rho: number; stepMs: number };
+  /**
+   * Spans of the same stream generated BEFORE the reference and handed to
+   * curate() as `context.history` (the variogram null's). 0 / absent = none.
+   */
+  historySpans?: number;
 }
 
-type Shape = Required<Omit<StreamShape, "agents">> & Pick<StreamShape, "agents">;
+type Shape = Required<Omit<StreamShape, "agents" | "latent" | "historySpans">> &
+  Pick<StreamShape, "agents" | "latent" | "historySpans">;
 
 const DEFAULT_SHAPE: Shape = {
   spanMs: 10_000,
@@ -125,6 +141,35 @@ function emit(
 }
 
 /**
+ * The latent-rate stream (StreamShape.latent / historySpans): one AR(1) path
+ * over history + reference + observation, so the three share one process.
+ * `injected` overrides the rate in the observation's last fifth, as buildTrial does.
+ */
+function emitLatent(
+  buf: RetentionBuffer<LensEvent>,
+  rng: () => number,
+  fromTs: number,
+  toTs: number,
+  shape: Shape,
+  injected: { passRate: number; fromTs: number } | null,
+): void {
+  const latent = shape.latent ?? { sd: 0, rho: 0, stepMs: shape.spanMs };
+  const perStep = Math.max(1, Math.round((shape.eventsPerSpan * latent.stepMs) / shape.spanMs));
+  const gauss = (): number => Math.sqrt(-2 * Math.log(1 - rng())) * Math.cos(2 * Math.PI * rng());
+  let x = latent.sd * gauss();
+  for (let t = fromTs; t < toTs; t += latent.stepMs) {
+    if (t > fromTs) x = latent.rho * x + Math.sqrt(1 - latent.rho * latent.rho) * latent.sd * gauss();
+    const p = Math.min(0.99, Math.max(0.01, shape.passRate + x));
+    for (let k = 0; k < perStep; k++) {
+      const ts = t + Math.floor((k * latent.stepMs) / perStep);
+      if (ts >= toTs) break;
+      const rate = injected !== null && ts >= injected.fromTs ? injected.passRate : p;
+      buf.observe({ ts, value: rng() < rate ? 1 : 0 }, "calibration");
+    }
+  }
+}
+
+/**
  * One null trial: a reference span and an observation span drawn from the SAME
  * distribution, so every anomaly tile the curator raises is by construction a
  * false alarm.
@@ -139,19 +184,31 @@ function buildTrial(
   shape: Shape,
   injected: { passRate: number } | null,
   retention?: Partial<RetentionBufferOptions>,
-): { observation: RetentionBuffer<LensEvent>; obsFrom: number; obsTo: number; refFrom: number; refTo: number } {
+): {
+  observation: RetentionBuffer<LensEvent>; obsFrom: number; obsTo: number; refFrom: number; refTo: number; historyFrom: number;
+} {
   const rng = mulberry32(seed);
+  const historyMs = (shape.historySpans ?? 0) * shape.spanMs;
   const buf = new RetentionBuffer<LensEvent>((raw) => raw, {
     // A retentionWindowMs this wide keeps the whole trial in the freshness
     // zone by default, so the reference zone (ROADMAP L5) is inert unless a
     // caller shrinks it explicitly — this is what makes buildTrial's default
     // behaviour, and every pre-L5 calibration figure measured against it,
     // unaffected by the reference zone's existence.
-    retentionWindowMs: shape.spanMs * 10,
+    retentionWindowMs: shape.spanMs * 10 + historyMs,
     ...retention,
   });
   const refFrom = T0 - shape.spanMs;
   const obsTo = T0 + shape.spanMs;
+  const historyFrom = refFrom - historyMs;
+
+  if (shape.latent !== undefined || historyMs > 0) {
+    emitLatent(
+      buf, rng, historyFrom, obsTo, shape,
+      injected === null ? null : { passRate: injected.passRate, fromTs: obsTo - shape.spanMs / 5 },
+    );
+    return { observation: buf, obsFrom: T0, obsTo, refFrom, refTo: T0, historyFrom };
+  }
 
   emit(buf, rng, refFrom, T0, shape.eventsPerSpan, shape.passRate, shape.agents);
   if (injected === null) {
@@ -165,7 +222,7 @@ function buildTrial(
     emit(buf, rng, T0, burstStart, quietEvents, shape.passRate, shape.agents);
     emit(buf, rng, burstStart, obsTo, shape.eventsPerSpan - quietEvents, injected.passRate, burstAgents);
   }
-  return { observation: buf, obsFrom: T0, obsTo, refFrom, refTo: T0 };
+  return { observation: buf, obsFrom: T0, obsTo, refFrom, refTo: T0, historyFrom };
 }
 
 /** Does a package claim an anomaly? Baseline tiles are not claims. */
@@ -261,7 +318,10 @@ function measure(
     const trial = buildTrial(startSeed + i, shape, injected, opts.retention);
     const observation = trial.observation.replay(lens, trial.obsFrom, trial.obsTo);
     const reference = trial.observation.replay(lens, trial.refFrom, trial.refTo);
-    const pkg = curator.curate(observation, reference);
+    const history = trial.historyFrom < trial.refFrom
+      ? trial.observation.replay(lens, trial.historyFrom, trial.refTo)
+      : undefined;
+    const pkg = curator.curate(observation, reference, history === undefined ? {} : { history });
     if (!pkg.referenceUsable) {
       unusableReference++;
       continue;

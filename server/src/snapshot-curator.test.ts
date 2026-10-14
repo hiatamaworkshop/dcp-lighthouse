@@ -1441,6 +1441,124 @@ describe("SnapshotCurator — overdispersed null (events in a window are not ind
   });
 });
 
+// ── variogram null (2026-10-14 (5)) ─────────────────────────────────────────
+
+/**
+ * H history windows, then K reference windows, then K observation windows, on
+ * one latent path: x is an AR(1) with lag-1 correlation `rho` and stationary
+ * sd `sd` per 1s window, the window's rate 0.6 + x. rho 0 = independent latent
+ * rates (the overdispersed null's own assumption), sd 0 = the iid stream.
+ * `drop` forces observation window `at` to rate `to`.
+ */
+function latentTrial(
+  seed: number,
+  o: { H: number; K: number; per: number; rho: number; sd: number; drop?: { at: number; to: number } },
+): { observation: LensResult; reference: LensResult; history: LensResult } {
+  const rand = rng32(seed);
+  const gauss = () => Math.sqrt(-2 * Math.log(rand() || 1e-12)) * Math.cos(2 * Math.PI * rand());
+  const events: LensEvent[] = [];
+  let x = o.sd * gauss();
+  for (let k = 0; k < o.H + 2 * o.K; k++) {
+    if (k > 0) x = o.rho * x + Math.sqrt(1 - o.rho * o.rho) * o.sd * gauss();
+    let p = Math.min(0.98, Math.max(0.02, 0.6 + x));
+    if (o.drop !== undefined && k === o.H + o.K + o.drop.at) p = o.drop.to;
+    for (let i = 0; i < o.per; i++) events.push({ ts: k * 1000 + Math.floor(rand() * 1000), value: rand() < p ? 1 : 0 });
+  }
+  events.sort((a, b) => a.ts - b.ts);
+  const cut = (from: number, to: number) =>
+    applyLens(events.filter((e) => e.ts >= from * 1000 && e.ts < to * 1000), { window_ms: 1000, align: "epoch" });
+  return {
+    observation: cut(o.H + o.K, o.H + 2 * o.K),
+    reference: cut(o.H, o.H + o.K),
+    history: cut(0, o.H + o.K),
+  };
+}
+
+describe("SnapshotCurator — variogram null (the latent rate drifts over time)", () => {
+  const curatorFor = (nullModel: "independent" | "overdispersed" | "variogram") =>
+    new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false, nullModel });
+  const rate = (
+    nullModel: "independent" | "overdispersed" | "variogram",
+    o: Parameters<typeof latentTrial>[1],
+    hit: (pkg: SnapshotPackage) => boolean = (pkg) => pkg.tiles.length > 0,
+  ) => {
+    const curator = curatorFor(nullModel);
+    let n = 0;
+    for (let s = 1; s <= 200; s++) {
+      const t = latentTrial(s * 104729, o);
+      if (hit(curator.curate(t.observation, t.reference, { history: t.history }))) n++;
+    }
+    return n / 200;
+  };
+
+  it("holds the design rate where the latent rate wanders, which the overdispersed null does not", () => {
+    // Measured (200 seeds, 30 + 30 windows, 300 history): overdispersed 14.0%, variogram 4.0%.
+    // τ² from inside the reference cannot see lags past the reference; γ from the history can.
+    const ar = { H: 300, K: 30, per: 100, rho: 0.97, sd: 0.05 };
+    assert.ok(rate("overdispersed", ar) > 0.1, "the overdispersed null must be visibly broken here");
+    assert.ok(rate("variogram", ar) < 0.07);
+  });
+
+  it("gives back the power the overdispersed null spent on iid data", () => {
+    // Measured (200 seeds, one window 0.6 → 0.25): independent 89.0%, overdispersed 63.5%,
+    // variogram 85.5%. γ̂ ≈ 0 rests on hundreds of history windows rather than ten.
+    const drop = { H: 200, K: 10, per: 35, rho: 0, sd: 0, drop: { at: 4, to: 0.25 } };
+    const dip = (pkg: SnapshotPackage) => pkg.tiles.some((t) => t.shapeTag === "dip");
+    const variogram = rate("variogram", drop, dip);
+    assert.ok(variogram >= 0.78, `variogram power ${variogram}`);
+    assert.ok(variogram > rate("overdispersed", drop, dip) + 0.1);
+  });
+
+  it("stays at or under the design rate on independent latent rates and on the iid stream", () => {
+    // Measured: iid 2.5%, latent sd 0.1 (flat γ) 4.5%.
+    assert.ok(rate("variogram", { H: 200, K: 10, per: 35, rho: 0, sd: 0 }) < 0.06);
+    assert.ok(rate("variogram", { H: 200, K: 10, per: 35, rho: 0, sd: 0.1 }) < 0.07);
+  });
+
+  it("reads the history only up to the reference's end — the observation cannot widen its own yardstick", () => {
+    const t = latentTrial(17, { H: 100, K: 10, per: 35, rho: 0.9, sd: 0.1 });
+    const wild = latentTrial(18, { H: 100, K: 10, per: 35, rho: 0, sd: 0.4 }).observation;
+    // The same history, but running on into an observation span that swings wildly.
+    const longer: LensResult = { ...t.history, windows: [...t.history.windows, ...wild.windows] };
+    const curator = curatorFor("variogram");
+    const { generatedAt: _a, ...cut } = curator.curate(wild, t.reference, { history: t.history });
+    const { generatedAt: _b, ...fed } = curator.curate(wild, t.reference, { history: longer });
+    assert.deepEqual(fed, cut);
+  });
+
+  it("says what it extrapolated when no history is given", () => {
+    const t = latentTrial(5, { H: 0, K: 10, per: 35, rho: 0, sd: 0.1 });
+    const pkg = curatorFor("variogram").curate(t.observation, t.reference);
+    const v = pkg.variogram![0];
+    assert.equal(v.historyWindows, 10, "the reference stands in for the history");
+    assert.equal(v.extrapolatedFromLag, 10, "lags past the reference repeat the last estimate");
+    assert.equal(v.gamma.length, 20);
+    assert.equal(v.gamma[0], 0);
+    assert.equal(v.df, 1);
+  });
+
+  it("counts the step runs into the Šidák family, and only under this null", () => {
+    const t = latentTrial(5, { H: 50, K: 10, per: 35, rho: 0, sd: 0 });
+    const v = curatorFor("variogram").curate(t.observation, t.reference, { history: t.history });
+    const o = curatorFor("overdispersed").curate(t.observation, t.reference, { history: t.history });
+    assert.equal(v.selection.stepSlots, 3, "10 scorable windows hold at most 3 disjoint 3-window runs");
+    assert.equal(o.selection.stepSlots, undefined);
+    assert.ok(v.selection.effectiveZThreshold > o.selection.effectiveZThreshold);
+  });
+
+  it("leaves the other nulls' packages without a variogram field, history or not", () => {
+    const t = latentTrial(5, { H: 50, K: 10, per: 35, rho: 0, sd: 0.1 });
+    for (const m of ["independent", "overdispersed"] as const) {
+      const withHistory = curatorFor(m).curate(t.observation, t.reference, { history: t.history });
+      const without = curatorFor(m).curate(t.observation, t.reference);
+      assert.equal(withHistory.variogram, undefined);
+      const { generatedAt: _a, ...a } = withHistory;
+      const { generatedAt: _b, ...b } = without;
+      assert.deepEqual(a, b, `${m} must ignore the history entirely`);
+    }
+  });
+});
+
 describe("studentUpperTail", () => {
   it("matches reference Student-t tails", () => {
     for (const [t, df, expected] of [[2, 5, 0.05097], [1, 1, 0.25], [3, 10, 0.006672], [5, 3, 0.007696], [0, 7, 0.5]]) {

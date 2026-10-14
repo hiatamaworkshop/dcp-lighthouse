@@ -25,7 +25,9 @@ import { createReadStream, existsSync, readFileSync, readdirSync } from "node:fs
 import { createGunzip } from "node:zlib";
 import { createInterface } from "node:readline";
 import { join } from "node:path";
-import { applyLens, floorToWindow, MIN_VALID_COUNT, resolveAlign, type LensEvent } from "./lens.js";
+import {
+  applyLens, floorToWindow, MIN_VALID_COUNT, resolveAlign, type LensEvent, type LensResult, type WindowStat,
+} from "./lens.js";
 import type { QObserveParams } from "./q-registry.js";
 import { SnapshotCurator, familyWiseAlpha, type SnapshotPackage, type SnapshotTile } from "./snapshot-curator.js";
 import { mulberry32 } from "./calibration.js";
@@ -338,10 +340,10 @@ export const H3_NULL_MODEL = "overdispersed";
 
 export function curatorForNullModel(name: string | undefined, baseZ = 2.0): SnapshotCurator | undefined {
   if (name === undefined || name === "independent") return undefined;
-  if (name === "overdispersed") {
-    return new SnapshotCurator({ spikeZThreshold: baseZ, includeBaseline: true, nullModel: "overdispersed" });
+  if (name === "overdispersed" || name === "variogram") {
+    return new SnapshotCurator({ spikeZThreshold: baseZ, includeBaseline: true, nullModel: name });
   }
-  throw new RangeError(`unknown --null-model "${name}" (independent | overdispersed)`);
+  throw new RangeError(`unknown --null-model "${name}" (independent | overdispersed | variogram)`);
 }
 
 // ── Shuffle null ────────────────────────────────────────────────────────────
@@ -845,7 +847,11 @@ export interface DiurnalResult {
  */
 export function runDiurnalAlarms(
   stream: LoadedStream,
-  opts: { spanMs: number; lens: QObserveParams; strideMs?: number; baseZThreshold?: number; curator?: SnapshotCurator },
+  opts: {
+    spanMs: number; lens: QObserveParams; strideMs?: number; baseZThreshold?: number; curator?: SnapshotCurator;
+    /** Hand the curator this much history before each reference (CurationContext.history); trials then read one grid (windowedStream). */
+    historyMs?: number;
+  },
 ): DiurnalResult {
   const baseZ = opts.baseZThreshold ?? 2.0;
   const curator = opts.curator ?? newCurator(baseZ);
@@ -858,14 +864,20 @@ export function runDiurnalAlarms(
   }
   const level = sum.map((s, h) => (cnt[h] > 0 ? s / cnt[h] : NaN));
 
-  const { trials, blind } = planTrials(stream.events, stream.gaps, {
-    spanMs: opts.spanMs, strideMs: opts.strideMs ?? opts.spanMs / 6,
-  });
+  const strideMs = opts.strideMs ?? opts.spanMs / 6;
+  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs: opts.spanMs, strideMs });
+  const grid = opts.historyMs === undefined ? undefined : gridFor(stream, opts.lens, opts.spanMs, strideMs);
   const arms = Array.from({ length: 24 }, tally);
   for (const t of trials) {
-    const ref = sliceEvents(stream.events, t.refFrom, t.obsFrom);
-    const obs = sliceEvents(stream.events, t.obsFrom, t.obsTo);
-    scoreInto(arms[new Date(t.obsFrom + HOUR_MS / 2).getUTCHours()], curator.curate(applyLens(obs, opts.lens), applyLens(ref, opts.lens)));
+    let pkg: SnapshotPackage;
+    if (grid === undefined) {
+      const ref = sliceEvents(stream.events, t.refFrom, t.obsFrom);
+      const obs = sliceEvents(stream.events, t.obsFrom, t.obsTo);
+      pkg = curator.curate(applyLens(obs, opts.lens), applyLens(ref, opts.lens));
+    } else {
+      pkg = curateOnGrid(curator, grid, t, opts.historyMs!);
+    }
+    scoreInto(arms[new Date(t.obsFrom + HOUR_MS / 2).getUTCHours()], pkg);
   }
   const bins = arms.map((a, hour): DiurnalBin => ({
     hour, trials: a.trials, flagged: a.flagged, rate: a.trials > 0 ? a.flagged / a.trials : 0,
@@ -878,6 +890,129 @@ export function runDiurnalAlarms(
     blindByGap: blind,
     unusableReference: arms.reduce((a, b) => a + b.unusableReference, 0),
     designTarget: familyWiseAlpha(baseZ),
+  };
+}
+
+// ── Variogram null: trials on one grid, with history ───────────────────────
+
+/** A recorded stream windowed once (windowedStream). */
+export interface WindowedStream {
+  /** The windows lying wholly inside [from, to), as a LensResult (groups included when the lens has them). */
+  slice(from: number, to: number): LensResult;
+}
+
+/**
+ * A recorded stream windowed ONCE, on one grid anchored at its first event, so
+ * a trial's observation, reference and history (CurationContext.history, the
+ * variogram null's) are slices of the same windows: the lags the null reads
+ * are exact, and a day of history costs a slice instead of a re-aggregation
+ * per trial. Windows touching a collection gap are dropped — blind, not data.
+ */
+export function windowedStream(stream: LoadedStream, lens: QObserveParams): WindowedStream {
+  const origin = stream.events.length > 0 ? stream.events[0].ts : 0;
+  const full = applyLens(stream.events, { ...lens, origin });
+  const seen = (ws: WindowStat[]): WindowStat[] => ws.filter((w) => !overlapsGap(stream.gaps, w.windowStart, w.windowEnd));
+  const windows = seen(full.windows);
+  const groups = full.groups?.map((g) => ({ ...g, windows: seen(g.windows) }));
+  const cut = (ws: WindowStat[], from: number, to: number): WindowStat[] => {
+    let lo = 0;
+    let hi = ws.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (ws[mid].windowStart < from) lo = mid + 1;
+      else hi = mid;
+    }
+    const out: WindowStat[] = [];
+    for (let i = lo; i < ws.length && ws[i].windowStart < to; i++) if (ws[i].windowEnd <= to) out.push(ws[i]);
+    return out;
+  };
+  return {
+    slice: (from, to) => ({
+      window_ms: full.window_ms,
+      windows: cut(windows, from, to),
+      ...(groups !== undefined ? { groups: groups.map((g) => ({ ...g, windows: cut(g.windows, from, to) })) } : {}),
+    }),
+  };
+}
+
+/** windowedStream, refusing trial spans that would cut windows (span and stride must be multiples of window_ms). */
+function gridFor(stream: LoadedStream, lens: QObserveParams, spanMs: number, strideMs: number): WindowedStream {
+  const w = lens.window_ms ?? 1_000;
+  if (spanMs % w !== 0 || strideMs % w !== 0) {
+    throw new RangeError(`span ${spanMs} ms and stride ${strideMs} ms must be multiples of window_ms ${w} to share one grid`);
+  }
+  return windowedStream(stream, lens);
+}
+
+function curateOnGrid(curator: SnapshotCurator, grid: WindowedStream, t: TrialPlan, historyMs: number): SnapshotPackage {
+  return curator.curate(grid.slice(t.obsFrom, t.obsTo), grid.slice(t.refFrom, t.obsFrom), {
+    ...(historyMs > 0 ? { history: grid.slice(t.refFrom - historyMs, t.obsFrom) } : {}),
+  });
+}
+
+export interface PositionProfile {
+  trials: number;
+  flagged: number;
+  rate: number;
+  /** Packages carrying a step tile. */
+  stepPackages: number;
+  unusableReference: number;
+  blindByGap: number;
+  designTarget: number;
+  /**
+   * Spike/dip tiles per trial-window, by where the window sits in the
+   * observation span, in `bins` equal parts (first = next to the reference).
+   * Flat under a null that is right about how the latent rate drifts; rising
+   * when the comparison's variance grows with lag faster than the null allows
+   * (ROADMAP_BRIEF.md 2026-10-14 (4)).
+   */
+  perWindowByPosition: number[];
+}
+
+/**
+ * "Preceding span as reference" trials on one grid, scored with `curator` and
+ * — when `historyMs` > 0 — that much history before each reference, with the
+ * alarms resolved by position in the observation span. Every null model can
+ * be run through it on identical windows, so their figures differ by the
+ * null alone.
+ */
+export function runPositionProfile(
+  stream: LoadedStream,
+  opts: HarnessOptions & { historyMs?: number; bins?: number },
+): PositionProfile {
+  const spanMs = opts.spanMs ?? 10_000;
+  const strideMs = opts.strideMs ?? 2 * spanMs;
+  const baseZ = opts.baseZThreshold ?? 2.0;
+  const curator = opts.curator ?? newCurator(baseZ);
+  const lens: QObserveParams = opts.lens ?? { window_ms: 1_000 };
+  const windowMs = lens.window_ms ?? 1_000;
+  const K = spanMs / windowMs;
+  const bins = Math.min(K, opts.bins ?? 6);
+  const grid = gridFor(stream, lens, spanMs, strideMs);
+  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs, strideMs });
+  const arm = tally();
+  let stepPackages = 0;
+  const tiles = new Array<number>(K).fill(0);
+  for (const t of trials) {
+    const pkg = curateOnGrid(curator, grid, t, opts.historyMs ?? 0);
+    scoreInto(arm, pkg);
+    if (!pkg.referenceUsable) continue;
+    if (pkg.tiles.some((x) => x.shapeTag === "step_up" || x.shapeTag === "step_down")) stepPackages++;
+    for (const x of pkg.tiles) {
+      if (x.shapeTag !== "spike" && x.shapeTag !== "dip") continue;
+      tiles[Math.min(K - 1, Math.max(0, Math.floor((x.regionStart - t.obsFrom) / windowMs)))]++;
+    }
+  }
+  const perWindowByPosition = Array.from({ length: bins }, (_, b) => {
+    const from = Math.round((b * K) / bins);
+    const to = Math.round(((b + 1) * K) / bins);
+    let n = 0;
+    for (let i = from; i < to; i++) n += tiles[i];
+    return arm.trials > 0 ? n / (arm.trials * (to - from)) : 0;
+  });
+  return {
+    trials: arm.trials, flagged: arm.flagged, rate: arm.trials > 0 ? arm.flagged / arm.trials : 0, stepPackages,
+    unusableReference: arm.unusableReference, blindByGap: blind, designTarget: familyWiseAlpha(baseZ), perWindowByPosition,
   };
 }
 
