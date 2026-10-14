@@ -67,8 +67,8 @@ export const HOLDOUT_TO_DAY = "2026-10-05";
 /**
  * The gate for stage 1's reports (run-real-data-report, run-otel-report) now
  * that their holdout is spent (decided 2026-10-06): exploration may read any
- * day OUTSIDE the two holdouts — stage 1's (looked at once, never again) and
- * H3's (its one look belongs to run-h3-report) — and `--holdout` is refused
+ * day OUTSIDE the two holdouts — stage 1's and H3's (each looked at once,
+ * never again) — and `--holdout` is refused
  * outright. Before this, these reports refused every day from 2026-10-03 on,
  * which also locked out the exploration days the next statistical task needs.
  * Returns the refusal message, or undefined when the range may be read.
@@ -86,6 +86,19 @@ export function stage1RangeRefusal(fromDay: string, toDay: string, holdout: bool
     }
   }
   return undefined;
+}
+
+/**
+ * run-h3-report's gate, now that H3's single look was spent on 2026-10-14
+ * (ROADMAP_BRIEF.md 2026-10-14): the same as stage 1's — exploration outside
+ * both holdouts, `--holdout` refused outright. Until then run-h3-report only
+ * refused a holdout read that came too early, so the spent look could be taken again.
+ */
+export function h3RangeRefusal(fromDay: string, toDay: string, holdout: boolean): string | undefined {
+  if (holdout) {
+    return `refusing: H3's holdout (${H3_HOLDOUT_FROM_DAY}…${H3_HOLDOUT_TO_DAY}) was spent on 2026-10-14 — it had one look`;
+  }
+  return stage1RangeRefusal(fromDay, toDay, false);
 }
 
 /**

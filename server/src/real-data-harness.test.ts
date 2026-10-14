@@ -25,6 +25,7 @@ import {
   runNullCalibration,
   shuffleValues,
   stage1RangeRefusal,
+  h3RangeRefusal,
   sliceEvents,
   synthesizeStream,
   thinByTrace,
@@ -463,5 +464,15 @@ describe("stage 1's reports after their holdout was spent", () => {
     assert.match(stage1RangeRefusal("2026-10-10", "2026-10-11", false) ?? "", /H3's holdout/);
     assert.match(stage1RangeRefusal("2026-09-29", "2026-10-20", false) ?? "", /holdout/);
     assert.match(stage1RangeRefusal("2026-10-03", "2026-10-05", true) ?? "", /spent/);
+  });
+});
+
+describe("run-h3-report after H3's holdout was spent (2026-10-14)", () => {
+  it("refuses --holdout outright, even for exactly the holdout days, and explores outside both holdouts", () => {
+    assert.match(h3RangeRefusal("2026-10-11", "2026-10-13", true) ?? "", /H3's holdout .* spent/);
+    assert.equal(h3RangeRefusal("2026-10-07", "2026-10-10", false), undefined);
+    assert.equal(h3RangeRefusal("2026-10-14", "2026-10-14", false), undefined);
+    assert.match(h3RangeRefusal("2026-10-10", "2026-10-11", false) ?? "", /H3's holdout/);
+    assert.match(h3RangeRefusal("2026-10-01", "2026-10-03", false) ?? "", /stage 1's holdout/);
   });
 });

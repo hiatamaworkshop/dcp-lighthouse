@@ -290,6 +290,8 @@ export interface CurationOptions {
   /**
    * Ratio of mean-shift sustained over at least stepThresholdWindows consecutive
    * windows to classify "step_up" / "step_down" (default 0.3 = 30% shift).
+   * This defines the SHAPE only; the run must also clear the spike/dip gate
+   * (see detectSteps).
    */
   stepThreshold?: number;
   /**
@@ -333,9 +335,8 @@ export interface CurationOptions {
    * into the exact path's Dirichlet concentration. Where the reference shows no
    * excess spread (τ̂² = 0) the gate is bit-identical to "independent".
    *
-   * Step tiles are gated too under "overdispersed": the stepThreshold ratio
-   * still defines the shape, and the run must also clear the spike/dip gate
-   * with τ² in its error (see the call to detectSteps).
+   * Step tiles are gated under both models; "overdispersed" adds τ² to the
+   * run's error (see detectSteps).
    */
   nullModel?: "independent" | "overdispersed";
 }
@@ -553,17 +554,18 @@ export class SnapshotCurator {
       }
 
       // ── 2. Sustained step changes ──────────────────────────────
-      // Under the overdispersed null a step is also a STATISTICAL claim: the
-      // ratio rule still defines the shape (≥ stepThreshold, ≥ stepWindowCount
-      // windows), but the run must clear the same Šidák gate spike/dip use,
-      // against an SE that carries τ². Under "independent" the ratio rule alone
-      // decides, exactly as every pre-2026-10-07 figure was measured. On real
-      // Wikimedia data the ungated ratio rule was most of what remained after
-      // the overdispersed spike/dip gate (ROADMAP_BRIEF.md 2026-10-07).
+      // A step is a STATISTICAL claim under both nulls: the ratio rule defines
+      // the shape (≥ stepThreshold, ≥ stepWindowCount windows), and the run must
+      // clear the same Šidák gate spike/dip use. The ratio alone is blind to
+      // noise — a 30% shift is under one window-SD at a 0.4 rate with 10 events
+      // per window, so the ungated rule raised a step in 72% of iid packages
+      // there (98% at 2 events). It was gated under "overdispersed" only until
+      // ROADMAP_BRIEF.md 2026-10-14 (3); every figure up to then, including the
+      // stage-1 and H3 judgments, was measured with the ungated rule under
+      // "independent" (commit d5d13d4).
       tiles.push(
         ...detectSteps(
-          unit.windows, unit.ref, this.opts.stepThreshold, this.opts.stepWindowCount, unit.group,
-          overdispersed ? effectiveZThreshold : undefined,
+          unit.windows, unit.ref, this.opts.stepThreshold, this.opts.stepWindowCount, effectiveZThreshold, unit.group,
         ),
       );
 
@@ -1518,8 +1520,8 @@ function detectSteps(
   ref: RefStats,
   threshold: number,
   minRun: number,
+  gateZ: number,
   group?: string,
-  gateZ?: number,
 ): SnapshotTile[] {
   if (windows.length < minRun) return [];
   // No yardstick, no comparison — mirrors spike/dip's silent skip when the
@@ -1549,16 +1551,15 @@ function detectSteps(
     const independentVar = ref.variance * (1 / runEffectiveN + 1 / ref.effectiveN);
     const se = Math.sqrt(independentVar);
     const z = se > 0 ? Math.abs(runMean - ref.mean) / se : 0;
-    if (gateZ !== undefined) {
-      // Overdispersed null only (see the gateZ note at the call site). The run's
-      // latent level is ONE draw of τ², not m independent ones: consecutive
-      // windows are autocorrelated on real data (lag-1 0.17–0.33), so dividing
-      // τ² by the run length would credit a sustained drift with evidence it
-      // does not carry. Conservative by construction.
-      const odVar = independentVar + (ref.tau2 ?? 0) * (1 + (ref.refShare ?? 0));
-      const zGate = odVar > 0 ? studentizeWith(Math.abs(runMean - ref.mean) / Math.sqrt(odVar), independentVar, ref) : 0;
-      if (zGate < gateZ) return;
-    }
+    // See the gate note at the call site. Under "independent" ref.tau2 is
+    // absent, so odVar is independentVar and studentizeWith returns z as is.
+    // Under "overdispersed" the run's latent level is ONE draw of τ², not m
+    // independent ones: consecutive windows are autocorrelated on real data
+    // (lag-1 0.17–0.33), so dividing τ² by the run length would credit a
+    // sustained drift with evidence it does not carry. Conservative by construction.
+    const odVar = independentVar + (ref.tau2 ?? 0) * (1 + (ref.refShare ?? 0));
+    const zGate = odVar > 0 ? studentizeWith(Math.abs(runMean - ref.mean) / Math.sqrt(odVar), independentVar, ref) : 0;
+    if (zGate < gateZ) return;
     tiles.push({
       label: `${tag}${shapeTag} t=${windows[start].windowStart}–${windows[end].windowEnd} (${(shift * 100).toFixed(1)}% shift)`,
       shapeTag,
@@ -1573,7 +1574,11 @@ function detectSteps(
 
   for (let i = 0; i < windows.length; i++) {
     const delta = (windows[i].mean - ref.mean) / (ref.mean || 1);
-    const dir: 1 | -1 | null = delta >= threshold ? 1 : delta <= -threshold ? -1 : null;
+    // A window spike/dip cannot score cannot carry a run either: it breaks
+    // one, the way a below-threshold window does. Otherwise runs of 1–2-event
+    // windows, whose means jump between 0 and 1, pass the ratio rule by chance.
+    const dir: 1 | -1 | null =
+      !isScorable(windows[i]) ? null : delta >= threshold ? 1 : delta <= -threshold ? -1 : null;
     if (dir !== null && dir === runDir) {
       // continue run
     } else {

@@ -434,6 +434,54 @@ describe("SnapshotCurator — step change detection (AR signal)", () => {
   });
 });
 
+describe("SnapshotCurator — a step is a statistical claim, not a ratio (ROADMAP_BRIEF.md 2026-10-14 (3))", () => {
+  // 60 one-second windows each side, iid Bernoulli: every step tile is a false alarm.
+  const stepRate = (passRate: number, perWindow: number, seeds = 200) => {
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false });
+    let n = 0;
+    for (let s = 1; s <= seeds; s++) {
+      const pkg = curator.curate(
+        bernoulliResult(s * 104729, passRate, 60_000, 60_000, 60 * perWindow),
+        bernoulliResult(s * 7919, passRate, 0, 60_000, 60 * perWindow),
+      );
+      if (pkg.tiles.some((t) => t.shapeTag === "step_up" || t.shapeTag === "step_down")) n++;
+    }
+    return n / seeds;
+  };
+
+  it("does not raise steps on a low-rate iid stream where 30% is under one window-SD", () => {
+    // 0.4 with 10 events per window: SD of a window mean ≈ 39% of the rate.
+    // The ungated ratio rule fired in 70% of these packages (400 seeds).
+    const r = stepRate(0.4, 10);
+    assert.ok(r <= 0.08, `step false-alarm rate ${r}`);
+  });
+
+  it("cannot build a run out of windows too thin to score", () => {
+    // 2 events per window: means jump between 0, 0.5 and 1. Measured 98% before.
+    const r = stepRate(0.4, 2);
+    assert.ok(r <= 0.03, `step false-alarm rate ${r}`);
+  });
+
+  it("still reports a sustained regression past the ratio on real pass/fail aggregation", () => {
+    // Deep enough that the ratio rule itself never breaks the run (a 0.60 window
+    // crosses 0.665 about one time in six), so a miss here could only be the gate.
+    const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false });
+    let hit = 0;
+    for (let s = 1; s <= 50; s++) {
+      const rand = rng32(s);
+      const events: LensEvent[] = [];
+      for (let k = 0; k < 10; k++) {
+        for (let i = 0; i < 50; i++) {
+          events.push({ ts: 10_000 + k * 1000 + Math.floor(rand() * 1000), value: rand() < (k >= 5 ? 0.5 : 0.95) ? 1 : 0 });
+        }
+      }
+      const pkg = curator.curate(applyLens(events, { window_ms: 1000, align: "epoch" }), bernoulliResult(s * 7919, 0.95, 0, 10_000, 500));
+      if (pkg.tiles.some((t) => t.shapeTag === "step_down" && t.regionStart >= 15_000)) hit++;
+    }
+    assert.ok(hit >= 48, `0.95 → 0.50 over five 50-event windows — ${hit}/50`);
+  });
+});
+
 // ── Divergence detection (parallel overlays) ────────────────────────────────
 
 describe("SnapshotCurator — divergence across parallel lenses", () => {
@@ -1353,8 +1401,11 @@ describe("SnapshotCurator — overdispersed null (events in a window are not ind
     assert.deepEqual(restB, restA);
   });
 
-  it("gates step tiles too: the ratio rule alone fires on a clustered null, the gated rule does not", () => {
+  it("gates step tiles with τ²: the independent gate fires on a clustered null, the overdispersed one does not", () => {
     // Measured (300 seeds, latent sd 0.15): independent 25 step packages, overdispersed 0.
+    // The count under "independent" is the same with or without its own gate
+    // (2026-10-14 (3)): at 35 events per window the clustered runs clear an
+    // SE that leaves τ² out by a wide margin.
     const steps = (nullModel: "independent" | "overdispersed") => {
       const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: false, nullModel });
       let n = 0;
@@ -1364,7 +1415,7 @@ describe("SnapshotCurator — overdispersed null (events in a window are not ind
       }
       return n;
     };
-    assert.ok(steps("independent") >= 15, "the ungated ratio rule must be visibly firing here");
+    assert.ok(steps("independent") >= 15, "the independent gate must be visibly firing here");
     assert.ok(steps("overdispersed") <= 3);
   });
 

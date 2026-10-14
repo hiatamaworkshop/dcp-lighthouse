@@ -9,21 +9,17 @@
  * Per UTC hour: alarm rate, and the bot-share curve's slope at that hour. The
  * pre-registered rule reads the 60-minute arm's correlation (h3Verdict).
  *
- * H3 has its own holdout (H3_HOLDOUT_FROM_DAY…H3_HOLDOUT_TO_DAY): days in it are
- * refused without `--holdout`, and `--holdout` must cover exactly those days —
- * it is the single final look, as for stage 1.
- *
- * The judgment's null model is H3_NULL_MODEL ("overdispersed", revision
- * 2026-10-07 (2)) and is the default here. `--null-model independent` is for
- * exploration comparisons only; `--holdout` refuses any other model, and prints
- * the independent 60-minute arm beside the verdict as a reference line (the
- * single look covers both, so the switch's effect stays on record).
+ * H3's holdout (H3_HOLDOUT_FROM_DAY…H3_HOLDOUT_TO_DAY) had its single look on
+ * 2026-10-14 under H3_NULL_MODEL ("overdispersed", revision 2026-10-07 (2)),
+ * with the code at commit 9d90c16 (output: data/logs/h3-holdout-report-20261014.txt).
+ * Like stage 1's reports, this one now reads only days outside both holdouts
+ * and refuses `--holdout` (h3RangeRefusal). The default null model is still
+ * H3_NULL_MODEL; `--null-model independent` is for comparison.
  */
 import { join } from "node:path";
 import {
-  H3_HOLDOUT_FROM_DAY,
-  H3_HOLDOUT_TO_DAY,
   H3_NULL_MODEL,
+  h3RangeRefusal,
   h3Verdict,
   curatorForNullModel,
   loadWikiDir,
@@ -41,27 +37,12 @@ const holdout = process.argv.includes("--holdout");
 const nullModel = arg("null-model") ?? H3_NULL_MODEL;
 const curator = curatorForNullModel(nullModel);
 if (fromDay === undefined || toDay === undefined) {
-  console.error("usage: run-h3-report --from YYYY-MM-DD --to YYYY-MM-DD [--holdout] [--null-model independent|overdispersed]");
+  console.error("usage: run-h3-report --from YYYY-MM-DD --to YYYY-MM-DD [--null-model independent|overdispersed]");
   process.exit(2);
 }
-if (holdout && nullModel !== H3_NULL_MODEL) {
-  console.error(`refusing: H3's judgment uses the ${H3_NULL_MODEL} null (revision 2026-10-07 (2)); --null-model ${nullModel} is exploration only.`);
-  process.exit(2);
-}
-if (holdout && (fromDay !== H3_HOLDOUT_FROM_DAY || toDay !== H3_HOLDOUT_TO_DAY)) {
-  console.error(`refusing: --holdout reads exactly ${H3_HOLDOUT_FROM_DAY}…${H3_HOLDOUT_TO_DAY}, H3's judgment days.`);
-  process.exit(2);
-}
-// The single look spent on a half-collected holdout cannot be taken back.
-if (holdout && Date.now() < Date.parse(`${H3_HOLDOUT_TO_DAY}T00:00:00Z`) + 86_400_000) {
-  console.error(`refusing: H3's holdout runs until the end of ${H3_HOLDOUT_TO_DAY} (UTC); it is not complete yet.`);
-  process.exit(2);
-}
-if (!holdout && toDay >= H3_HOLDOUT_FROM_DAY) {
-  console.error(
-    `refusing: ${toDay} reaches H3's holdout (${H3_HOLDOUT_FROM_DAY}…). ` +
-      `Exploration must stop before it; --holdout is the single final look.`,
-  );
+const refusal = h3RangeRefusal(fromDay, toDay, holdout);
+if (refusal !== undefined) {
+  console.error(refusal);
   process.exit(2);
 }
 
@@ -73,7 +54,7 @@ const hours = stream.events.length > 0
 const pct = (x: number) => `${(100 * x).toFixed(1)}%`;
 console.log(
   `${stream.events.length} events over ${hours.toFixed(1)} h, ${stream.gaps.length} collection gaps ` +
-    `(${fromDay}…${toDay}${holdout ? ", HOLDOUT" : ""}, null model: ${nullModel})`,
+    `(${fromDay}…${toDay}, null model: ${nullModel})`,
 );
 
 let verdict = "";
@@ -96,14 +77,3 @@ for (const [label, spanMs, windowMs] of [["60 min", 3_600_000, 60_000], ["1 min"
   if (spanMs === 3_600_000) verdict = h3Verdict(r);
 }
 console.log(`\nH3 (pre-registered rule, 60-minute arm, ${nullModel} null): ${verdict}`);
-if (holdout) {
-  // Reference only — the verdict above is the judgment. Printed in the same
-  // single look so the null-model switch's effect is on record beside it.
-  const ind = runDiurnalAlarms(stream, { spanMs: 3_600_000, lens: { window_ms: 60_000 } });
-  const t = ind.bins.reduce((a, b) => a + b.trials, 0);
-  const f = ind.bins.reduce((a, b) => a + b.flagged, 0);
-  console.log(
-    `reference (independent null, not the judgment): alarm ${pct(t > 0 ? f / t : 0)} (${f}/${t}) | ` +
-      `r ${ind.correlation.toFixed(3)} | the rule would read: ${h3Verdict(ind)}`,
-  );
-}
