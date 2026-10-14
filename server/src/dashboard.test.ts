@@ -20,10 +20,10 @@ import {
   liveSpans,
   maxCoarseWindowMs,
   isReroutedAgentBacked,
-  replaySpanWithReference,
 } from "./dashboard.js";
 import { RetentionBuffer } from "./retention-buffer.js";
 import { SnapshotCurator } from "./snapshot-curator.js";
+import { Comparator } from "./comparison.js";
 import { applyLens, type LensEvent } from "./lens.js";
 
 const WINDOW_MS = 10_000;
@@ -441,13 +441,13 @@ async function startReplayServer(
   buf: RetentionBuffer<{ ts: number; value: number }>,
 ): Promise<{ base: string; close: () => Promise<void> }> {
   const registry = new QRegistry();
-  const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+  const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true });
   const server = new DashboardServer(
     { getCurrentLoad: () => ({}) } as never,
     null as never,
     { reset: () => {} } as never,
     registry,
-    curator,
+    comparator,
     new ObservationOverlay(registry),
     buf,
   ).start({ port: 0 });
@@ -466,8 +466,13 @@ async function startReplayServer(
 // (2010..3000, ROADMAP_BRIEF.md 2026-07-25 "参照レンズ設計") reach back to
 // 2010, mostly below the cutoff: exactly the span the reference zone alone can
 // answer for.
+//
+// Values cycle with period 3, not 2: 1-in-2 thinning keeps every other event,
+// so a period-2 stream thins to a single value and a zero-variance (blind)
+// reference. That fixture passed only because the reference used to end AT
+// fromTs and so also counted the observation's first event (2026-10-14 (8)).
 const seedOldStream = (buf: RetentionBuffer<{ ts: number; value: number }>): void => {
-  for (let i = 0; i < 400; i++) buf.observe({ ts: i * 10, value: i % 2 }, "s");
+  for (let i = 0; i < 400; i++) buf.observe({ ts: i * 10, value: i % 3 === 0 ? 0 : 1 }, "s");
 };
 const OLD_SPAN_QUERY = "fromTs=3000&toTs=3990&window_ms=1000000";
 
@@ -599,17 +604,17 @@ function seedGateFixture(buf: RetentionBuffer<AgentEvent>): void {
 test("isReroutedAgentBacked: backed when the named agent has a curator-flagged tile at snapshotTs", () => {
   const buf = new RetentionBuffer<AgentEvent>(agentExtractor, { retentionWindowMs: 120_000 });
   seedGateFixture(buf);
-  const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
-  assert.equal(isReroutedAgentBacked(buf, curator, COARSE_LENS, "agent-C", GATE_NOW), true);
+  const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true });
+  assert.equal(isReroutedAgentBacked(buf, comparator, COARSE_LENS, {}, "agent-C", GATE_NOW), true);
 });
 
 test("isReroutedAgentBacked: NOT backed when the named agent has no flagged tile (wrong target)", () => {
   const buf = new RetentionBuffer<AgentEvent>(agentExtractor, { retentionWindowMs: 120_000 });
   seedGateFixture(buf);
-  const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+  const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true });
   // agent-D never dips in this fixture — a claim naming it must be rejected
   // even though agent-C's real dip did produce a package with real tiles.
-  assert.equal(isReroutedAgentBacked(buf, curator, COARSE_LENS, "agent-D", GATE_NOW), false);
+  assert.equal(isReroutedAgentBacked(buf, comparator, COARSE_LENS, {}, "agent-D", GATE_NOW), false);
 });
 
 test("isReroutedAgentBacked: blind (no comparison possible) never reads as backed", () => {
@@ -617,8 +622,8 @@ test("isReroutedAgentBacked: blind (no comparison possible) never reads as backe
   // (needs 60s of history at window_ms=10_000, count=3; this buffer keeps 1s).
   const buf = new RetentionBuffer<AgentEvent>(agentExtractor, { retentionWindowMs: 1_000 });
   seedGateFixture(buf);
-  const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
-  assert.equal(isReroutedAgentBacked(buf, curator, COARSE_LENS, "agent-C", GATE_NOW), false);
+  const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true });
+  assert.equal(isReroutedAgentBacked(buf, comparator, COARSE_LENS, {}, "agent-C", GATE_NOW), false);
 });
 
 test("isReroutedAgentBacked: an unscorable statistic never reads as backed (2026-08-25 review)", () => {
@@ -630,37 +635,11 @@ test("isReroutedAgentBacked: an unscorable statistic never reads as backed (2026
   // legal here; what it produces is a package with no judgment in it.
   const buf = new RetentionBuffer<AgentEvent>(agentExtractor, { retentionWindowMs: 120_000 });
   seedGateFixture(buf);
-  const curator = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+  const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true });
   const medianLens = { ...COARSE_LENS, agg_func: "median" as const };
-  assert.equal(isReroutedAgentBacked(buf, curator, medianLens, "agent-C", GATE_NOW), false);
+  assert.equal(isReroutedAgentBacked(buf, comparator, medianLens, {}, "agent-C", GATE_NOW), false);
   // Same fixture, same agent, mean lens: backed. The difference is the lens,
   // not the data — which is exactly what makes the false above a misattribution
   // if it were reported as "the model's aim was off".
-  assert.equal(isReroutedAgentBacked(buf, curator, COARSE_LENS, "agent-C", GATE_NOW), true);
-});
-
-// ── referenceCoverage (2026-09-27 review, finding 3d) ────────────────────────
-
-test("replaySpanWithReference declares how much of the reference span held events", () => {
-  // Reproduces the RC-after-/demo/stop shape: the stream restarted a second
-  // before the replay's fromTs, so the equal-length reference span before it
-  // is empty except for its last window — "usable", but barely there.
-  const T0 = 1_000_000;
-  const SPAN = 16_000;
-  const curator = new SnapshotCurator({ spikeZThreshold: 2.0 });
-  const lens = { window_ms: 1_000, align: "epoch" as const };
-
-  const sparse = new RetentionBuffer<LensEvent>((raw) => raw, { retentionWindowMs: 120_000 });
-  for (let ts = T0 + SPAN - 1_000; ts < T0 + 2 * SPAN; ts += 20) {
-    sparse.observe({ ts, value: ts % 7 === 0 ? 0 : 1 }, "test_result:v1");
-  }
-  const thin = replaySpanWithReference(sparse, curator, lens, T0 + SPAN, T0 + 2 * SPAN);
-  assert.equal(thin.referenceUsable, true, "the old flag alone calls this usable");
-  assert.equal(thin.referenceCoverage, 1 / 16, "…while only 1 of 16 reference windows held events");
-
-  const full = new RetentionBuffer<LensEvent>((raw) => raw, { retentionWindowMs: 120_000 });
-  for (let ts = T0; ts < T0 + 2 * SPAN; ts += 20) {
-    full.observe({ ts, value: ts % 7 === 0 ? 0 : 1 }, "test_result:v1");
-  }
-  assert.equal(replaySpanWithReference(full, curator, lens, T0 + SPAN, T0 + 2 * SPAN).referenceCoverage, 1);
+  assert.equal(isReroutedAgentBacked(buf, comparator, COARSE_LENS, {}, "agent-C", GATE_NOW), true);
 });

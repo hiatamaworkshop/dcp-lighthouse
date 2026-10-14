@@ -254,3 +254,48 @@ describe("QRegistry / applyLens — one rulebook, no drift", () => {
     }
   });
 });
+
+describe("QRegistry — compare layer (2026-10-14 (8))", () => {
+  it("parses compare scopes and resolves them most-specific first", () => {
+    assert.deepEqual(parseScope("compare:test_result:v1#coarse"), { layer: "compare", target: "test_result:v1", view: "coarse" });
+    const reg = new QRegistry();
+    reg.set("compare:*", { null_model: "overdispersed" });
+    assert.deepEqual(reg.getCompare("test_result:v1", "coarse"), { null_model: "overdispersed" });
+    reg.set("compare:test_result:v1", { reference_windows: 5 });
+    assert.deepEqual(reg.getCompare("test_result:v1", "coarse"), { reference_windows: 5 });
+    reg.set("compare:test_result:v1#coarse", { reference: "preceding" });
+    assert.deepEqual(reg.getCompare("test_result:v1", "coarse"), { reference: "preceding" });
+    assert.deepEqual(reg.getCompare("test_result:v1", "fine"), { reference_windows: 5 });
+  });
+
+  it("refuses rows the rulebook does not know, leaving no trace", () => {
+    const reg = new QRegistry();
+    const bad: unknown[] = [
+      { reference: "same_time_yesterday" },
+      { reference_windows: 0 },
+      { reference_windows: 2.5 },
+      { null_model: "variogramm" },
+      { history_ms: 3_600_000 }, // read only by the variogram null
+      { null_model: "overdispersed", history_ms: 3_600_000 },
+      { null_model: "variogram", history_ms: 0 },
+    ];
+    for (const p of bad) assert.throws(() => reg.set("compare:t:v1", p as never), RangeError, JSON.stringify(p));
+    assert.deepEqual(reg.rows(), []);
+    reg.set("compare:t:v1", { null_model: "variogram", history_ms: 86_400_000, reference_windows: 3 });
+    assert.equal(reg.rows().length, 1);
+  });
+
+  it("runs write gates before the store, and only on their own layer", () => {
+    const reg = new QRegistry();
+    const remove = reg.addWriteGate("compare", (p) => {
+      if ((p as { null_model?: string }).null_model === "variogram") throw new RangeError("no history here");
+    });
+    assert.throws(() => reg.set("compare:t:v1", { null_model: "variogram" }), /no history here/);
+    assert.equal(reg.getCompare("t:v1"), undefined);
+    assert.deepEqual(reg.rows(), []);
+    reg.set("observe:t:v1", { window_ms: 1_000 }); // other layers are not gated
+    remove();
+    reg.set("compare:t:v1", { null_model: "variogram" });
+    assert.deepEqual(reg.getCompare("t:v1"), { null_model: "variogram" });
+  });
+});

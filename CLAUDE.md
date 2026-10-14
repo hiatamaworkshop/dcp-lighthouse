@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済・実データ較正期間の第0段階を実装済・収集器の再開欠陥 (2026-09-30) 修正済・H4 のフラグ切替器/コレクタ設定/レポート整備済・H2 の報告に対照と実効 family を併記 (2026-10-01)・H4 の予行で配線確認の障害 3 件を除去 (テスト487件)・第1段階の最終集計 (2026-10-06): H1 支持 / H2 保留 / H4 規則外・過分散の帰無を opt-in で実装・step も判定化 (2026-10-07、テスト503件)・H3 の最終集計 (2026-10-14): 支持・収集停止・step を両方の帰無で判定化・時間依存の帰無 (variogram) を opt-in で実装・その帰無では step を形の説明に格下げ・10 s の残差は量と率が同時に動く窓 = 本物の出来事として残し `volumeRatio` で名乗る (テスト522件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済・実データ較正期間の第0段階を実装済・収集器の再開欠陥 (2026-09-30) 修正済・H4 のフラグ切替器/コレクタ設定/レポート整備済・H2 の報告に対照と実効 family を併記 (2026-10-01)・H4 の予行で配線確認の障害 3 件を除去 (テスト487件)・第1段階の最終集計 (2026-10-06): H1 支持 / H2 保留 / H4 規則外・過分散の帰無を opt-in で実装・step も判定化 (2026-10-07、テスト503件)・H3 の最終集計 (2026-10-14): 支持・収集停止・step を両方の帰無で判定化・時間依存の帰無 (variogram) を opt-in で実装・その帰無では step を形の説明に格下げ・10 s の残差は量と率が同時に動く窓 = 本物の出来事として残し `volumeRatio` で名乗る・比較 (参照・帰無) を `$Q[compare]` に宣言し package が名乗る (テスト531件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -142,6 +142,7 @@ dcp-lighthouse/
       calibration.ts             ← 誤警報率/検出力の測定器 (レンズを引数に取る)
       q-collector-binding.ts     ← $Q[observe] → StCollector 動的 bind
       q-retention-binding.ts     ← $Q[pipeline] → retention 窓
+      comparison.ts              ← $Q[compare] (参照・帰無) を解決して採点する唯一の場所。package が comparison を名乗る
     ── 実データ較正期間 (2026-09-27 事前登録。実データ用・灯台側のみ) ──
       wikimedia-collector.ts     ← EventStreams 収集器 (v1 レコード・欠落=盲目・日別 gzip・
                                    トピック別再開 Last-Event-ID・未確定の穴は collector-state.json)
@@ -566,6 +567,13 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     (10 s 窓、平常の量 2.2〜3.0‰ = 正規並み、2 倍以上 69〜353‰)。量と率が同時に動く = 構成の変化として**本物の出来事のまま残す**。
     gate は不変、variogram の spike/dip に `volumeRatio` (事象数 ÷ 参照窓の中央値) と説明文を添える (他の帰無には付けない)。
     履歴の経験分位点案は 720 窓で 0.08% 分位点が出ないので不採用。次は 2 (比較の `$Q` 宣言)、`volumeRatio` の見せ方もそこで
+  - **2 完了 (2026-10-14 (8)、範囲は user 判断で「宣言と名乗りだけ」)**: `$Q` に 4 つ目の層 `compare:<schema>#<view>`
+    (`reference:"preceding"`・`reference_windows`・`null_model`・`history_ms`、書込時検証)。本番の 4 か所 (ライブ・Brain replay・
+    `/control/replay`・§A ゲート) は `comparison.ts` の `Comparator.compare` 1 つを通り、package が `comparison` (実際に読んだ
+    参照・履歴の区間と帰無) を名乗る。起動時に `compare:test_result:v1` を independent で書くので本番の判定は不変。
+    **variogram は index.ts の書込ゲート (`QRegistry.addWriteGate`) で本番では拒否** — 窓要約の履歴が無いため。窓要約の常設と
+    variogram の本番投入は **2b**。副産物: replay の参照が観測の先頭 1 ms (fromTs の事象) を共有していた重複を解消、
+    これに依存して通っていたテスト固定データ 1 件を修正。span の無い replay 提案は自己参照で採点せず拒否に
 - **予定: 実データ較正期間 (2026-09-27 事前登録・第0段階: Wikimedia 収集器・再生ハーネス/指標 (φ・ラグ1・シャッフル帰無・注入) は実装・合成検算済 2026-09-29、ログオン時起動のタスク登録済。H4 用の OTLP 受け口・真値ログ・p 別の間引き再生も実装済 2026-09-29、OTel Demo の実走は第1段階の1日分)** — 統計層の前提、特に「窓内の事象は独立」
   が実データで成り立つかを、事前に固定した仮説で検証する (実データで調整する期間ではない)。
   データ源は Wikimedia EventStreams (無料・認証不要の SSE、value = bot 編集か否か) と

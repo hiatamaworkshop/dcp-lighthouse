@@ -144,7 +144,7 @@ export interface SnapshotPackage {
   /**
    * Fraction (0–1) of the reference span's windows that actually held events.
    * Set only by callers that know the span they ASKED for (see
-   * replaySpanWithReference in dashboard.ts) — the curator sees the windows it
+   * Comparator.compare in comparison.ts) — the curator sees the windows it
    * was handed, not the request, so it cannot tell a sparse reference from a
    * short one.
    *
@@ -157,6 +157,23 @@ export interface SnapshotPackage {
    * path, so for now it is only reported — and logged by index.ts when low.
    */
   referenceCoverage?: number;
+  /**
+   * The comparison this package came from, as actually run: which spans were
+   * read as reference and history, and the null the gate assumed. Set by the
+   * caller that resolved $Q[compare] (comparison.ts) — the curator sees the
+   * windows it was handed, not the spans or the row that chose them.
+   *
+   * A tile is a relation between two lens outputs (2026-07-25), so without
+   * this a tile cannot say what it was compared against; harmless while there
+   * was one reference and one null in production, not once there are more
+   * (ROADMAP_BRIEF.md 2026-10-14 (2) item 2). Spans are the inclusive
+   * [fromTs, toTs] requests ReplaySource.replay was given.
+   */
+  comparison?: {
+    reference: { kind: "preceding"; fromTs: number; toTs: number };
+    nullModel: NullModel;
+    history?: { fromTs: number; toTs: number; windowCount: number };
+  };
   /**
    * Group labels that were observed but could not be scored, because the
    * reference lens had no same-group population to compare them against (the
@@ -380,8 +397,11 @@ export interface CurationOptions {
    * windows whose volume moved too, kept as real events and labelled with
    * SnapshotTile.volumeRatio (2026-10-14 (7)).
    */
-  nullModel?: "independent" | "overdispersed" | "variogram";
+  nullModel?: NullModel;
 }
+
+/** CurationOptions.nullModel's values — also what $Q[compare]'s `null_model` names. */
+export type NullModel = "independent" | "overdispersed" | "variogram";
 
 /** What curate() may read besides the two lens outputs it compares. */
 export interface CurationContext {

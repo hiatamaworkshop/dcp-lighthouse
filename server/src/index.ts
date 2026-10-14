@@ -12,7 +12,7 @@
  * LensViews react via onChange; DashboardServer streams $Q history.
  */
 
-import { QRegistry } from "./q-registry.js";
+import { QRegistry, parseScope, type QCompareParams } from "./q-registry.js";
 import { MockStreamGenerator } from "./mock-stream-generator.js";
 import { TestorAdapter, testEventExtractor } from "./testor-adapter.js";
 import { RetentionBuffer } from "./retention-buffer.js";
@@ -20,12 +20,13 @@ import { bindPipelineRetention } from "./q-retention-binding.js";
 import { ObservationOverlay } from "./lens-view.js";
 import { validateObserveParams } from "./lens.js";
 import type { QObserveParams } from "./q-registry.js";
-import { SnapshotCurator } from "./snapshot-curator.js";
+import type { SnapshotPackage } from "./snapshot-curator.js";
+import { Comparator } from "./comparison.js";
 import { RuleBrain } from "./rule-brain.js";
 import { BRAIN_ANSWER_SCHEMA, ClaudeBrain } from "./claude-brain.js";
 import { ShadowBrain } from "./shadow-brain.js";
 import { makeAnthropicAsk } from "./anthropic-ask.js";
-import { DashboardServer, replaySpanWithReference, isReroutedAgentBacked } from "./dashboard.js";
+import { DashboardServer, isReroutedAgentBacked } from "./dashboard.js";
 import type { ResettableBrain } from "./brain-adapter.js";
 import type { TestEvent } from "./mock-stream-generator.js";
 
@@ -90,6 +91,25 @@ registry.set("pipeline:*", {
 // PILOT_DATA.md §11). RuleBrain reads this live via QRegistry.getSchema — a
 // write to this scope reconfigures its threshold without a restart.
 registry.set("schema:test_result:v1", { baseline_delta: 0.10 });
+// What every detection compares against, and under which null (ROADMAP_BRIEF.md
+// 2026-10-14 (2) item 2, (8)): the span just before the observation, under the
+// independent null — what the live view, the replay paths and the §A gate each
+// hard-coded until now, so nothing scores differently; the row is now the
+// authority instead of four formulas.
+//
+// The variogram null is refused HERE, not in the rulebook: it is a valid
+// declaration, but it reads a long history of window summaries and this
+// process keeps 120 s of events plus a thinned reference zone — not the
+// 24 spans the null was calibrated with, and thinned (weighted) windows in
+// that history are unmeasured. Allowing it would score with the reference
+// standing in for history (df 1). A window-summary history is its own step
+// (2b), and this gate goes with it.
+registry.addWriteGate("compare", (p) => {
+  if ((p as QCompareParams).null_model === "variogram") {
+    throw new RangeError(`compare: null_model "variogram" needs a window-summary history this process does not keep (ROADMAP 2b)`);
+  }
+});
+registry.set("compare:test_result:v1", { reference: "preceding", null_model: "independent" });
 
 // ── Build layers ──────────────────────────────────────────────────────────────
 
@@ -101,7 +121,7 @@ const buffer     = new RetentionBuffer<TestEvent>(testEventExtractor, {
   thinningRatio: REFERENCE_THINNING_RATIO,
 });
 const overlay    = new ObservationOverlay(registry);
-const curator    = new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true });
+const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true });
 const ruleBrain  = new RuleBrain(registry);
 
 /**
@@ -245,7 +265,7 @@ if (BRAIN_MODE === "claude") {
   throw new Error(`BRAIN_MODE must be "rule" or "claude", got "${BRAIN_MODE}"`);
 }
 
-const dashboard  = new DashboardServer(generator, adapter, brain, registry, curator, overlay, buffer, brainDiagnostics);
+const dashboard  = new DashboardServer(generator, adapter, brain, registry, comparator, overlay, buffer, brainDiagnostics);
 
 // Two parallel observation views
 overlay.add("coarse", "test_result:v1", { view: "coarse" });
@@ -288,7 +308,7 @@ setInterval(() => {
   // the bottom): a replay is the answer to a replayRequest, and the SSE
   // decisions channel used to deliver the answer before the request that
   // asked for it (2026-09-27 review, finding 6a).
-  const replays: ReturnType<typeof replaySpanWithReference>[] = [];
+  const replays: SnapshotPackage[] = [];
 
   if (decisions.length > 0) {
     for (const d of decisions) {
@@ -334,10 +354,8 @@ setInterval(() => {
         // that drifted as more history accumulated (the "late-firing coarse
         // dip" finding — an old burst window would retroactively re-cross the
         // threshold as quiet windows piled up and shrank the population stdDev).
-        // Shared with /control/replay (dashboard.ts) so the formula has one
-        // copy (ROADMAP L5, 2026-08-22). No proposal has ever omitted
-        // fromTs/toTs in practice, but a malformed one could, so that case
-        // keeps its own fallback rather than handing NaN to the shared helper.
+        // The formula now lives in $Q[compare] and comparison.ts, shared with
+        // /control/replay, the live view and the §A gate (2026-10-14 (8)).
         //
         // APPLYING the lens is inside the guard too, not just writing it
         // (2026-08-25 review). registry.set runs lens.ts's STATIC rulebook,
@@ -348,12 +366,19 @@ setInterval(() => {
         // here still reaches uncaughtException from inside setInterval and
         // still takes the server down — the exact outcome the narrower guard
         // was written to prevent, one call further along.
+        //
+        // A proposal without a span is refused rather than scored against
+        // itself, as it once was: the declared comparison is "the span before
+        // this one", and there is no "before" without a span — a self-referenced
+        // package would carry a comparison no $Q row names (2026-10-14 (8)).
+        if (fromTs === undefined || toTs === undefined) {
+          console.warn(`[brain] replay REFUSED — no fromTs/toTs, so no preceding reference to compare against`);
+          continue;
+        }
+        const scope = parseScope(d.qProposal.scope);
         let pkg;
         try {
-          pkg =
-            fromTs !== undefined && toTs !== undefined
-              ? replaySpanWithReference(buffer, curator, lens, fromTs, toTs)
-              : curator.curate(buffer.replay(lens, fromTs, toTs), buffer.replay(lens, fromTs, toTs));
+          pkg = comparator.compare(buffer, lens, registry.getCompare(scope.target, scope.view) ?? {}, { fromTs, toTs });
         } catch (err) {
           console.warn(
             `[brain] replay FAILED for ${JSON.stringify(lens)} over [${fromTs}, ${toTs}]: ` +
@@ -420,7 +445,9 @@ setInterval(() => {
         // being scored either way on no evidence.
         let backed: boolean;
         try {
-          backed = isReroutedAgentBacked(buffer, curator, coarseLens, agentId, snapshotTs);
+          backed = isReroutedAgentBacked(
+            buffer, comparator, coarseLens, registry.getCompare("test_result:v1", "coarse") ?? {}, agentId, snapshotTs,
+          );
         } catch (err) {
           console.warn(
             `[shadow] (not applied, gate UNAVAILABLE) ${d.type}${q}: gate threw — ` +

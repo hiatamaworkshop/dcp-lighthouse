@@ -5566,3 +5566,47 @@ family が小さくなった分 spike/dip の閾値が下がり、帰無の率�
 - 10 s 窓の 7〜8% は「既知の、構成の変化による警報」として記録する。設計値との差を帰無の欠陥とは数えない
 - 次は 10-14 (2) の 2 (比較の `$Q` 宣言)。タイルの名乗り (どの比較から出たか) を整理するときに、`volumeRatio` も読み手
   (dashboard・Brain) にどう見せるかを一緒に決める
+
+## 2026-10-14 (8) — 2: 比較 (参照・帰無) を `$Q[compare]` に宣言し、package が名乗る
+
+10-14 (2) の実装順 2。範囲は user 判断で**宣言と名乗りまで** (窓要約の常設と variogram の本番投入は 2b に切り出し)。
+
+**それまでの形** — 比較は本番の 4 か所にそれぞれ書かれていた。ライブ coarse (直前 3 窓)、Brain の replay と
+`/control/replay` (直前の等長区間)、§A ゲート (直前 3 窓・agentId 別)、span の無い replay 提案 (自己参照)。帰無は
+curator のコンストラクタ引数。07-25 の「隠れレンズ」と同じ形で、2 種類目の参照・帰無が本番に入るとタイルがどの比較から
+出たか分からなくなる。
+
+**変更**
+- `$Q` に 4 つ目の層 `compare:<schema>#<view>` (observe と同じ解決順で観測ビューと対になる)。`reference` ("preceding" のみ。
+  F1 の周期合わせはここに値を足す)・`reference_windows` (観測レンズの窓数。省略 = 観測と等長)・`null_model`・`history_ms`
+  (variogram 専用。他の帰無で宣言すると「効いているように読める行」になるので拒否)。書込時に検証、未知の値は既定に
+  落とさず拒否 (綴り違いの帰無が independent で採点されるのを防ぐ)。レンズ連鎖には入れない (07-25)
+- `comparison.ts` の `Comparator.compare` が宣言から参照・履歴の区間を作り、帰無ごとの curator (1 つずつ保持) で採点して、
+  package に `comparison` (実際に読んだ参照・履歴の区間と帰無) を付ける。本番の 4 か所はすべてこれを通る。
+  `replaySpanWithReference` は削除
+- 起動時に `compare:test_result:v1` を `{ reference:"preceding", null_model:"independent" }` で書く (`$Q` 行が正本)。
+  ライブの参照区間・採点は変更前とバイト同一 (テストで固定)
+- **variogram は本番の書込ゲートで拒否** — `QRegistry.addWriteGate(layer, gate)` を新設し、index.ts が「窓要約の履歴が
+  無いので variogram は不可」を合成する (`lensGate` と同じく、実行時の配線を知る場所で判定)。静的な規則では正当な宣言なので
+  rulebook には入れない。履歴は観測レンズが `align:"epoch"` のときだけ読む (別々の replay で格子を揃えられるのはそれだけ)
+- span の無い replay 提案は、自己参照で採点せず拒否に (「直前の区間」は span が無いと定まらず、どの `$Q` 行も名乗らない
+  比較になる)。実際に来たことは無い経路
+- 保持予算の確認 (`liveLookbackMs`・`maxCoarseWindowMs`) は参照の窓数を引数に取るよう一般化
+
+**副産物: replay の参照が観測と 1 ms 重なっていた** — `replaySpanWithReference` は参照を `[fromTs − L, fromTs]` (両端を含む) と
+していたので、fromTs ちょうどの事象が参照と観測の両方に入っていた。`[fromTs − L − 1, fromTs − 1]` に直した。
+`/control/replay` の参照ゾーンのテストはこの重複に依存して通っていた — 値が周期 2 で疎化比も 2 なので疎化後は単一値
+(分散 0 = 盲目) になり、観測の先頭の事象だけが参照に分散を与えていた。固定データの周期を 3 にした。
+参照の被覆率の分母は ceil((len − 1)/W) (要求が両端を含むので、k 窓は k·W ms でも k·W + 1 ms でも k と数える)。
+
+**確認** — テスト 531 件全通過 (`comparison.test.ts` 7 件・`q-registry.test.ts` 3 件を追加)。実サーバ (BRAIN_MODE=rule) で
+ライブ snapshot と `/control/replay` が `comparison` を名乗り、ライブは参照 30 s・被覆率 1、replay の参照は観測の 1 ms 手前で
+終わることを確認。RC シナリオでは Brain の replay も同じ経路を通り、agent-C に dip 13.9σ・12.7σ (以前の実地確認は 8.7〜13.1σ)、
+警告・拒否は 0 件。
+
+**残り**
+- 2b: 窓要約 (count/sum/sumSq) の常設履歴と、variogram の本番投入 (このとき書込ゲートを外す)。参照ゾーンの疎化で加重された
+  窓の variogram の較正は未測定
+- `volumeRatio` と `comparison` の読み手側 (dashboard の表示・Brain への渡し方) は未配線。package には載っている
+- ハーネス (`real-data-harness.ts`) は自前の参照のまま。宣言を読むようにするかは 3 (周期合わせの参照を探索で測る) のときに決める
+- Brain の提案から `compare` は書けない (Brain が書くスコープは observe に固定)。書けるようにするなら関所の拡張が要る

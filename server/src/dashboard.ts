@@ -24,8 +24,8 @@ import { resolve } from "node:path";
 import type { MockStreamGenerator } from "./mock-stream-generator.js";
 import type { TestorAdapter, STSnapshot } from "./testor-adapter.js";
 import type { ResettableBrain } from "./brain-adapter.js";
-import type { QRegistry, QObserveParams } from "./q-registry.js";
-import type { SnapshotCurator } from "./snapshot-curator.js";
+import type { QRegistry, QObserveParams, QCompareParams } from "./q-registry.js";
+import type { Comparator } from "./comparison.js";
 import type { ObservationOverlay } from "./lens-view.js";
 import { floorToWindow, resolveAlign, type LensResult } from "./lens.js";
 import type { BrainDecision } from "./brain-adapter.js";
@@ -114,16 +114,18 @@ export function liveSpans(
 export function liveLookbackMs(
   windowMs: number,
   windowCount: number = LIVE_REFERENCE_WINDOW_COUNT,
+  referenceWindows: number = windowCount,
 ): number {
-  return 2 * windowMs * windowCount;
+  return windowMs * (windowCount + referenceWindows);
 }
 
 /** Largest coarse window_ms whose lookback still fits in a given retention. */
 export function maxCoarseWindowMs(
   retentionMs: number,
   windowCount: number = LIVE_REFERENCE_WINDOW_COUNT,
+  referenceWindows: number = windowCount,
 ): number {
-  return Math.floor(retentionMs / (2 * windowCount));
+  return Math.floor(retentionMs / (windowCount + referenceWindows));
 }
 
 /**
@@ -198,35 +200,6 @@ function parseQuery(url: string): URLSearchParams {
 }
 
 /**
- * Replay [fromTs, toTs] and score it against the equal-length span immediately
- * before it (the same declared, bounded reference index.ts's Brain-triggered
- * replay path has used since the 2026-07-25 "参照レンズ設計"). Extracted so
- * that path and `/control/replay` below (ROADMAP L5, 2026-08-22 — the first
- * caller able to name a fromTs older than the freshness zone, exercising the
- * reference-zone thinning that shipped with nothing reading it yet) share one
- * formula instead of two copies that can drift the way `isScorable`'s three
- * did (ROADMAP_BRIEF.md 2026-08-17).
- */
-export function replaySpanWithReference(
-  buffer: ReplaySource,
-  curator: SnapshotCurator,
-  lens: QObserveParams,
-  fromTs: number,
-  toTs: number,
-): SnapshotPackage {
-  const observation = buffer.replay(lens, fromTs, toTs);
-  const reference = buffer.replay(lens, fromTs - (toTs - fromTs), fromTs);
-  const pkg = curator.curate(observation, reference);
-  // How much of the requested reference span actually held events. Only this
-  // function knows the span it asked for (see SnapshotPackage.referenceCoverage).
-  const expected = Math.max(1, Math.ceil((toTs - fromTs) / reference.window_ms));
-  // `windowStart < fromTs`: replay's upper bound is inclusive, so the event
-  // sitting exactly at fromTs opens a window that belongs to the observation.
-  const present = reference.windows.filter((w) => w.count > 0 && w.windowStart < fromTs).length;
-  return { ...pkg, referenceCoverage: Math.min(1, present / expected) };
-}
-
-/**
  * Does the curator's own judgment back a claim that `agentId` is anomalous
  * around `atTs`? (ROADMAP_BRIEF.md 2026-08-18 (5) §A — the division-of-labor
  * gate for the assertive channel.)
@@ -251,22 +224,22 @@ export function replaySpanWithReference(
  * about, not the (later) tick decide() drained it on (ROADMAP L3). Building
  * a fresh grouped replay/curate at that ts, on demand, needs no new held
  * state — RetentionBuffer already answers arbitrary [fromTs, toTs] within
- * its retained span, the same pattern liveSpans()/replaySpanWithReference
+ * its retained span, the same pattern liveSpans()/Comparator.compare
  * above already use.
  */
 export function isReroutedAgentBacked(
   buffer: ReplaySource,
-  curator: SnapshotCurator,
+  comparator: Comparator,
   coarseLens: QObserveParams,
+  coarseCompare: QCompareParams,
   agentId: string,
   atTs: number,
 ): boolean {
   const windowMs = effectiveWindowMs(coarseLens, 10_000);
-  const { observation, reference } = liveSpans(atTs, windowMs, LIVE_REFERENCE_WINDOW_COUNT, coarseLens.origin ?? 0);
+  const { observation } = liveSpans(atTs, windowMs, LIVE_REFERENCE_WINDOW_COUNT, coarseLens.origin ?? 0);
   const groupedLens: QObserveParams = { ...coarseLens, group_by: ["agentId"] };
-  const observed = buffer.replay(groupedLens, observation.fromTs, observation.toTs);
-  const referenced = buffer.replay(groupedLens, reference.fromTs, reference.toTs);
-  const pkg = curator.curate(observed, referenced);
+  // The coarse view's own declared comparison: grouping is the only change.
+  const pkg = comparator.compare(buffer, groupedLens, coarseCompare, observation);
   // Blind (no comparison possible) must not read as "backed" — that would
   // let a claim through on the strength of a yardstick that was never there,
   // the same silence-vs-blindness confusion SnapshotPackage exists to avoid.
@@ -307,7 +280,7 @@ export class DashboardServer {
     // ShadowBrain wrapping RuleBrain. reset() is all the dashboard ever used.
     private readonly brain: ResettableBrain,
     private readonly registry: QRegistry,
-    private readonly curator: SnapshotCurator,
+    private readonly comparator: Comparator,
     private readonly overlay: ObservationOverlay,
     private readonly buffer: ReplaySource,
     /**
@@ -402,19 +375,18 @@ export class DashboardServer {
     let snapshotPkg: SnapshotPackage | null = null;
     if (coarseView) {
       const lens = this.registry.getObserve(coarseView.schemaId, coarseView.view) ?? {};
+      const compare = this.registry.getCompare(coarseView.schemaId, coarseView.view) ?? {};
       const windowMs = effectiveWindowMs(lens, coarseView.current().window_ms);
-      this.checkRetentionBudget(windowMs);
+      this.checkRetentionBudget(windowMs, compare.reference_windows ?? LIVE_REFERENCE_WINDOW_COUNT);
       this.checkGridAlignment(lens);
-      const { observation, reference } = liveSpans(
+      const { observation } = liveSpans(
         snapshot.ts,
         windowMs,
         LIVE_REFERENCE_WINDOW_COUNT,
         lens.origin ?? 0,
       );
-      const observed = this.buffer.replay(lens, observation.fromTs, observation.toTs);
-      const referenced = this.buffer.replay(lens, reference.fromTs, reference.toTs);
-      snapshotPkg = this.curator.curate(observed, referenced);
-      this.reportReferenceBlindness(snapshotPkg, windowMs, reference);
+      snapshotPkg = this.comparator.compare(this.buffer, lens, compare, observation);
+      this.reportReferenceBlindness(snapshotPkg, windowMs, snapshotPkg.comparison!.reference);
     }
 
     const payload = {
@@ -447,9 +419,9 @@ export class DashboardServer {
    * already warns; the periodic broadcast used to fail silently.
    *
    * The realistic trigger is $Q tuning, not a bug: observation + reference
-   * need 2 × windowCount × window_ms of retained history, so raising the
-   * coarse window_ms past retention_window_ms / (2 × count) — 20s at the
-   * shipped 120s / 3 — puts the reference outside what the buffer still
+   * need (windowCount + reference windows) × window_ms of retained history, so
+   * raising the coarse window_ms past retention_window_ms / (3 + 3) — 20s at
+   * the shipped 120s with the default $Q[compare] — puts the reference outside what the buffer still
    * holds. Edge-triggered so a sustained blind period is one line, not one
    * line per tick.
    *
@@ -499,7 +471,7 @@ export class DashboardServer {
   /**
    * Warn when the live view's lookback no longer fits in retention.
    *
-   * The budget relation (2 × count × window_ms ≤ retention_window_ms) used to
+   * The budget relation ((count + reference windows) × window_ms ≤ retention_window_ms) used to
    * live only in a comment, and both of its terms are now $Q-writable — a Brain
    * widening the coarse window or narrowing retention breaks it. Breaking it
    * does not fail loudly on its own: the reference request simply returns an
@@ -514,18 +486,18 @@ export class DashboardServer {
    * sustained overrun is one line, and a later $Q write that changes either
    * term is reported again.
    */
-  private checkRetentionBudget(windowMs: number): void {
+  private checkRetentionBudget(windowMs: number, referenceWindows: number): void {
     const retentionMs = this.buffer.getRetentionWindowMs();
-    const key = `${windowMs}/${retentionMs}`;
+    const key = `${windowMs}/${referenceWindows}/${retentionMs}`;
     if (key === this.budgetCheckedFor) return;
     this.budgetCheckedFor = key;
-    const lookback = liveLookbackMs(windowMs);
+    const lookback = liveLookbackMs(windowMs, LIVE_REFERENCE_WINDOW_COUNT, referenceWindows);
     if (lookback <= retentionMs) return;
     console.warn(
       `[dashboard] live coarse lookback ${lookback}ms exceeds retention ` +
         `${retentionMs}ms — the reference span is older than anything retained, ` +
         `so the live view will report no comparison. Lower coarse window_ms to ` +
-        `${maxCoarseWindowMs(retentionMs)}ms or raise $Q[pipeline].retention_window_ms ` +
+        `${maxCoarseWindowMs(retentionMs, LIVE_REFERENCE_WINDOW_COUNT, referenceWindows)}ms or raise $Q[pipeline].retention_window_ms ` +
         `to ${lookback}ms.`,
     );
   }
@@ -694,7 +666,7 @@ export class DashboardServer {
 
     if (url.startsWith("/control/replay")) {
       // Manual replay trigger (ROADMAP L5, 2026-08-22). Everything else that
-      // calls replaySpanWithReference is Brain-driven and has so far only ever
+      // replays a span is Brain-driven and has so far only ever
       // asked for a span inside the freshness zone (RC's replayRequest looks
       // back tens of seconds, not RETENTION_WINDOW_MS=120s+) — the reference
       // zone shipped in index.ts with no caller exercising it. This endpoint
@@ -712,7 +684,7 @@ export class DashboardServer {
       }
       let pkg: SnapshotPackage;
       try {
-        pkg = replaySpanWithReference(this.buffer, this.curator, { window_ms }, fromTs, toTs);
+        pkg = this.comparator.compare(this.buffer, { window_ms }, this.registry.getCompare("test_result:v1") ?? {}, { fromTs, toTs });
       } catch (err) {
         // validateObserveParams (lens.ts) rejects an unusable lens; same
         // rulebook-message-not-restated pattern as /control/coarse-downsample.
