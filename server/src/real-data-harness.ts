@@ -67,10 +67,19 @@ export const H3_HOLDOUT_TO_DAY = "2026-10-13";
 export const HOLDOUT_TO_DAY = "2026-10-05";
 
 /**
+ * Stage 3's period (ROADMAP_BRIEF.md 2026-10-14 (12)): collection resumes and
+ * 2026-10-15…18 are exploration, 2026-10-19…21 the holdout for the variogram
+ * null's calibration. Sealed from the day it was decided, before any of its
+ * data existed, so no exploration report can read it ahead of the single look.
+ */
+export const STAGE3_HOLDOUT_FROM_DAY = "2026-10-19";
+export const STAGE3_HOLDOUT_TO_DAY = "2026-10-21";
+
+/**
  * The gate for stage 1's reports (run-real-data-report, run-otel-report) now
  * that their holdout is spent (decided 2026-10-06): exploration may read any
- * day OUTSIDE the two holdouts — stage 1's and H3's (each looked at once,
- * never again) — and `--holdout` is refused
+ * day OUTSIDE the holdouts — stage 1's and H3's (each looked at once,
+ * never again), and stage 3's (not yet looked at) — and `--holdout` is refused
  * outright. Before this, these reports refused every day from 2026-10-03 on,
  * which also locked out the exploration days the next statistical task needs.
  * Returns the refusal message, or undefined when the range may be read.
@@ -82,6 +91,7 @@ export function stage1RangeRefusal(fromDay: string, toDay: string, holdout: bool
   for (const [from, to, what] of [
     [HOLDOUT_FROM_DAY, HOLDOUT_TO_DAY, "stage 1's holdout"],
     [H3_HOLDOUT_FROM_DAY, H3_HOLDOUT_TO_DAY, "H3's holdout"],
+    [STAGE3_HOLDOUT_FROM_DAY, STAGE3_HOLDOUT_TO_DAY, "stage 3's holdout"],
   ] as const) {
     if (fromDay <= to && toDay >= from) {
       return `refusing: ${fromDay}…${toDay} touches ${what} (${from}…${to}); explore outside it`;
@@ -292,7 +302,7 @@ export interface TrialPlan {
 export function planTrials(
   events: readonly LensEvent[],
   gaps: readonly GapSpan[],
-  o: { spanMs: number; strideMs?: number; exclude?: readonly GapSpan[] },
+  o: { spanMs: number; strideMs?: number; exclude?: readonly GapSpan[]; obsFromTs?: number },
 ): { trials: TrialPlan[]; blind: number; excluded: number } {
   const stride = o.strideMs ?? 2 * o.spanMs;
   const trials: TrialPlan[] = [];
@@ -303,6 +313,9 @@ export function planTrials(
   const last = events[events.length - 1].ts;
   for (let t = first; t + 2 * o.spanMs <= last; t += stride) {
     const plan = { refFrom: t, obsFrom: t + o.spanMs, obsTo: t + 2 * o.spanMs };
+    // Trials observing before `obsFromTs` are not planned at all (neither scored
+    // nor counted blind): the days before it only feed references and history.
+    if (o.obsFromTs !== undefined && plan.obsFrom < o.obsFromTs) continue;
     if (overlapsGap(gaps, plan.refFrom, plan.obsTo)) blind++;
     else if (o.exclude !== undefined && overlapsGap(o.exclude, plan.refFrom, plan.obsTo)) excluded++;
     else trials.push(plan);
@@ -874,6 +887,8 @@ export function runDiurnalAlarms(
     spanMs: number; lens: QObserveParams; strideMs?: number; baseZThreshold?: number; curator?: SnapshotCurator;
     /** Hand the curator this much history before each reference (CurationContext.history); trials then read one grid (windowedStream). */
     historyMs?: number;
+    /** Plan only trials observing from here on (planTrials); earlier days feed references and history. */
+    obsFromTs?: number;
   },
 ): DiurnalResult {
   const baseZ = opts.baseZThreshold ?? 2.0;
@@ -881,7 +896,7 @@ export function runDiurnalAlarms(
   const level = hourlyLevel(stream);
 
   const strideMs = opts.strideMs ?? opts.spanMs / 6;
-  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs: opts.spanMs, strideMs });
+  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs: opts.spanMs, strideMs, obsFromTs: opts.obsFromTs });
   const grid = opts.historyMs === undefined ? undefined : gridFor(stream, opts.lens, opts.spanMs, strideMs);
   const arms = Array.from({ length: 24 }, tally);
   for (const t of trials) {
@@ -1242,7 +1257,7 @@ export interface PositionProfile {
  */
 export function runPositionProfile(
   stream: LoadedStream,
-  opts: HarnessOptions & { historyMs?: number; bins?: number },
+  opts: HarnessOptions & { historyMs?: number; bins?: number; obsFromTs?: number },
 ): PositionProfile {
   const spanMs = opts.spanMs ?? 10_000;
   const strideMs = opts.strideMs ?? 2 * spanMs;
@@ -1253,7 +1268,7 @@ export function runPositionProfile(
   const K = spanMs / windowMs;
   const bins = Math.min(K, opts.bins ?? 6);
   const grid = gridFor(stream, lens, spanMs, strideMs);
-  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs, strideMs });
+  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs, strideMs, obsFromTs: opts.obsFromTs });
   const arm = tally();
   let stepPackages = 0;
   const tiles = new Array<number>(K).fill(0);
@@ -1323,6 +1338,49 @@ export function h3Verdict(r: DiurnalResult): string {
   if (r.correlation >= 0.5) return `SUPPORTED (r = ${r.correlation.toFixed(2)} ≥ 0.5)`;
   if (r.correlation < 0.2) return `REJECTED (r = ${r.correlation.toFixed(2)} < 0.2)`;
   return `HELD: r = ${r.correlation.toFixed(2)} lies between 0.2 and 0.5`;
+}
+
+/**
+ * Stage 3's single look (ROADMAP_BRIEF.md 2026-10-14 (12)): `--holdout` is
+ * taken only for exactly the holdout days, and only once they are complete
+ * (the UTC day after the last has begun) — so an early look at a partial
+ * holdout cannot spend it. Returns the refusal message, or undefined.
+ */
+export function stage3HoldoutRefusal(fromDay: string, toDay: string, nowMs: number): string | undefined {
+  if (fromDay !== STAGE3_HOLDOUT_FROM_DAY || toDay !== STAGE3_HOLDOUT_TO_DAY) {
+    return `refusing: stage 3's --holdout reads exactly ${STAGE3_HOLDOUT_FROM_DAY}…${STAGE3_HOLDOUT_TO_DAY}`;
+  }
+  if (new Date(nowMs).toISOString().slice(0, 10) <= STAGE3_HOLDOUT_TO_DAY) {
+    return `refusing: stage 3's holdout is not complete until ${STAGE3_HOLDOUT_TO_DAY} has ended (UTC)`;
+  }
+  return undefined;
+}
+
+/** Above this share of planned holdout trials blind by collection gaps, stage 3 gives no verdict. */
+export const STAGE3_MAX_BLIND_SHARE = 0.2;
+
+/**
+ * The pre-registered stage 3 rule (2026-10-14 (12)) on the variogram null's two
+ * arms, V-a (H3's 60 s windows, 60 min) and V-b (H1's 1 s windows, 10 s):
+ * SUPPORTED when both package alarm rates are ≤ design + 1.5pt, REJECTED when
+ * either is > 2 × design, HELD in between. No verdict when either arm is blind
+ * for more than STAGE3_MAX_BLIND_SHARE of its planned trials, or scored none.
+ */
+export function stage3Verdict(a: PositionProfile, b: PositionProfile): string {
+  for (const [name, p] of [["V-a", a], ["V-b", b]] as const) {
+    const planned = p.trials + p.blindByGap;
+    if (p.trials === 0) return `NO VERDICT: ${name} scored no trials`;
+    if (p.blindByGap / planned > STAGE3_MAX_BLIND_SHARE) {
+      return `NO VERDICT: ${name} is blind by collection gaps for ${(100 * p.blindByGap / planned).toFixed(1)}% of its trials (> ${100 * STAGE3_MAX_BLIND_SHARE}%)`;
+    }
+  }
+  const pct = (x: number) => `${(100 * x).toFixed(2)}%`;
+  const rates = `V-a ${pct(a.rate)}, V-b ${pct(b.rate)}`;
+  const support = a.designTarget + 0.015;
+  const reject = 2 * a.designTarget;
+  if (a.rate > reject || b.rate > reject) return `REJECTED (${rates}; one is > ${pct(reject)})`;
+  if (a.rate <= support && b.rate <= support) return `SUPPORTED (${rates}; both ≤ ${pct(support)})`;
+  return `HELD: ${rates} — not both ≤ ${pct(support)}, neither > ${pct(reject)}`;
 }
 
 // ── φ and lag-1 autocorrelation ─────────────────────────────────────────────

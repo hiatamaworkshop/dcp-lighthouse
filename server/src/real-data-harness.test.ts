@@ -27,6 +27,9 @@ import {
   shuffleValues,
   stage1RangeRefusal,
   h3RangeRefusal,
+  stage3HoldoutRefusal,
+  stage3Verdict,
+  type PositionProfile,
   curatorForNullModel,
   sliceEvents,
   synthesizeStream,
@@ -117,6 +120,17 @@ describe("null calibration on a known stream", () => {
     const r = runNullCalibration({ ...s, gaps: [{ fromTs: t0 + 100_000, toTs: t0 + 130_000 }] }, { seed: 5 });
     assert.equal(r.blindByGap, plan.blind);
     assert.equal(r.planned, r.blindByGap + plan.trials.length);
+  });
+
+  it("obsFromTs plans only trials observing from there on, and does not count the earlier ones blind", () => {
+    const s = synthesizeStream({ durationMs: HOUR / 2, seed: 24 });
+    const t0 = s.events[0].ts;
+    const gaps = [{ fromTs: t0 + 100_000, toTs: t0 + 130_000 }];
+    const all = planTrials(s.events, gaps, { spanMs: 10_000 });
+    const late = planTrials(s.events, gaps, { spanMs: 10_000, obsFromTs: t0 + 600_000 });
+    assert.ok(late.trials.length > 0 && late.trials.length < all.trials.length);
+    assert.ok(late.trials.every((t) => t.obsFrom >= t0 + 600_000));
+    assert.equal(late.blind, 0);
   });
 });
 
@@ -458,11 +472,38 @@ describe("H3: alarms against the preceding span, by hour of day", () => {
   });
 });
 
+describe("stage 3's single look", () => {
+  const profile = (rate: number, trials = 400, blindByGap = 0): PositionProfile => ({
+    trials, flagged: Math.round(rate * trials), rate, stepPackages: 0, unusableReference: 0, blindByGap,
+    designTarget: 0.0455, perWindowByPosition: [],
+  });
+  it("--holdout takes exactly the holdout days, and only after they have ended (UTC)", () => {
+    const after = Date.parse("2026-10-22T00:00:01Z");
+    assert.equal(stage3HoldoutRefusal("2026-10-19", "2026-10-21", after), undefined);
+    assert.match(stage3HoldoutRefusal("2026-10-19", "2026-10-21", Date.parse("2026-10-21T23:59:59Z")) ?? "", /not complete/);
+    assert.match(stage3HoldoutRefusal("2026-10-19", "2026-10-20", after) ?? "", /exactly/);
+    assert.match(stage3HoldoutRefusal("2026-10-18", "2026-10-21", after) ?? "", /exactly/);
+  });
+  it("supports at ≤ design + 1.5pt on both arms, rejects above twice design on either, holds between", () => {
+    assert.match(stage3Verdict(profile(0.037), profile(0.06)), /^SUPPORTED/);
+    assert.match(stage3Verdict(profile(0.037), profile(0.07)), /^HELD/);
+    assert.match(stage3Verdict(profile(0.095), profile(0.03)), /^REJECTED/);
+  });
+  it("gives no verdict when an arm is blind for more than 20% of its trials or scored none", () => {
+    assert.match(stage3Verdict(profile(0.03, 300, 100), profile(0.03)), /NO VERDICT: V-a is blind/);
+    assert.match(stage3Verdict(profile(0.03, 400, 100), profile(0.03)), /^SUPPORTED/);
+    assert.match(stage3Verdict(profile(0.03), profile(0, 0)), /NO VERDICT: V-b scored no trials/);
+  });
+});
+
 describe("stage 1's reports after their holdout was spent", () => {
-  it("open outside both holdouts, refused on any day touching either, and --holdout refused outright", () => {
+  it("open outside every holdout, refused on any day touching one, and --holdout refused outright", () => {
     assert.equal(stage1RangeRefusal("2026-09-29", "2026-10-02", false), undefined);
     assert.equal(stage1RangeRefusal("2026-10-06", "2026-10-10", false), undefined);
-    assert.equal(stage1RangeRefusal("2026-10-14", "2026-10-20", false), undefined);
+    assert.equal(stage1RangeRefusal("2026-10-14", "2026-10-18", false), undefined);
+    assert.equal(stage1RangeRefusal("2026-10-22", "2026-10-25", false), undefined);
+    assert.match(stage1RangeRefusal("2026-10-18", "2026-10-19", false) ?? "", /stage 3's holdout/);
+    assert.match(stage1RangeRefusal("2026-10-21", "2026-10-22", false) ?? "", /stage 3's holdout/);
     assert.match(stage1RangeRefusal("2026-10-02", "2026-10-03", false) ?? "", /stage 1's holdout/);
     assert.match(stage1RangeRefusal("2026-10-05", "2026-10-06", false) ?? "", /stage 1's holdout/);
     assert.match(stage1RangeRefusal("2026-10-10", "2026-10-11", false) ?? "", /H3's holdout/);
