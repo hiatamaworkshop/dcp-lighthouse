@@ -1452,7 +1452,7 @@ describe("SnapshotCurator — overdispersed null (events in a window are not ind
  */
 function latentTrial(
   seed: number,
-  o: { H: number; K: number; per: number; rho: number; sd: number; drop?: { at: number; to: number } },
+  o: { H: number; K: number; per: number; rho: number; sd: number; drop?: { at: number; to: number; len?: number } },
 ): { observation: LensResult; reference: LensResult; history: LensResult } {
   const rand = rng32(seed);
   const gauss = () => Math.sqrt(-2 * Math.log(rand() || 1e-12)) * Math.cos(2 * Math.PI * rand());
@@ -1461,7 +1461,8 @@ function latentTrial(
   for (let k = 0; k < o.H + 2 * o.K; k++) {
     if (k > 0) x = o.rho * x + Math.sqrt(1 - o.rho * o.rho) * o.sd * gauss();
     let p = Math.min(0.98, Math.max(0.02, 0.6 + x));
-    if (o.drop !== undefined && k === o.H + o.K + o.drop.at) p = o.drop.to;
+    const d = k - (o.H + o.K + (o.drop?.at ?? 0));
+    if (o.drop !== undefined && d >= 0 && d < (o.drop.len ?? 1)) p = o.drop.to;
     for (let i = 0; i < o.per; i++) events.push({ ts: k * 1000 + Math.floor(rand() * 1000), value: rand() < p ? 1 : 0 });
   }
   events.sort((a, b) => a.ts - b.ts);
@@ -1492,7 +1493,8 @@ describe("SnapshotCurator — variogram null (the latent rate drifts over time)"
   };
 
   it("holds the design rate where the latent rate wanders, which the overdispersed null does not", () => {
-    // Measured (200 seeds, 30 + 30 windows, 300 history): overdispersed 14.0%, variogram 4.0%.
+    // Measured (200 seeds, 30 + 30 windows, 300 history): overdispersed 14.0%, variogram 5.5%
+    // (4.0% over 1000 seeds).
     // τ² from inside the reference cannot see lags past the reference; γ from the history can.
     const ar = { H: 300, K: 30, per: 100, rho: 0.97, sd: 0.05 };
     assert.ok(rate("overdispersed", ar) > 0.1, "the overdispersed null must be visibly broken here");
@@ -1501,7 +1503,7 @@ describe("SnapshotCurator — variogram null (the latent rate drifts over time)"
 
   it("gives back the power the overdispersed null spent on iid data", () => {
     // Measured (200 seeds, one window 0.6 → 0.25): independent 89.0%, overdispersed 63.5%,
-    // variogram 85.5%. γ̂ ≈ 0 rests on hundreds of history windows rather than ten.
+    // variogram 88.0%. γ̂ ≈ 0 rests on hundreds of history windows rather than ten.
     const drop = { H: 200, K: 10, per: 35, rho: 0, sd: 0, drop: { at: 4, to: 0.25 } };
     const dip = (pkg: SnapshotPackage) => pkg.tiles.some((t) => t.shapeTag === "dip");
     const variogram = rate("variogram", drop, dip);
@@ -1510,7 +1512,7 @@ describe("SnapshotCurator — variogram null (the latent rate drifts over time)"
   });
 
   it("stays at or under the design rate on independent latent rates and on the iid stream", () => {
-    // Measured: iid 2.5%, latent sd 0.1 (flat γ) 4.5%.
+    // Measured: iid 3.0%, latent sd 0.1 (flat γ) 5.0% (4.7% over 1000 seeds).
     assert.ok(rate("variogram", { H: 200, K: 10, per: 35, rho: 0, sd: 0 }) < 0.06);
     assert.ok(rate("variogram", { H: 200, K: 10, per: 35, rho: 0, sd: 0.1 }) < 0.07);
   });
@@ -1537,13 +1539,39 @@ describe("SnapshotCurator — variogram null (the latent rate drifts over time)"
     assert.equal(v.df, 1);
   });
 
-  it("counts the step runs into the Šidák family, and only under this null", () => {
+  it("keeps the step out of the Šidák family — the family is the scored windows (2026-10-14 (6))", () => {
     const t = latentTrial(5, { H: 50, K: 10, per: 35, rho: 0, sd: 0 });
     const v = curatorFor("variogram").curate(t.observation, t.reference, { history: t.history });
     const o = curatorFor("overdispersed").curate(t.observation, t.reference, { history: t.history });
-    assert.equal(v.selection.stepSlots, 3, "10 scorable windows hold at most 3 disjoint 3-window runs");
-    assert.equal(o.selection.stepSlots, undefined);
-    assert.ok(v.selection.effectiveZThreshold > o.selection.effectiveZThreshold);
+    assert.equal(v.selection.scoredWindowCount, 10);
+    assert.equal(v.selection.effectiveZThreshold, o.selection.effectiveZThreshold);
+  });
+
+  it("never raises a step on its own: every step tile holds a same-direction spike/dip window", () => {
+    // Thin windows on a wandering latent rate, where the ratio rule alone marks runs often.
+    const curator = curatorFor("variogram");
+    let steps = 0;
+    for (let s = 1; s <= 200; s++) {
+      const t = latentTrial(s * 7919, { H: 100, K: 10, per: 10, rho: 0.9, sd: 0.15 });
+      const pkg = curator.curate(t.observation, t.reference, { history: t.history });
+      for (const step of pkg.tiles.filter((x) => x.shapeTag === "step_up" || x.shapeTag === "step_down")) {
+        steps++;
+        const want = step.shapeTag === "step_up" ? "spike" : "dip";
+        assert.ok(
+          pkg.tiles.some((x) => x.shapeTag === want && x.regionStart >= step.regionStart && x.regionEnd <= step.regionEnd),
+          `seed ${s}: ${step.label} stands alone`,
+        );
+      }
+    }
+    assert.ok(steps > 0, "the scenario must produce some steps for this to test anything");
+  });
+
+  it("still names the shape of a real drop the gate caught", () => {
+    const t = latentTrial(11, { H: 200, K: 10, per: 100, rho: 0, sd: 0, drop: { at: 4, to: 0.3, len: 4 } });
+    const pkg = curatorFor("variogram").curate(t.observation, t.reference, { history: t.history });
+    const step = pkg.tiles.find((x) => x.shapeTag === "step_down");
+    assert.ok(step, "a 4-window drop to 0.3 must be described as a step_down");
+    assert.ok(pkg.tiles.some((x) => x.shapeTag === "dip" && x.regionStart >= step.regionStart));
   });
 
   it("leaves the other nulls' packages without a variogram field, history or not", () => {

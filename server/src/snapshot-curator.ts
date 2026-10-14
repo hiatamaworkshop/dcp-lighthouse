@@ -268,12 +268,6 @@ export interface SelectionContext {
    * `globalStats.windowCount`, which counts REFERENCE windows.
    */
   scoredWindowCount: number;
-  /**
-   * Under `nullModel: "variogram"` only: step tests counted into the family
-   * (the most disjoint runs the scored windows can hold), so the Šidák family
-   * is scoredWindowCount + stepSlots. Absent = the family is the windows alone.
-   */
-  stepSlots?: number;
   /** The per-comparison two-sided z threshold, before correcting for N. */
   baseZThreshold: number;
   /**
@@ -367,9 +361,9 @@ export interface CurationOptions {
    * where the reference ends (curate's `context.history`), and the gate uses
    * the variance of the actual contrast between the window and the reference
    * mean — see latentModel. A flat γ = τ² reproduces "overdispersed"'s
-   * τ²(1 + refShare) exactly; the step run gets its own contrast rather than
-   * "one draw of τ²". Heavy-tailed latent moves are NOT covered (γ is a second
-   * moment; 2026-10-14 (4)).
+   * τ²(1 + refShare) exactly. Step tiles only describe windows the gate fired
+   * on and are not tested (2026-10-14 (6)). Heavy-tailed latent moves are NOT
+   * covered (γ is a second moment; 2026-10-14 (4)).
    */
   nullModel?: "independent" | "overdispersed" | "variogram";
 }
@@ -563,18 +557,9 @@ export class SnapshotCurator {
     // fixed as the number of scored windows N grows; the reported `magnitude`
     // stays the honest, uncorrected z so Brain sees the real effect size.
     const scorableCount = units.reduce((n, u) => n + u.windows.filter(isScorable).length, 0);
-    // Under "variogram" the step tests join the family. A step run's latent
-    // part now shrinks with its length as the data says, so steps fire at their
-    // nominal rate — and as tests outside the family they added 1.4pt on top of
-    // spike/dip (10 windows, iid latent; ROADMAP_BRIEF.md 2026-10-14 (5)).
-    // Counted as the most disjoint runs the scorable windows can hold, a bound
-    // fixed before the data is read: counting the runs actually found would
-    // let the deviations choose their own family. The other nulls keep the
-    // family they were measured with.
-    const stepSlots = variogram
-      ? units.reduce((n, u) => n + Math.floor(u.windows.filter(isScorable).length / this.opts.stepWindowCount), 0)
-      : 0;
-    const effectiveZThreshold = sidakCorrectedThreshold(this.opts.spikeZThreshold, scorableCount + stepSlots);
+    // Under "variogram" a step is not a test, so the family is the windows
+    // alone (see detectSteps' `describeOnly`).
+    const effectiveZThreshold = sidakCorrectedThreshold(this.opts.spikeZThreshold, scorableCount);
     const unreachableTails: UnreachableTail[] = [];
 
     for (const unit of units) {
@@ -591,6 +576,9 @@ export class SnapshotCurator {
 
       collectUnreachableTails(unit, effectiveZThreshold, lattice, model, unreachableTails, (w) => refFor(unit, w));
 
+      // Windows the gate fired on, by direction — what a step may describe
+      // under "variogram".
+      const gatedDir = new Map<WindowStat, 1 | -1>();
       for (const w of unit.windows) {
         if (!isScorable(w)) continue;
         const wref = refFor(unit, w);
@@ -599,6 +587,7 @@ export class SnapshotCurator {
         const z = (w.mean - unit.ref.mean) / se;
         const gated = gate(w, wref, se, lattice, model);
         if (gated >= effectiveZThreshold) {
+          gatedDir.set(w, 1);
           tiles.push({
             label: `${tag}spike at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${unit.ref.mean.toFixed(3)})`,
             shapeTag: "spike",
@@ -610,6 +599,7 @@ export class SnapshotCurator {
             ...(unit.group !== undefined ? { group: unit.group } : {}),
           });
         } else if (gated <= -effectiveZThreshold) {
+          gatedDir.set(w, -1);
           tiles.push({
             label: `${tag}dip at t=${w.windowStart} (${w.mean.toFixed(3)} vs baseline ${unit.ref.mean.toFixed(3)})`,
             shapeTag: "dip",
@@ -633,10 +623,17 @@ export class SnapshotCurator {
       // ROADMAP_BRIEF.md 2026-10-14 (3); every figure up to then, including the
       // stage-1 and H3 judgments, was measured with the ungated rule under
       // "independent" (commit d5d13d4).
+      //
+      // Under "variogram" a step is a DESCRIPTION, not a claim (ROADMAP_BRIEF.md
+      // 2026-10-14 (6)): it names the shape around windows the gate already
+      // fired on, and never fires on its own. As a test it searched the run the
+      // ratio rule picked out of the data, which no family count bounds — 1 s
+      // windows put 2.6–3.4% of real-data packages over design on steps alone,
+      // and a longer history did not cure it (2026-10-14 (5)).
       tiles.push(
         ...detectSteps(
           unit.windows, unit.ref, this.opts.stepThreshold, this.opts.stepWindowCount, effectiveZThreshold, unit.group,
-          unit.latent,
+          unit.latent, unit.latent === undefined ? undefined : gatedDir,
         ),
       );
 
@@ -712,7 +709,6 @@ export class SnapshotCurator {
       ...(unscoredGroups.length > 0 ? { unscoredGroups } : {}),
       selection: {
         scoredWindowCount: scorableCount,
-        ...(variogram ? { stepSlots } : {}),
         baseZThreshold: this.opts.spikeZThreshold,
         effectiveZThreshold,
       },
@@ -1807,6 +1803,12 @@ function detectSteps(
   gateZ: number,
   group?: string,
   latent?: LatentModel,
+  /**
+   * Given = describe only: a run becomes a tile when it holds a window the
+   * spike/dip gate fired on in the same direction, and is not tested itself.
+   * Its magnitude is the run's contrast z, in the same yardstick as the windows'.
+   */
+  describeOnly?: ReadonlyMap<WindowStat, 1 | -1>,
 ): SnapshotTile[] {
   if (windows.length < minRun) return [];
   // No yardstick, no comparison — mirrors spike/dip's silent skip when the
@@ -1850,16 +1852,21 @@ function detectSteps(
     const odVar = gateRef.latentVar !== undefined
       ? independentVar + gateRef.latentVar
       : independentVar + (ref.tau2 ?? 0) * (1 + (ref.refShare ?? 0));
-    const zGate = odVar > 0 ? studentizeWith(Math.abs(runMean - ref.mean) / Math.sqrt(odVar), independentVar, gateRef) : 0;
-    if (zGate < gateZ) return;
+    if (describeOnly !== undefined) {
+      if (!run.some((w) => describeOnly.get(w) === dir)) return;
+    } else {
+      const zGate = odVar > 0 ? studentizeWith(Math.abs(runMean - ref.mean) / Math.sqrt(odVar), independentVar, gateRef) : 0;
+      if (zGate < gateZ) return;
+    }
     tiles.push({
       label: `${tag}${shapeTag} t=${windows[start].windowStart}–${windows[end].windowEnd} (${(shift * 100).toFixed(1)}% shift)`,
       shapeTag,
       regionStart: windows[start].windowStart,
       regionEnd: windows[end].windowEnd,
       windows: run,
-      description: `Sustained ${dir > 0 ? "elevation" : "drop"} over ${run.length} windows${group !== undefined ? ` in group "${group}"` : ""}. Run mean: ${runMean.toFixed(3)}, reference mean: ${ref.mean.toFixed(3)}.`,
-      magnitude: z,
+      description: `Sustained ${dir > 0 ? "elevation" : "drop"} over ${run.length} windows${group !== undefined ? ` in group "${group}"` : ""}. Run mean: ${runMean.toFixed(3)}, reference mean: ${ref.mean.toFixed(3)}.` +
+        (describeOnly !== undefined ? ` Describes the ${dir > 0 ? "spike" : "dip"} window(s) it contains; not a test of its own.` : ""),
+      magnitude: describeOnly !== undefined && odVar > 0 ? Math.abs(runMean - ref.mean) / Math.sqrt(odVar) : z,
       ...(group !== undefined ? { group } : {}),
     });
   };
