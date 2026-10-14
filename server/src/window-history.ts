@@ -221,7 +221,7 @@ export class WindowHistory implements HistorySource {
  * the tracking key, so two rows naming the same lens differently — fromTs/toTs
  * riding along, `align` implied by `origin` — share one history.
  */
-function summarizable(lens: QObserveParams): QObserveParams {
+export function summarizable(lens: QObserveParams): QObserveParams {
   if (resolveAlign(lens) !== "epoch") {
     throw new RangeError(`window history needs an absolute grid (align:"epoch"), so windows cut once can be reused`);
   }

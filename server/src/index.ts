@@ -21,7 +21,7 @@ import { ObservationOverlay } from "./lens-view.js";
 import { validateObserveParams } from "./lens.js";
 import type { QObserveParams } from "./q-registry.js";
 import type { SnapshotPackage } from "./snapshot-curator.js";
-import { Comparator } from "./comparison.js";
+import { Comparator, assertComparable } from "./comparison.js";
 import { WindowHistory } from "./window-history.js";
 import { RuleBrain } from "./rule-brain.js";
 import { BRAIN_ANSWER_SCHEMA, ClaudeBrain } from "./claude-brain.js";
@@ -185,9 +185,16 @@ const CLAUDE_BRAIN_INTERVAL_MS = Number(process.env.CLAUDE_BRAIN_INTERVAL_MS ?? 
  * confined to the freshness zone would in fact run, but "would this particular
  * span reach the reference zone" is not knowable when the lens is judged, and
  * a gate that sometimes passes an unrunnable lens is not a gate.
+ *
+ * Likewise for the comparison a replay will run under: the declared
+ * $Q[compare] row decides whether the lens must sit on the epoch grid and be
+ * summarizable (the variogram null, 2026-10-14 (10)). Judged against the row
+ * in force when the proposal is parsed; a later write can still make an
+ * accepted lens fail at replay, which the replay's catch below logs.
  */
 function refuseUnrunnableLens(lens: QObserveParams): void {
   validateObserveParams(lens);
+  assertComparable(lens, registry.getCompare("test_result:v1", "fine") ?? {}, true);
   if (
     (lens.agg_func === "median" || lens.agg_func === "percentile") &&
     buffer.getThinningRatio() !== undefined

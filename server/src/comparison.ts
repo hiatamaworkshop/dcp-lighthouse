@@ -16,7 +16,27 @@ import type { QCompareParams, QObserveParams } from "./q-registry.js";
 import { resolveAlign } from "./lens.js";
 import { SnapshotCurator, type CurationOptions, type NullModel, type SnapshotPackage } from "./snapshot-curator.js";
 import type { ReplaySource, SpanRequest } from "./dashboard.js";
-import type { HistorySource } from "./window-history.js";
+import { summarizable, type HistorySource } from "./window-history.js";
+
+/**
+ * Throw the RangeError compare() would throw for `lens` under `decl` before
+ * reading any data — the one rulebook for "can this lens be compared this
+ * way", shared by compare() itself and by a gate that judges a proposal
+ * before it runs (index.ts's lensGate for ClaudeBrain).
+ *
+ * The variogram null reads lags between windows of separate replays, so the
+ * grid must be absolute (align:"epoch") with or without history — off-phase
+ * windows get their lag rounded and γ read at the wrong lag, silently
+ * (2026-10-14 (9) review). With history from window summaries, the lens must
+ * also be one a summary can be kept for (window-history.ts summarizable).
+ */
+export function assertComparable(lens: QObserveParams, decl: QCompareParams, summaries: boolean): void {
+  if ((decl.null_model ?? "independent") !== "variogram") return;
+  if (resolveAlign(lens) !== "epoch") {
+    throw new RangeError(`compare: the variogram null needs an absolute window grid (align:"epoch") so its lags are whole windows`);
+  }
+  if (summaries && decl.history_ms !== undefined) summarizable(lens);
+}
 
 export class Comparator {
   private readonly curators = new Map<NullModel, SnapshotCurator>();
@@ -51,15 +71,10 @@ export class Comparator {
    * end its reference AT fromTs, so the event there sat in both.
    *
    * Throws what replay or the curator throw (a lens that only fails at
-   * aggregation time — 2026-08-25), and a RangeError for the variogram null on
-   * a lens whose grid is not absolute: the variogram reads lags between
-   * windows, so observation, reference and any history must share one grid,
-   * which only `align:"epoch"` guarantees across separate replays. With or
-   * without history — off-phase windows get their lag rounded and γ read at
-   * the wrong lag, silently (2026-10-14 (9) review). With a history source,
-   * also what it throws for a lens it cannot summarize (decay, median).
+   * aggregation time — 2026-08-25), and what assertComparable throws.
    */
   compare(source: ReplaySource, lens: QObserveParams, decl: QCompareParams, observation: SpanRequest): SnapshotPackage {
+    assertComparable(lens, decl, this.historySource !== undefined);
     const observed = source.replay(lens, observation.fromTs, observation.toTs);
     const refLen =
       decl.reference_windows !== undefined
@@ -69,9 +84,6 @@ export class Comparator {
     const referenced = source.replay(lens, reference.fromTs, reference.toTs);
 
     const nullModel = decl.null_model ?? "independent";
-    if (nullModel === "variogram" && resolveAlign(lens) !== "epoch") {
-      throw new RangeError(`compare: the variogram null needs an absolute window grid (align:"epoch") so its lags are whole windows`);
-    }
     let history: SpanRequest | undefined;
     let historyResult;
     if (decl.history_ms !== undefined) {

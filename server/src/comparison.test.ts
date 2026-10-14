@@ -6,7 +6,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { Comparator } from "./comparison.js";
+import { Comparator, assertComparable } from "./comparison.js";
 import { RetentionBuffer } from "./retention-buffer.js";
 import { SnapshotCurator } from "./snapshot-curator.js";
 import { WindowHistory } from "./window-history.js";
@@ -128,5 +128,31 @@ describe("Comparator.compare — the declared null", () => {
     }
     // The other nulls read no lags.
     assert.doesNotThrow(() => new Comparator().compare(buf, { window_ms: 1_000 }, { null_model: "overdispersed" }, obs));
+  });
+});
+
+describe("assertComparable — the rule a proposal gate and compare() share", () => {
+  const vario = { null_model: "variogram" as const, history_ms: 60_000 };
+
+  it("asks nothing of a lens under the nulls that read no lags", () => {
+    for (const decl of [{}, { null_model: "overdispersed" as const }]) {
+      assert.doesNotThrow(() => assertComparable({ window_ms: 1_000, decay: "step(cutoff=now-60s)" }, decl, true));
+    }
+  });
+
+  it("under the variogram null, refuses an off-grid lens, and with summaries an unsummarizable one", () => {
+    // ClaudeBrain's replay proposals: the lens it names is judged before it runs.
+    assert.throws(() => assertComparable({ window_ms: 1_000, group_by: ["agentId"] }, vario, true), /align:"epoch"/);
+    assert.throws(() => assertComparable({ window_ms: 1_000, align: "epoch", agg_func: "median" }, vario, true), /mean summaries/);
+    assert.doesNotThrow(() => assertComparable({ window_ms: 1_000, align: "epoch", agg_func: "median" }, vario, false));
+    assert.doesNotThrow(() => assertComparable({ window_ms: 1_000, align: "epoch", group_by: ["agentId"] }, vario, true));
+  });
+
+  it("is what compare() throws, before reading a window", () => {
+    const comparator = new Comparator({}, new WindowHistory(bufferWith(T0, T0 + 1_000), { maxHistoryMs: 60_000 }));
+    assert.throws(
+      () => comparator.compare(bufferWith(T0, T0 + 1_000), { window_ms: 1_000, align: "epoch", decay: "step(cutoff=now-60s)" }, vario, { fromTs: T0, toTs: T0 + 999 }),
+      /decayed lens/,
+    );
   });
 });

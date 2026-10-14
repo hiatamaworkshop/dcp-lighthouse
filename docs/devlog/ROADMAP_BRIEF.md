@@ -5696,4 +5696,4 @@ curator のコンストラクタ引数。07-25 の「隠れレンズ」と同じ
 - 疎化参照 × 薄い窓の超過 (全帰無)。直すなら参照ゾーンの側
 - 本番の既定を variogram に切り替えるか (iid の模擬ストリームでは失うものだけ、実データ相当の流れが来てから決める)
 - `volumeRatio`・`comparison` の読み手 (dashboard 表示・Brain への渡し方) は未配線のまま
-- ClaudeBrain の replay 提案は `align` を載せないので、variogram 宣言下では関所ではなく実行時に失敗する (shadow なので適用はされない)
+- ~~ClaudeBrain の replay 提案は `align` を載せないので、variogram 宣言下では関所ではなく実行時に失敗する~~ → 後続コミットで対応: `comparison.ts` の `assertComparable` (variogram なら epoch 格子、窓要約を読むなら要約可能なレンズ) を `compare()` と index.ts の `lensGate` が共有し、提案の時点で拒否する。判定は解析時点の `$Q[compare]` 行で行い、後から行が変われば replay の catch が記録する
