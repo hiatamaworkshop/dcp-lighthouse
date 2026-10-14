@@ -10,6 +10,7 @@
  *   GET /demo/stop          — stop the generator
  *   GET /control/baseline-delta?value=N — write $Q[schema].baseline_delta
  *   GET /control/coarse-downsample?factor=N — write $Q[observe:...#coarse].downsample_factor
+ *   GET /control/compare?null_model=&history_ms= — write $Q[compare:test_result:v1]
  *   GET /control/replay?fromTs=&toTs=&window_ms= — manual replay + reference score
  *   GET /status             — current load
  *   GET /brain              — Brain diagnostics (shadow tally, LLM counters)
@@ -666,6 +667,34 @@ export class DashboardServer {
       this.registry.set("observe:test_result:v1#coarse", { ...current, downsample_factor: factor });
       jsonHeaders(res);
       res.end(JSON.stringify({ scope: "observe:test_result:v1#coarse", downsample_factor: factor }));
+      return;
+    }
+
+    if (url.startsWith("/control/compare")) {
+      // Operator write surface for $Q[compare:test_result:v1] (2026-10-14 (10)):
+      // the declared null and its history. Same transport-only checking as
+      // /control/coarse-downsample — whether the row is acceptable is the
+      // rulebook's and index.ts's write gate's call, and their RangeError comes
+      // back as a 400 (handle()).
+      const q = parseQuery(url);
+      const row: QCompareParams = { ...(this.registry.getCompare("test_result:v1") ?? {}) };
+      const nullModel = q.get("null_model");
+      if (nullModel !== null) row.null_model = nullModel as QCompareParams["null_model"];
+      const historyRaw = q.get("history_ms");
+      if (historyRaw !== null) {
+        const history_ms = Number(historyRaw);
+        if (!Number.isFinite(history_ms)) {
+          jsonHeaders(res, 400);
+          res.end(JSON.stringify({ error: `history_ms must be a number, got ${JSON.stringify(historyRaw)}` }));
+          return;
+        }
+        row.history_ms = history_ms;
+      } else if (row.null_model !== "variogram") {
+        delete row.history_ms;
+      }
+      this.registry.set("compare:test_result:v1", row);
+      jsonHeaders(res);
+      res.end(JSON.stringify({ scope: "compare:test_result:v1", ...row }));
       return;
     }
 

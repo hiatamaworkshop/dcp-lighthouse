@@ -22,6 +22,7 @@ import { validateObserveParams } from "./lens.js";
 import type { QObserveParams } from "./q-registry.js";
 import type { SnapshotPackage } from "./snapshot-curator.js";
 import { Comparator } from "./comparison.js";
+import { WindowHistory } from "./window-history.js";
 import { RuleBrain } from "./rule-brain.js";
 import { BRAIN_ANSWER_SCHEMA, ClaudeBrain } from "./claude-brain.js";
 import { ShadowBrain } from "./shadow-brain.js";
@@ -67,6 +68,14 @@ const RETENTION_WINDOW_MS = 120_000;
 const REFERENCE_WINDOW_MS = RETENTION_WINDOW_MS * 10;
 const REFERENCE_THINNING_RATIO = 2;
 
+/**
+ * How far back the window-summary history reaches (window-history.ts,
+ * ROADMAP_BRIEF.md 2026-10-14 (10)): one hour, the span of the H3 60-minute
+ * arm the variogram null was first measured against. A round number, not a
+ * tuned one; it bounds what $Q[compare].history_ms may ask for.
+ */
+const HISTORY_WINDOW_MS = 3_600_000;
+
 // Default observe params: coarse live view + fine view for replay.
 //
 // Both declare align:"epoch" (ROADMAP L4 `origin` stage). The grid is then a
@@ -97,16 +106,20 @@ registry.set("schema:test_result:v1", { baseline_delta: 0.10 });
 // hard-coded until now, so nothing scores differently; the row is now the
 // authority instead of four formulas.
 //
-// The variogram null is refused HERE, not in the rulebook: it is a valid
-// declaration, but it reads a long history of window summaries and this
-// process keeps 120 s of events plus a thinned reference zone — not the
-// 24 spans the null was calibrated with, and thinned (weighted) windows in
-// that history are unmeasured. Allowing it would score with the reference
-// standing in for history (df 1). A window-summary history is its own step
-// (2b), and this gate goes with it.
+// The variogram null reads its history from window summaries kept for
+// HISTORY_WINDOW_MS (2026-10-14 (10)), so a declaration must say how much of
+// it to read, within what is kept. Refused HERE rather than in the rulebook:
+// both limits are this process's wiring, not properties of the row. Without
+// history_ms the reference would stand in for history (df 1) although this
+// process has one.
 registry.addWriteGate("compare", (p) => {
-  if ((p as QCompareParams).null_model === "variogram") {
-    throw new RangeError(`compare: null_model "variogram" needs a window-summary history this process does not keep (ROADMAP 2b)`);
+  const c = p as QCompareParams;
+  if (c.null_model !== "variogram") return;
+  if (c.history_ms === undefined) {
+    throw new RangeError(`compare: null_model "variogram" needs history_ms here (this process keeps up to ${HISTORY_WINDOW_MS} ms of window summaries)`);
+  }
+  if (c.history_ms > HISTORY_WINDOW_MS) {
+    throw new RangeError(`compare: history_ms ${c.history_ms} exceeds the ${HISTORY_WINDOW_MS} ms of window summaries this process keeps`);
   }
 });
 registry.set("compare:test_result:v1", { reference: "preceding", null_model: "independent" });
@@ -121,12 +134,18 @@ const buffer     = new RetentionBuffer<TestEvent>(testEventExtractor, {
   thinningRatio: REFERENCE_THINNING_RATIO,
 });
 const overlay    = new ObservationOverlay(registry);
-const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true });
+// Summaries are cut where events leave the freshness zone, before thinning.
+// The two declared views are tracked from boot, so their history is already
+// there when a variogram row is written; any other lens (a Brain's replay) is
+// tracked from the first time it is compared under that null.
+const windowHistory = new WindowHistory(buffer, { maxHistoryMs: HISTORY_WINDOW_MS });
+for (const view of ["coarse", "fine"]) windowHistory.track(registry.getObserve("test_result:v1", view) ?? {});
+const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true }, windowHistory);
 // The §A gate asks "did the curator flag this agent", which must not depend on
 // how many tiles a reader is shown: maxTiles drops the smallest first, so with
 // several agents alarming at once a real flag could be cut and the claim
 // scored unbacked (2026-10-14 (9) review). Same scoring, no cap.
-const gateComparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true, maxTiles: Infinity });
+const gateComparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true, maxTiles: Infinity }, windowHistory);
 const ruleBrain  = new RuleBrain(registry);
 
 /**

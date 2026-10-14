@@ -226,6 +226,29 @@ describe("curator calibration — a latent rate that wanders (the variogram null
     assert.ok(over.rate > 2 * over.designTarget, formatCalibration("overdispersed", over));
     assert.ok(vario.rate < 0.08, formatCalibration("variogram", vario));
   });
+
+  it("with the reference thinned, holds as the history moves to window summaries — the thinning residual is no worse than the default null's", () => {
+    // Production's arrangement since 2026-10-14 (10): the history comes from
+    // window summaries cut before thinning, while a replay that reaches past
+    // the freshness zone still hands over a thinned, weighted reference.
+    // retentionWindowMs = spanMs puts the whole reference in the thinned zone.
+    const thinned = { retentionWindowMs: 30_000, referenceWindowMs: 30_000 * 14, thinningRatio: 2 };
+    const r = measureFalseAlarmRate({ seeds: 200, lens, shape, curator: curator("variogram"), retention: thinned, historyFromSummaries: true });
+    assert.ok(r.rate < 0.06, formatCalibration("variogram, thinned ref, summaries", r)); // measured 3.5%
+
+    // MEASURED, NOT DESIRED: on thin windows (25 events, rate 0.95) a thinned
+    // reference overshoots under every null — the L5 "thin windows" residual,
+    // not a variogram mechanism. The shipped independent null overshoots more.
+    const thin = { spanMs: 30_000, eventsPerSpan: 750, passRate: 0.95, historySpans: 10 };
+    const at = (nullModel: "independent" | "variogram") => measureFalseAlarmRate({
+      seeds: 400, lens, shape: thin, retention: thinned, historyFromSummaries: true,
+      curator: new SnapshotCurator({ spikeZThreshold: 2.0, includeBaseline: true, nullModel }),
+    });
+    const vario = at("variogram");
+    const indep = at("independent");
+    assert.ok(vario.rate <= indep.rate, `${formatCalibration("variogram", vario)} vs ${formatCalibration("independent", indep)}`);
+    assert.ok(vario.rate < 0.13, `regressed past its measured 9.8% — ${formatCalibration("variogram", vario)}`);
+  });
 });
 
 describe("curator calibration — power", () => {

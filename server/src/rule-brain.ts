@@ -401,8 +401,14 @@ export class RuleBrain implements BrainAdapter {
               // sitting on the detection threshold (ROADMAP_BRIEF.md
               // 2026-07-25). Scored inside its own group it is a 0.20 against
               // that agent's own ~0.95 baseline.
+              //
+              // align:"epoch" because this row REPLACES #fine's (index.ts
+              // declares it on the epoch grid), and because the variogram null
+              // reads lags between windows of separate replays, which only an
+              // absolute grid lines up (ROADMAP_BRIEF.md 2026-10-14 (10)).
               params: {
                 window_ms: REPLAY_FINE_WINDOW_MS,
+                align: "epoch",
                 group_by: ["agentId"],
                 fromTs,
                 toTs,

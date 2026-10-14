@@ -23,7 +23,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
 | データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済・実データ較正期間の第0段階を実装済・収集器の再開欠陥 (2026-09-30) 修正済・H4 のフラグ切替器/コレクタ設定/レポート整備済・H2 の報告に対照と実効 family を併記 (2026-10-01)・H4 の予行で配線確認の障害 3 件を除去 (テスト487件)・第1段階の最終集計 (2026-10-06): H1 支持 / H2 保留 / H4 規則外・過分散の帰無を opt-in で実装・step も判定化 (2026-10-07、テスト503件)・H3 の最終集計 (2026-10-14): 支持・収集停止・step を両方の帰無で判定化・時間依存の帰無 (variogram) を opt-in で実装・その帰無では step を形の説明に格下げ・10 s の残差は量と率が同時に動く窓 = 本物の出来事として残し `volumeRatio` で名乗る・比較 (参照・帰無) を `$Q[compare]` に宣言し package が名乗る ・レビュー (2026-10-14 (9)) の 8 件を修正 (表示用の `maxTiles` を判定・計測が読んでいた等) (テスト533件) |
+| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済・実データ較正期間の第0段階を実装済・収集器の再開欠陥 (2026-09-30) 修正済・H4 のフラグ切替器/コレクタ設定/レポート整備済・H2 の報告に対照と実効 family を併記 (2026-10-01)・H4 の予行で配線確認の障害 3 件を除去 (テスト487件)・第1段階の最終集計 (2026-10-06): H1 支持 / H2 保留 / H4 規則外・過分散の帰無を opt-in で実装・step も判定化 (2026-10-07、テスト503件)・H3 の最終集計 (2026-10-14): 支持・収集停止・step を両方の帰無で判定化・時間依存の帰無 (variogram) を opt-in で実装・その帰無では step を形の説明に格下げ・10 s の残差は量と率が同時に動く窓 = 本物の出来事として残し `volumeRatio` で名乗る・比較 (参照・帰無) を `$Q[compare]` に宣言し package が名乗る ・レビュー (2026-10-14 (9)) の 8 件を修正 (表示用の `maxTiles` を判定・計測が読んでいた等)・窓要約の常設履歴で variogram を本番で宣言可能に (opt-in、2026-10-14 (10)) (テスト542件) |
 
 灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
@@ -143,6 +143,7 @@ dcp-lighthouse/
       q-collector-binding.ts     ← $Q[observe] → StCollector 動的 bind
       q-retention-binding.ts     ← $Q[pipeline] → retention 窓
       comparison.ts              ← $Q[compare] (参照・帰無) を解決して採点する唯一の場所。package が comparison を名乗る
+      window-history.ts          ← 窓要約の常設履歴 (疎化前に要約・1 時間)。variogram の帰無が読む
     ── 実データ較正期間 (2026-09-27 事前登録。実データ用・灯台側のみ) ──
       wikimedia-collector.ts     ← EventStreams 収集器 (v1 レコード・欠落=盲目・日別 gzip・
                                    トピック別再開 Last-Event-ID・未確定の穴は collector-state.json)
@@ -577,7 +578,15 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
   - **レビュー (2026-10-14 (9))**: 実装順 0〜2 の 5 コミットで 11 件、1〜8 を修正。**表示用の `maxTiles` (12) を §A ゲートと
     ハーネスが読んでいた** (小さいタイルから落ちる) → ゲートとハーネスは上限なし。測り直すと overdispersed の位置別の勾配は
     記録より急 (60 s・09-29〜10-02 で 12.1 → 56.1‰、記録 7.6 → 38.0‰)、結論は不変。H2 の報告はバイト一致。ほかに較正器の参照の
-    1 ms 重なり・variogram の格子の前提・履歴なし variogram の拒否・拒否前の `$Q` 書込を修正
+    1 ms 重なり・variogram の格子の前提・履歴なし variogram の拒否・拒否前の `$Q` 書込を修正。9・10 (整理) も後続で対応
+  - **2b 完了 (2026-10-14 (10)、範囲は 2 に倣い opt-in)**: `window-history.ts` の `WindowHistory` が、鮮度ゾーンから押し出される
+    事象を**疎化の前に** (`RetentionBuffer.onEvict`) applyLens で窓要約にし、1 時間 (`HISTORY_WINDOW_MS`) 保持。答えは
+    保存済み要約 + 未要約分の再生で、全事象の replay とビット一致。レンズは初めて問われたときから追跡 (既定の 2 ビューは起動時から)、
+    epoch 格子・decay なし・mean のみ。`Comparator` は履歴をここから読み、package は `comparison.history.source` を名乗る。
+    書込ゲートは「variogram なら `history_ms` 必須・1 時間以内」に。起動時の行は independent のまま。`/control/compare` を新設。
+    **RuleBrain の RC 提案に `align:"epoch"`** (無いと variogram の replay が毎回失敗、しかも `#fine` 行の epoch を消していた)。
+    **較正**: 参照が疎化された replay でも variogram は 3.5% (AR(1))。薄い窓 (25 事象・率 0.95) では疎化参照が全帰無で超過するが
+    (independent 11.5% > variogram 9.8%)、L5 の既知残差で variogram 固有ではない。ライブで RC の agent-C dip を窓要約の履歴で検出
 - **予定: 実データ較正期間 (2026-09-27 事前登録・第0段階: Wikimedia 収集器・再生ハーネス/指標 (φ・ラグ1・シャッフル帰無・注入) は実装・合成検算済 2026-09-29、ログオン時起動のタスク登録済。H4 用の OTLP 受け口・真値ログ・p 別の間引き再生も実装済 2026-09-29、OTel Demo の実走は第1段階の1日分)** — 統計層の前提、特に「窓内の事象は独立」
   が実データで成り立つかを、事前に固定した仮説で検証する (実データで調整する期間ではない)。
   データ源は Wikimedia EventStreams (無料・認証不要の SSE、value = bot 編集か否か) と

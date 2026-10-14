@@ -172,7 +172,12 @@ export interface SnapshotPackage {
   comparison?: {
     reference: { kind: "preceding"; fromTs: number; toTs: number };
     nullModel: NullModel;
-    history?: { fromTs: number; toTs: number; windowCount: number };
+    /**
+     * `source`: "window-summaries" = the standing, unthinned history
+     * (window-history.ts); "replay" = re-aggregated from the retained events,
+     * whose older part is the thinned reference zone.
+     */
+    history?: { fromTs: number; toTs: number; windowCount: number; source: "window-summaries" | "replay" };
   };
   /**
    * Group labels that were observed but could not be scored, because the

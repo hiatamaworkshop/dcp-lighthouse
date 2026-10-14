@@ -27,6 +27,7 @@
  */
 
 import { RetentionBuffer, type RetentionBufferOptions } from "./retention-buffer.js";
+import { WindowHistory } from "./window-history.js";
 import { SnapshotCurator, familyWiseAlpha } from "./snapshot-curator.js";
 import type { LensEvent } from "./lens.js";
 import type { QObserveParams } from "./q-registry.js";
@@ -184,8 +185,10 @@ function buildTrial(
   shape: Shape,
   injected: { passRate: number } | null,
   retention?: Partial<RetentionBufferOptions>,
+  summarize?: QObserveParams,
 ): {
   observation: RetentionBuffer<LensEvent>; obsFrom: number; obsTo: number; refFrom: number; refTo: number; historyFrom: number;
+  windowHistory?: WindowHistory;
 } {
   const rng = mulberry32(seed);
   const historyMs = (shape.historySpans ?? 0) * shape.spanMs;
@@ -201,13 +204,18 @@ function buildTrial(
   const refFrom = T0 - shape.spanMs;
   const obsTo = T0 + shape.spanMs;
   const historyFrom = refFrom - historyMs;
+  let windowHistory: WindowHistory | undefined;
+  if (summarize !== undefined) {
+    windowHistory = new WindowHistory(buf, { maxHistoryMs: historyMs + 2 * shape.spanMs });
+    windowHistory.track(summarize);
+  }
 
   if (shape.latent !== undefined || historyMs > 0) {
     emitLatent(
       buf, rng, historyFrom, obsTo, shape,
       injected === null ? null : { passRate: injected.passRate, fromTs: obsTo - shape.spanMs / 5 },
     );
-    return { observation: buf, obsFrom: T0, obsTo, refFrom, refTo: T0 - 1, historyFrom };
+    return { observation: buf, obsFrom: T0, obsTo, refFrom, refTo: T0 - 1, historyFrom, windowHistory };
   }
 
   emit(buf, rng, refFrom, T0, shape.eventsPerSpan, shape.passRate, shape.agents);
@@ -222,7 +230,7 @@ function buildTrial(
     emit(buf, rng, T0, burstStart, quietEvents, shape.passRate, shape.agents);
     emit(buf, rng, burstStart, obsTo, shape.eventsPerSpan - quietEvents, injected.passRate, burstAgents);
   }
-  return { observation: buf, obsFrom: T0, obsTo, refFrom, refTo: T0 - 1, historyFrom };
+  return { observation: buf, obsFrom: T0, obsTo, refFrom, refTo: T0 - 1, historyFrom, windowHistory };
 }
 
 /** Does a package claim an anomaly? Baseline tiles are not claims. */
@@ -251,6 +259,12 @@ export interface CalibrationOptions {
    * by every pre-L5 test, so their figures are unaffected by this field existing.
    */
   retention?: Partial<RetentionBufferOptions>;
+  /**
+   * Read the history from window summaries (window-history.ts) — production's
+   * arrangement since 2026-10-14 (10), where the history is unthinned whatever
+   * the retention buffer did to the events. Absent: replayed from the buffer.
+   */
+  historyFromSummaries?: boolean;
 }
 
 export interface CalibrationResult {
@@ -315,12 +329,14 @@ function measure(
   let scored = 0;
 
   for (let i = 0; i < seeds; i++) {
-    const trial = buildTrial(startSeed + i, shape, injected, opts.retention);
+    const trial = buildTrial(startSeed + i, shape, injected, opts.retention, opts.historyFromSummaries ? lens : undefined);
     const observation = trial.observation.replay(lens, trial.obsFrom, trial.obsTo);
     const reference = trial.observation.replay(lens, trial.refFrom, trial.refTo);
-    const history = trial.historyFrom < trial.refFrom
-      ? trial.observation.replay(lens, trial.historyFrom, trial.refTo)
-      : undefined;
+    const history = trial.historyFrom >= trial.refFrom
+      ? undefined
+      : trial.windowHistory !== undefined
+        ? trial.windowHistory.history(lens, trial.historyFrom, trial.refTo)
+        : trial.observation.replay(lens, trial.historyFrom, trial.refTo);
     const pkg = curator.curate(observation, reference, history === undefined ? {} : { history });
     if (!pkg.referenceUsable) {
       unusableReference++;

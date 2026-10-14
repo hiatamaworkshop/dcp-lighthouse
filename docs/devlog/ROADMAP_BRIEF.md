@@ -5646,3 +5646,54 @@ curator のコンストラクタ引数。07-25 の「隠れレンズ」と同じ
   (第 1 段階の探索日) で出した値** (10-07 (3))。10-07〜10-10 の 26.3% とは日が違う
 
 テスト 533 件全通過 (追加: ゲートの固定データ 1 件・ハーネスの拒否 1 件。comparison の格子のテストは履歴なしの場合に広げた)。
+
+## 2026-10-14 (10) — 2b: 窓要約の常設履歴と、variogram の本番での宣言
+
+10-14 (8) の残り 2b。範囲は 2 に倣い **opt-in** (起動時の `compare:test_result:v1` は independent のまま。宣言すれば本番で動く)。
+
+**それまでの形** — 本番の保持は鮮度ゾーン 120 s と、その後ろの疎化された参照ゾーン (×2 加重) だけ。variogram が読む履歴を
+ここから replay すると、短いうえに古い側が加重窓になる (加重窓の variogram は未測定)。そのため書込ゲートで拒否していた。
+
+**変更**
+- `window-history.ts` の `WindowHistory`: 鮮度ゾーンから押し出される事象を **疎化の前に** 受け取り (`RetentionBuffer.onEvict`、
+  read-only の口)、追跡中のレンズごとに完結した窓を applyLens で要約して `HISTORY_WINDOW_MS` (1 時間。H3 の 60 分の腕に合わせた
+  丸め数字) 保持する。問い合わせには「保存済みの要約 + まだ要約していない分 (押し出し境界をまたぐ窓の押し出し済み部分と鮮度ゾーン)
+  の再生」を同じ epoch 格子で返すので、**全事象の replay とビット一致** (テストで固定、疎化バッファ自身の replay は加重窓になる)
+- 追跡はレンズが初めて問われたときから (Brain がどのレンズで replay するかは事前に分からない)。既定の 2 ビューは起動時から追跡。
+  そのとき鮮度ゾーンに丸ごと残っている最初の窓から始まる。要約済みの窓より古い事象が遅れて押し出されたら畳み込まず数える。
+  要約できるのは epoch 格子・decay なし・mean のレンズだけ (それ以外は窓を一度切って再利用できない) で、他は RangeError
+- `Comparator` は履歴源を受け取り、variogram の履歴をそこから読む。package の `comparison.history.source` が
+  `"window-summaries"` / `"replay"` を名乗る (ハーネスと既存テストは replay のまま)
+- index.ts の書込ゲートは「variogram なら `history_ms` 必須 (本番には履歴があるので参照の代用 = 自由度 1 にしない)・
+  `HISTORY_WINDOW_MS` 以内」に置き換え。`/control/compare?null_model=&history_ms=` を新設 (既存の `/control/*` と同じく検証は
+  rulebook と書込ゲートに任せ、拒否は 400)
+- **RuleBrain の RC replay 提案に `align:"epoch"`** — 無いと variogram の replay は格子の前提で毎回失敗する。加えて、この提案は
+  `#fine` 行を丸ごと置き換えるので、起動時に宣言した epoch 格子を RC のたびに消していた (07-29 の anchor-slide を防いだ宣言)
+- 較正器に `historyFromSummaries` (本番と同じ配置で履歴を窓要約から読む)
+
+**較正 (参照が疎化ゾーンから来る replay、×2、400〜200 seeds、30 s 区間・1 s 窓・履歴 10 区間)**
+
+| 形 | independent 鮮度 / 疎化 | variogram 鮮度 / 疎化 (要約履歴) |
+|---|---|---|
+| AR(1) ρ 0.97・率 0.5・100 事象/窓 | — | 3.5% / 3.5% (replay 履歴でも 4.0%) |
+| iid・率 0.95・25 事象/窓 | 2.5% / 11.5% | 1.5% / 9.8% |
+| iid・率 0.95・50 事象/窓 | 2.3% / 9.0% | 1.5% / 8.0% |
+| iid・率 0.95・100 事象/窓 | 2.3% / 5.8% | 1.8% / 4.8% |
+
+疎化参照での超過は **variogram 固有ではない** — 本番既定の independent の方が大きく、窓が厚くなるほど縮む (L5 の「薄い窓 × 疎化」の
+既知残差)。履歴を窓要約から読むか疎化 replay から読むかでは、この測定では差はほぼ出なかった。
+検出力 (率 0.5 → 0.3) は鮮度 66.5% → 疎化 59.5%。超過は独立の課題として残す: 本番で疎化参照を読むのは
+鮮度ゾーンより古い区間の replay (`/control/replay` の手動指定) だけで、Brain の RC replay は鮮度ゾーンの中。
+
+**確認** — テスト 542 件全通過 (window-history 7・comparison 1・較正 1 を追加)。実サーバ (BRAIN_MODE=rule) で書込ゲートの拒否 3 種
+(history_ms なし・1 時間超・綴り違い) を確認、起動 5.5 分後に variogram を宣言するとライブ snapshot が `source:"window-summaries"`・
+33 窓で採点、RC で Brain の replay (1 s・agentId 別、初回の問い合わせで追跡開始) が 108 窓の履歴で agent-C に dip 2 窓
+(volumeRatio 0.92・0.77)。RuleBrain が名指しした agent-B の replay では何も出ず。警告・失敗は 0 件。
+副産物: 較正器で事象 1 件の押し出しごとに pending を sort・filter していたのが 6 倍の遅さ (計 73 s) だったので、
+順序が保たれていれば sort せず、要約が進んだときだけ刈り込むようにした。
+
+**残り**
+- 疎化参照 × 薄い窓の超過 (全帰無)。直すなら参照ゾーンの側
+- 本番の既定を variogram に切り替えるか (iid の模擬ストリームでは失うものだけ、実データ相当の流れが来てから決める)
+- `volumeRatio`・`comparison` の読み手 (dashboard 表示・Brain への渡し方) は未配線のまま
+- ClaudeBrain の replay 提案は `align` を載せないので、variogram 宣言下では関所ではなく実行時に失敗する (shadow なので適用はされない)

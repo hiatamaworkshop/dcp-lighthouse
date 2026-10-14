@@ -16,12 +16,20 @@ import type { QCompareParams, QObserveParams } from "./q-registry.js";
 import { resolveAlign } from "./lens.js";
 import { SnapshotCurator, type CurationOptions, type NullModel, type SnapshotPackage } from "./snapshot-curator.js";
 import type { ReplaySource, SpanRequest } from "./dashboard.js";
+import type { HistorySource } from "./window-history.js";
 
 export class Comparator {
   private readonly curators = new Map<NullModel, SnapshotCurator>();
 
-  /** `base` is every curator option except the null, which the row chooses. */
-  constructor(private readonly base: Omit<CurationOptions, "nullModel"> = {}) {}
+  /**
+   * `base` is every curator option except the null, which the row chooses.
+   * `history` is where a variogram history is read (window-history.ts); absent,
+   * it is replayed from the source like the reference, as the harness does.
+   */
+  constructor(
+    private readonly base: Omit<CurationOptions, "nullModel"> = {},
+    private readonly historySource?: HistorySource,
+  ) {}
 
   /** The curator for one null model, built on first use and kept. */
   curatorFor(nullModel: NullModel): SnapshotCurator {
@@ -48,7 +56,8 @@ export class Comparator {
    * windows, so observation, reference and any history must share one grid,
    * which only `align:"epoch"` guarantees across separate replays. With or
    * without history — off-phase windows get their lag rounded and γ read at
-   * the wrong lag, silently (2026-10-14 (9) review).
+   * the wrong lag, silently (2026-10-14 (9) review). With a history source,
+   * also what it throws for a lens it cannot summarize (decay, median).
    */
   compare(source: ReplaySource, lens: QObserveParams, decl: QCompareParams, observation: SpanRequest): SnapshotPackage {
     const observed = source.replay(lens, observation.fromTs, observation.toTs);
@@ -67,7 +76,9 @@ export class Comparator {
     let historyResult;
     if (decl.history_ms !== undefined) {
       history = { fromTs: reference.fromTs - decl.history_ms, toTs: reference.toTs };
-      historyResult = source.replay(lens, history.fromTs, history.toTs);
+      historyResult = this.historySource !== undefined
+        ? this.historySource.history(lens, history.fromTs, history.toTs)
+        : source.replay(lens, history.fromTs, history.toTs);
     }
 
     const pkg = this.curatorFor(nullModel).curate(observed, referenced, historyResult !== undefined ? { history: historyResult } : {});
@@ -85,7 +96,13 @@ export class Comparator {
         reference: { kind: decl.reference ?? "preceding", ...reference },
         nullModel,
         ...(history !== undefined && historyResult !== undefined
-          ? { history: { ...history, windowCount: historyResult.windows.length } }
+          ? {
+              history: {
+                ...history,
+                windowCount: historyResult.windows.length,
+                source: this.historySource !== undefined ? "window-summaries" as const : "replay" as const,
+              },
+            }
           : {}),
       },
     };

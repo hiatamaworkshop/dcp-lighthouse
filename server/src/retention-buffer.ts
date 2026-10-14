@@ -115,8 +115,32 @@ export class RetentionBuffer<T = unknown> {
     while (drop < this.events.length && this.events[drop].ts < cutoff) drop++;
     if (drop > 0) {
       const aged = this.events.splice(0, drop);
+      for (const listener of this.evictListeners) listener(aged, cutoff);
       if (this.thinningRatio !== undefined) this.absorbIntoReference(aged);
     }
+  }
+
+  private readonly evictListeners: Array<(aged: readonly LensEvent[], cutoff: number) => void> = [];
+
+  /**
+   * Read-only hook on the freshness zone's eviction: `listener` gets each run
+   * of events as it ages out, at full resolution — BEFORE the reference zone
+   * thins it — and the cutoff they fell behind (every event still fresh has
+   * ts >= cutoff, unless it arrived out of order). What window-history.ts
+   * summarizes, so its windows never carry thinning weights. Returns an
+   * unsubscribe, like IngestionBus.tap.
+   */
+  onEvict(listener: (aged: readonly LensEvent[], cutoff: number) => void): () => void {
+    this.evictListeners.push(listener);
+    return () => {
+      const i = this.evictListeners.indexOf(listener);
+      if (i >= 0) this.evictListeners.splice(i, 1);
+    };
+  }
+
+  /** segment() over the freshness zone only: full resolution, never a thinned event. */
+  freshSegment(fromTs = -Infinity, toTs = Infinity): LensEvent[] {
+    return this.events.filter((e) => e.ts >= fromTs && e.ts <= toTs).sort((a, b) => a.ts - b.ts);
   }
 
   /**
