@@ -152,7 +152,7 @@ dcp-lighthouse/
       real-data-harness.ts       ← 再生ハーネス: R_real vs FA_shuffle・注入・φ/ラグ1・間引き再生・
                                    フラグ真値 (ON 区間の除外と検出)
       run-wikimedia-collector.ts / run-otlp-receiver.ts / run-otel-flag-log.ts / run-otel-flag-schedule.ts /
-      run-real-data-report.ts / run-otel-report.ts / run-h3-report.ts / run-variogram-report.ts
+      run-real-data-report.ts / run-otel-report.ts / run-h3-report.ts / run-variogram-report.ts / run-f1-report.ts
                                  ← 起動口 (レポートは保留日を --holdout なしで拒否)
   server/otel/
       otelcol-config-lighthouse.yml ← OTel Demo のコレクタ extras (traces → 受け口へ OTLP/JSON)

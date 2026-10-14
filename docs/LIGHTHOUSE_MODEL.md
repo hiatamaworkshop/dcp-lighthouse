@@ -147,6 +147,16 @@ Earlier drafts of this document conflated the three. They are distinct because e
 
 All three live in a dedicated `$Q` registry, all three are written through the same `set()` call, all three appear in the swap-history stream the dashboard renders. The layering is conceptual, not mechanical.
 
+### A fourth layer: `$Q[compare]` (added 2026-10-14)
+
+The pilot's calibration work added one more layer. A detection is never a property of the observed windows alone: it is the observation scored **against a reference, under a null**. Which reference (the preceding span, how long) and which null (`independent`, `overdispersed`, `variogram`) change the answer as much as `window_ms` does, so they are observation parameters too, and they were lifted out of code into rows:
+
+| Layer            | Scope                                | Examples                                                      |
+|------------------|--------------------------------------|---------------------------------------------------------------|
+| `$Q[compare]`    | What a view's detections are scored against | `reference` (`"preceding"`), `reference_windows`, `null_model`, `history_ms` |
+
+Every comparison in the runtime resolves its row through one place (`comparison.ts`), and every snapshot package names the comparison it actually ran (the reference and history spans it read, and the null). A row is validated on write like the others; a null the process cannot run (e.g. `variogram` without enough kept window-summary history) is refused at write time rather than silently degraded. Detail: `docs/devlog/ROADMAP_BRIEF.md` 2026-10-14 (8)–(10).
+
 > **Implementation note.** `$Q` does *not* ride on the existing field-mapping layer (`FieldMapping` in `dcp-core`). That layer has one clean responsibility — resolving source paths to schema fields — and mixing observation parameters into it would muddy it. `$Q` is its own small registry that `$ST` collectors and the ingestion bus read from. This keeps the "single responsibility per shadow" principle intact down to the implementation.
 
 ### Row format
@@ -156,11 +166,11 @@ All three live in a dedicated `$Q` registry, all three are written through the s
 ```
 ["$Q", "<layer>:<target>", { ...parameters }]
 
-  <layer>  ::= "pipeline" | "observe" | "schema"
+  <layer>  ::= "pipeline" | "observe" | "schema" | "compare"
   <target> ::= "*"  |  "<schema-id>"  |  "<schema-id>#<view-tag>"
 ```
 
-This keeps `$Q` as a single shadow with a single `$V` table, while still making `grep '"\$Q", "observe:'` cheap. The `$Q[layer]` notation used elsewhere in this document is shorthand for the three legal scope prefixes.
+This keeps `$Q` as a single shadow with a single `$V` table, while still making `grep '"\$Q", "observe:'` cheap. The `$Q[layer]` notation used elsewhere in this document is shorthand for the four legal scope prefixes.
 
 ### Scope boundary — what `$Q` is *not* for
 
@@ -184,6 +194,7 @@ Today, window length and aggregation rules are hardcoded in `$ST` collector logi
 ["$Q", "pipeline:*",                  { "stream_rate_cap": 5000, "retention_window_ms": 3600000 }]
 ["$Q", "observe:test_result:v1",      { "window_ms": 60000, "decay": "exp(τ=300s)", "group_by": ["agentId","area"] }]
 ["$Q", "schema:test_result:v1",       { "pass_rate_floor": 0.85 }]
+["$Q", "compare:test_result:v1",      { "reference": "preceding", "null_model": "variogram", "history_ms": 3600000 }]
 ```
 
 ### The 4-layer architectural separation

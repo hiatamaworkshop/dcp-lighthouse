@@ -220,7 +220,7 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       `baseline − max(delta, 3.5·SE)` に (静穏誤発火 0)。薄い二値/三値の非加重窓は**正確な裾
       (事後予測 Dirichlet 多項・mid-p) を等価 z にして Šidák gate へ** — RC レンズの package 誤警報
       41%→2.4% (本番構成 4.3%)、検出力は 100% のまま。詳細は ROADMAP_BRIEF.md 2026-09-27, (2)
-- [ ] **実データ較正期間** (2026-09-27 事前登録、2026-09-29 収集開始) — 統計層の前提 (窓内の事象は
+- [x] **実データ較正期間** (2026-09-27 事前登録、収集 2026-09-29〜10-14) — 統計層の前提 (窓内の事象は
       独立) を実データで検証する。仮説と判定規則は収集前に固定済みで、**実データで調整する期間ではない**。
       - 第 0 段階は実装・合成検算済: Wikimedia EventStreams 収集器 (`wikimedia-collector.ts`)、
         再生ハーネスと指標 (`real-data-harness.ts` — φ・ラグ1・シャッフル帰無・注入)、
@@ -231,10 +231,37 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
         現在時刻へ着き、最大時刻から計算した再接続位置が本流の未読区間を飛ばした)。
         トピック別の再開 (`Last-Event-ID`) と「埋まる見込みが消えてから確定する」欠落検知に修正。
         取りこぼした区間は盲目として残している
-      - 待ち: 探索日レポートの実行、保留期間の最終確認、OTel Demo の実走 (1 日)
-      - 詳細は ROADMAP_BRIEF.md 2026-09-27 (3), 2026-09-29 〜 (3), 2026-09-30
+      - **第 1 段階の最終集計** (2026-10-06、保留 10-03〜10-05 を 1 回): **H1 支持** (10 s 窓で φ 7.63・
+        R_real 99.8% 対 FA_shuffle 5.0% = 周辺モデルは正しく、膨張は依存から)、**H2 保留** (実効 family が
+        増えず機序が発動していない)、**H4 規則外** (配線は通過、ただし p=1 の OFF 警報率が既に 9.1%)
+      - **H3 の最終集計** (2026-10-14、保留 10-11〜10-13 を 1 回、過分散の帰無で読む): **支持** (60 分の腕で
+        日周との相関 r 0.621)。ただし 60 分の腕の全体警報率は 21.2% で、帰無はまだ過小だった。
+        Wikimedia の収集はここで停止 (データは保持)
+      - 保留期間はすべて使用済み。レポートは保留日を常に拒否する (`--holdout` も拒否)。以後の数値は探索
+      - 詳細は ROADMAP_BRIEF.md 2026-09-27 (3), 2026-09-29 〜 (3), 2026-09-30, 2026-10-06, 2026-10-14
+- [x] **過分散を織り込んだ帰無** (2026-10-07、opt-in) — `SnapshotCurator` の `nullModel: "overdispersed"`。
+      参照窓から窓間分散 τ² を ANOVA で推定して SE と正確な裾に足し、推定誤差は Student-t で織り込む。
+      step タイルも同じ gate にかける。詳細は ROADMAP_BRIEF.md 2026-10-07, (2)
+- [x] **時間依存の帰無 (variogram)** (2026-10-14、opt-in) — `nullModel: "variogram"`。参照の終わりまでの
+      窓要約の履歴から variogram γ̂ を推定し、窓ごとに比較分散を出す (τ² は γ が平らな特殊ケース)。
+      探索日で H3 の 60 分の腕の警報率が 26〜31% → 3.1〜3.7% になり、参照からの距離による勾配が消えた。
+      この帰無では step を検定から外し、gate を越えた spike/dip の形の説明に格下げした
+      (1 s 窓 5.0〜5.5% → 3.8〜3.9%)。10 s 窓の残差は量と率が同時に動いた窓 = 本物の出来事として残し、
+      タイルに `volumeRatio` を付ける。詳細は ROADMAP_BRIEF.md 2026-10-14 (3)〜(7)
+- [x] **比較を `$Q[compare]` に宣言** (2026-10-14) — `$Q` の 4 つ目の層 `compare:<schema>#<view>`
+      (`reference`・`reference_windows`・`null_model`・`history_ms`)。本番の 4 か所 (ライブ・Brain の replay・
+      `/control/replay`・§A ゲート) は `comparison.ts` の `Comparator.compare` だけを通り、package は
+      `comparison` (実際に読んだ参照・履歴の区間と帰無) を名乗る。`window-history.ts` が鮮度ゾーンから
+      押し出される事象を疎化の前に窓要約にして 1 時間保持するので、variogram も本番で宣言できる
+      (`GET /control/compare?null_model=&history_ms=`)。起動時の行は independent のまま。
+      詳細は ROADMAP_BRIEF.md 2026-10-14 (8)〜(10)
+- [x] **F1 周期合わせの参照** (2026-10-14、探索) — ハーネスで直前区間 / 前日の同時刻 / 差の差を
+      同じ対比の採点器で比較。この実データでは直前区間の検出力が最も高い (δ 0.2 で 59% 対 25% / 35%) ので、
+      本番の参照は直前区間のまま。詳細は ROADMAP_BRIEF.md 2026-10-14 (11)
+- [ ] **次**: 第 3 段階 (新しい事前登録と保留期間) → `$F` の行 → 仮想ストリームの常設。
+      順序は ROADMAP_BRIEF.md 2026-10-14 (2)
 
-現在テスト計 487 件、全 green。
+現在テスト計 547 件、全 green。
 
 ## 実データ較正期間の運用
 
@@ -244,11 +271,17 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 ```sh
 node dist/run-wikimedia-collector.js       # Wikimedia の常駐収集 (data/wikimedia/、確定した欠落は gaps.jsonl)
 node dist/run-real-data-report.js --from 2026-09-29 --to 2026-10-02   # H1 (φ・R_real vs FA_shuffle)・H2 (検出力 vs G)
-node dist/run-real-data-report.js --from 2026-10-03 --to 2026-10-05 --holdout   # 保留期間: 最終確認 1 回だけ
+node dist/run-h3-report.js --from 2026-10-07 --to 2026-10-10          # H3 (日周変動。既定は過分散の帰無)
+node dist/run-variogram-report.js --from 2026-10-06 --to 2026-10-10   # 3 つの帰無を同じ窓で比較 (位置別の警報率)
+node dist/run-f1-report.js --from 2026-10-06 --to 2026-10-10          # F1: 直前区間 / 前日の同時刻 / 差の差
 node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
 node dist/run-otel-flag-schedule.js        # H4 の障害フラグ切替 (既定: paymentFailure 50%、休止 10%、≒ 24 h)。真値は data/otel/flags.jsonl
-node dist/run-otel-report.js --from 2026-10-03 --to 2026-10-03 --holdout   # H4。p=1 の配線確認が通らなければ判定を出さない
+node dist/run-otel-report.js --from <day> --to <day>   # H4。p=1 の配線確認が通らなければ判定を出さない (判定日 10-03 は使用済み)
 ```
+
+保留期間 (第 1 段階 10-03〜10-05、H3 10-11〜10-13) はどれも最後の 1 回を使い終えたので、各レポートは
+保留日を含む範囲と `--holdout` を拒否する。上の範囲は探索日の例。Wikimedia の収集は 2026-10-14 に停止した
+(タスクは無効化のみ。再開するなら下の常駐手順)。
 
 OTel Demo (open-telemetry/opentelemetry-demo、事前登録で読んだのは 858f76f) は最小構成・観測スタック無しで、
 lighthouse の上書きを最後に重ねて起動する (Demo のディレクトリで):
