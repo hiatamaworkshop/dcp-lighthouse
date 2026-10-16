@@ -100,6 +100,25 @@ export function stage1RangeRefusal(fromDay: string, toDay: string, holdout: bool
   return undefined;
 }
 
+/** H4's judgment day: the only full OTel Demo day recorded, inside stage 1's holdout (spent 2026-10-06). */
+export const H4_JUDGMENT_DAY = "2026-10-03";
+
+/**
+ * run-otel-report's gate. As stage1RangeRefusal, except that `reread` (user
+ * decision 2026-10-16, ROADMAP_BRIEF.md 2026-10-16) opens exactly H4's spent
+ * judgment day again — as exploration: H4's verdict stays the one of 2026-10-06,
+ * and the report says so. It exists to decide whether a new judgment day is
+ * worth running under the variogram null, not to re-judge H4.
+ */
+export function otelRangeRefusal(fromDay: string, toDay: string, holdout: boolean, reread: boolean): string | undefined {
+  if (!reread) return stage1RangeRefusal(fromDay, toDay, holdout);
+  if (holdout) return "refusing: --reread-spent-h4-day is exploration and does not combine with --holdout";
+  if (fromDay !== H4_JUDGMENT_DAY || toDay !== H4_JUDGMENT_DAY) {
+    return `refusing: --reread-spent-h4-day reads exactly ${H4_JUDGMENT_DAY}`;
+  }
+  return undefined;
+}
+
 /**
  * run-h3-report's gate, now that H3's single look was spent on 2026-10-14
  * (ROADMAP_BRIEF.md 2026-10-14): the same as stage 1's — exploration outside
@@ -522,7 +541,17 @@ function scoreInto(arm: ArmTally, pkg: SnapshotPackage): void {
  */
 export function runNullCalibration(
   stream: LoadedStream,
-  opts: HarnessOptions & { shuffleReps?: number; exclude?: readonly GapSpan[] } = {},
+  opts: HarnessOptions & {
+    shuffleReps?: number;
+    exclude?: readonly GapSpan[];
+    /**
+     * Hand the curator this much history before each reference (the variogram
+     * null). Trials then read windows on one grid (windowedStream) and the
+     * history leaves out windows touching `exclude` as well as gaps, so a fault
+     * span does not widen the yardstick it is judged by. No shuffle arm with it.
+     */
+    historyMs?: number;
+  } = {},
 ): NullCalibrationResult {
   const spanMs = opts.spanMs ?? 10_000;
   const baseZ = opts.baseZThreshold ?? 2.0;
@@ -536,6 +565,15 @@ export function runNullCalibration(
 
   const real = tally();
   const shuffled = tally();
+  if (opts.historyMs !== undefined) {
+    if (reps > 0) throw new RangeError("runNullCalibration: the shuffle arm does not run on a grid with history");
+    const strideMs = opts.strideMs ?? 2 * spanMs;
+    const grid = gridFor(stream, lens, spanMs, strideMs);
+    const hist = historyGrid(stream, lens, opts.exclude ?? []);
+    for (const t of trials) scoreInto(real, curateWithHistory(curator, grid, hist, t, opts.historyMs));
+    real.rate = real.trials > 0 ? real.flagged / real.trials : 0;
+    return { planned: trials.length + blind + excluded, blindByGap: blind, excluded, real, shuffled, designTarget: familyWiseAlpha(baseZ) };
+  }
   trials.forEach((t, i) => {
     const region = sliceEvents(stream.events, t.refFrom, t.obsTo);
     const evaluate = (events: readonly LensEvent[]): SnapshotPackage => {
@@ -749,6 +787,14 @@ export interface FlagDetectionOptions extends HarnessOptions {
   target: { key: string; value: string };
   /** Skipped after each edge before a span counts as ON / OFF. Default 30 s. */
   settleMs?: number;
+  /**
+   * Hand the curator this much history before each reference (the variogram
+   * null). The trial then sits on the stream's grid: the reference ends at the
+   * last window boundary at or before the ON edge, the observation starts at
+   * the first boundary at or after edge + settle (each moves < 1 window), and
+   * the history leaves out every ON span and its tail.
+   */
+  historyMs?: number;
 }
 
 export interface FlagDetectionResult {
@@ -789,17 +835,25 @@ export function runFlagDetection(
     planned: spans.length, blindByGap: 0, tooShort: 0, refContaminated: 0, unusableReference: 0,
     trials: 0, detected: 0, power: 0, detectedAnyGroup: 0,
   };
+  const onGrid = opts.historyMs !== undefined;
+  const grid = onGrid ? gridFor(stream, lens, spanMs, spanMs) : undefined;
+  const hist = onGrid ? historyGrid(stream, lens, tails) : undefined;
+  const origin = stream.events.length > 0 ? stream.events[0].ts : 0;
+  const w = lens.window_ms ?? 10_000;
   spans.forEach((s, i) => {
-    const refFrom = s.fromTs - spanMs;
-    const obsFrom = s.fromTs + settleMs;
+    const refTo = onGrid ? origin + Math.floor((s.fromTs - origin) / w) * w : s.fromTs;
+    const refFrom = refTo - spanMs;
+    const obsFrom = onGrid ? origin + Math.ceil((s.fromTs + settleMs - origin) / w) * w : s.fromTs + settleMs;
     const obsTo = obsFrom + spanMs;
     if (obsTo > s.toTs) { out.tooShort++; return; }
     if (tails.some((t, j) => j !== i && t.toTs > refFrom && t.fromTs < s.fromTs)) { out.refContaminated++; return; }
-    if (overlapsGap(stream.gaps, refFrom, s.fromTs) || overlapsGap(stream.gaps, obsFrom, obsTo)) { out.blindByGap++; return; }
-    const pkg = curator.curate(
-      applyLens(sliceEvents(stream.events, obsFrom, obsTo), lens),
-      applyLens(sliceEvents(stream.events, refFrom, s.fromTs), lens),
-    );
+    if (overlapsGap(stream.gaps, refFrom, refTo) || overlapsGap(stream.gaps, obsFrom, obsTo)) { out.blindByGap++; return; }
+    const pkg = grid !== undefined && hist !== undefined
+      ? curateWithHistory(curator, grid, hist, { refFrom, obsFrom: refTo, obsTo: refTo + spanMs }, opts.historyMs ?? 0, { obsFrom, obsTo })
+      : curator.curate(
+          applyLens(sliceEvents(stream.events, obsFrom, obsTo), lens),
+          applyLens(sliceEvents(stream.events, refFrom, refTo), lens),
+        );
     if (!pkg.referenceUsable) { out.unusableReference++; return; }
     out.trials++;
     const tiles = statisticalTiles(pkg);
@@ -1226,6 +1280,25 @@ function gridFor(stream: LoadedStream, lens: QObserveParams, spanMs: number, str
 function curateOnGrid(curator: SnapshotCurator, grid: WindowedStream, t: TrialPlan, historyMs: number): SnapshotPackage {
   return curator.curate(grid.slice(t.obsFrom, t.obsTo), grid.slice(t.refFrom, t.obsFrom), {
     ...(historyMs > 0 ? { history: grid.slice(t.refFrom - historyMs, t.obsFrom) } : {}),
+  });
+}
+
+/** The grid a history is read from: windows touching a gap or an `exclude` span are left out. */
+function historyGrid(stream: LoadedStream, lens: QObserveParams, exclude: readonly GapSpan[]): WindowedStream {
+  return windowedStream({ ...stream, gaps: [...stream.gaps, ...exclude] }, lens);
+}
+
+/**
+ * curateOnGrid with the history from its own grid (`hist`). `obs` overrides the
+ * observation span when it does not follow the reference directly (flag
+ * detection skips the settle tail after the edge).
+ */
+function curateWithHistory(
+  curator: SnapshotCurator, grid: WindowedStream, hist: WindowedStream, t: TrialPlan, historyMs: number,
+  obs: { obsFrom: number; obsTo: number } = t,
+): SnapshotPackage {
+  return curator.curate(grid.slice(obs.obsFrom, obs.obsTo), grid.slice(t.refFrom, t.obsFrom), {
+    ...(historyMs > 0 ? { history: hist.slice(t.refFrom - historyMs, t.obsFrom) } : {}),
   });
 }
 

@@ -28,6 +28,7 @@ import {
   stage1RangeRefusal,
   h3RangeRefusal,
   stage3HoldoutRefusal,
+  otelRangeRefusal,
   stage3Verdict,
   type PositionProfile,
   curatorForNullModel,
@@ -398,6 +399,36 @@ describe("fault-flag truth (H4 / measurement ③)", () => {
     const r = runFlagDetection(faulted, close, opts);
     assert.equal(r.refContaminated, 1);
     assert.equal(r.trials, 1);
+  });
+
+  describe("under the variogram null, with history on one grid", () => {
+    const variogram = () => curatorForNullModel("variogram", 2.0, { history: true });
+    const historyMs = 24 * 60_000;
+    it("still detects the fault in every ON span", () => {
+      const r = runFlagDetection(faulted, spans, { ...opts, spanMs: 60_000, curator: variogram(), historyMs });
+      assert.equal(r.trials, spans.length);
+      assert.equal(r.detected, spans.length);
+    });
+    it("keeps the OFF rate near design with ON time excluded from trials and history", () => {
+      const exclude = flagExclusion(spans, 30_000);
+      const r = runNullCalibration(faulted, { lens: opts.lens, spanMs: 60_000, shuffleReps: 0, exclude, seed: 5, curator: variogram(), historyMs });
+      assert.ok(r.excluded > 0 && r.real.trials > 0);
+      assert.equal(r.planned, r.real.trials + r.real.unusableReference + r.excluded);
+      assert.ok(r.real.rate < 0.09, `OFF rate under variogram = ${r.real.rate}`);
+    });
+    it("refuses a shuffle arm, which does not run on the grid", () => {
+      assert.throws(() => runNullCalibration(faulted, { lens: opts.lens, spanMs: 60_000, shuffleReps: 1, historyMs }), /shuffle/);
+    });
+  });
+});
+
+describe("run-otel-report's gate", () => {
+  it("re-reads exactly the spent judgment day only when asked, and never with --holdout", () => {
+    assert.match(otelRangeRefusal("2026-10-03", "2026-10-03", false, false) ?? "", /stage 1's holdout/);
+    assert.equal(otelRangeRefusal("2026-10-03", "2026-10-03", false, true), undefined);
+    assert.match(otelRangeRefusal("2026-10-02", "2026-10-03", false, true) ?? "", /exactly 2026-10-03/);
+    assert.match(otelRangeRefusal("2026-10-03", "2026-10-03", true, true) ?? "", /--holdout/);
+    assert.equal(otelRangeRefusal("2026-10-22", "2026-10-22", false, false), undefined);
   });
 });
 
