@@ -19,8 +19,10 @@
  * (default independent = H4's pre-registered reading). variogram gets
  * `--history-spans` spans (default 24) of history before each reference, with
  * every ON span and its settle tail left out of it, and trials on one grid.
- * `--reread-spent-h4-day` opens exactly the spent judgment day 2026-10-03 again,
- * as exploration (otelRangeRefusal): its output never replaces H4's verdict.
+ * H4's only judgment day (2026-10-03) sits in stage 1's spent holdout, which is
+ * exploration since 2026-10-22: reading it is allowed and labelled, and the rule
+ * line then says it is NOT H4's verdict (2026-10-06's stands). The older
+ * `--reread-spent-h4-day` (2026-10-16) is still accepted but no longer needed.
  */
 import { join } from "node:path";
 import { parseDuration } from "./otel-flag-schedule.js";
@@ -34,6 +36,7 @@ import {
   thinByTrace,
   curatorForNullModel,
   otelRangeRefusal,
+  spentHoldoutNote,
 } from "./real-data-harness.js";
 
 function arg(name: string, fallback?: string): string | undefined {
@@ -82,9 +85,10 @@ console.log(
   `lens window ${lens.window_ms / 1000}s group_by service, span ${spanMs / 1000}s, settle ${settleMs / 1000}s, ` +
     `sampled by trace (seed ${seed}), null ${nullModel}` + (historyMs !== undefined ? ` with ${historySpans} spans of history` : ""),
 );
-if (reread) {
-  console.log(`EXPLORATION: re-reading the spent judgment day ${fromDay}. H4's verdict stays that of 2026-10-06 (outside the rule).`);
-}
+const spentNote = spentHoldoutNote(fromDay, toDay);
+const exploration = reread || spentNote !== undefined;
+if (spentNote !== undefined) console.log(spentNote);
+if (exploration) console.log("H4's verdict stays that of 2026-10-06 (outside the rule).");
 
 const offRate = new Map<number, number>();
 let wiring = { detected: 0, trials: 0 };
@@ -111,7 +115,7 @@ const verdict = h4Verdict({
   offRateP1: offRate.get(1) ?? 0, offRateP01: offRate.get(0.1) ?? 0, design, wiring,
 });
 console.log(
-  reread || nullModel !== "independent"
+  exploration || nullModel !== "independent"
     ? `\nthe pre-registered rule applied to this exploration (NOT H4's verdict): ${verdict}`
     : `\nH4 (pre-registered rule): ${verdict}`,
 );

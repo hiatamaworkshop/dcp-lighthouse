@@ -76,54 +76,91 @@ export const STAGE3_HOLDOUT_FROM_DAY = "2026-10-19";
 export const STAGE3_HOLDOUT_TO_DAY = "2026-10-21";
 
 /**
- * The gate for stage 1's reports (run-real-data-report, run-otel-report) now
- * that their holdout is spent (decided 2026-10-06): exploration may read any
- * day OUTSIDE the holdouts — stage 1's and H3's (each looked at once,
- * never again), and stage 3's (not yet looked at) — and `--holdout` is refused
- * outright. Before this, these reports refused every day from 2026-10-03 on,
- * which also locked out the exploration days the next statistical task needs.
+ * Stage 4 (ROADMAP_BRIEF.md 2026-10-22 (6)): one whole week, Monday to Sunday,
+ * so the holdout holds every weekday once — the earlier 4+3 splits put
+ * different weekdays on each side (2026-10-22 (4)). Sealed from 2026-10-22,
+ * before any of its data existed.
+ */
+export const STAGE4_HOLDOUT_FROM_DAY = "2026-10-26";
+export const STAGE4_HOLDOUT_TO_DAY = "2026-11-01";
+
+/** A holdout period and the day its single look was taken (`spentOn` absent = not yet looked at: sealed). */
+export interface Holdout {
+  name: string;
+  from: string;
+  to: string;
+  spentOn?: string;
+}
+
+/** Every holdout so far. Each verdict was taken from its single look and stands as recorded. */
+export const HOLDOUTS: readonly Holdout[] = [
+  { name: "stage 1's holdout", from: HOLDOUT_FROM_DAY, to: HOLDOUT_TO_DAY, spentOn: "2026-10-06" },
+  { name: "H3's holdout", from: H3_HOLDOUT_FROM_DAY, to: H3_HOLDOUT_TO_DAY, spentOn: "2026-10-14" },
+  { name: "stage 3's holdout", from: STAGE3_HOLDOUT_FROM_DAY, to: STAGE3_HOLDOUT_TO_DAY, spentOn: "2026-10-22" },
+  { name: "stage 4's holdout", from: STAGE4_HOLDOUT_FROM_DAY, to: STAGE4_HOLDOUT_TO_DAY },
+];
+
+/**
+ * What exploration may read: every day except an UNSPENT holdout's. A spent
+ * holdout is exploration data from the day after its look (pre-registration
+ * revision 2026-10-22, user approved): its verdict was taken once and is never
+ * re-taken, and any change made after reading it is tested on a NEW holdout —
+ * which is all the single look protects. Keeping spent holdouts shut protected
+ * nothing and cost the only data on why a look failed; with 4+3-day splits it
+ * also kept every Monday out of exploration (all three holdouts held one).
  * Returns the refusal message, or undefined when the range may be read.
+ */
+export function explorationRangeRefusal(fromDay: string, toDay: string, holdouts: readonly Holdout[] = HOLDOUTS): string | undefined {
+  for (const h of holdouts) {
+    if (h.spentOn === undefined && fromDay <= h.to && toDay >= h.from) {
+      return `refusing: ${fromDay}…${toDay} touches ${h.name} (${h.from}…${h.to}), sealed until its single look`;
+    }
+  }
+  return undefined;
+}
+
+/** The note a report prints when its range reads spent holdout days (undefined when it reads none). */
+export function spentHoldoutNote(fromDay: string, toDay: string, holdouts: readonly Holdout[] = HOLDOUTS): string | undefined {
+  const touched = holdouts.filter((h) => h.spentOn !== undefined && fromDay <= h.to && toDay >= h.from);
+  if (touched.length === 0) return undefined;
+  return `EXPLORATION over spent holdout days (${touched.map((h) => `${h.name} ${h.from}…${h.to}, verdict of ${h.spentOn}`).join("; ")}): ` +
+    "those verdicts stand as recorded; nothing here re-takes them";
+}
+
+/**
+ * The gate for stage 1's reports (run-real-data-report, run-otel-report) now
+ * that their holdout is spent (decided 2026-10-06): `--holdout` is refused
+ * outright, and exploration may read any day but an unspent holdout's
+ * (explorationRangeRefusal). Returns the refusal message, or undefined.
  */
 export function stage1RangeRefusal(fromDay: string, toDay: string, holdout: boolean): string | undefined {
   if (holdout) {
     return `refusing: stage 1's holdout (${HOLDOUT_FROM_DAY}…${HOLDOUT_TO_DAY}) was spent on 2026-10-06 — it had one look`;
   }
-  for (const [from, to, what] of [
-    [HOLDOUT_FROM_DAY, HOLDOUT_TO_DAY, "stage 1's holdout"],
-    [H3_HOLDOUT_FROM_DAY, H3_HOLDOUT_TO_DAY, "H3's holdout"],
-    [STAGE3_HOLDOUT_FROM_DAY, STAGE3_HOLDOUT_TO_DAY, "stage 3's holdout"],
-  ] as const) {
-    if (fromDay <= to && toDay >= from) {
-      return `refusing: ${fromDay}…${toDay} touches ${what} (${from}…${to}); explore outside it`;
-    }
-  }
-  return undefined;
+  return explorationRangeRefusal(fromDay, toDay);
 }
 
 /** H4's judgment day: the only full OTel Demo day recorded, inside stage 1's holdout (spent 2026-10-06). */
 export const H4_JUDGMENT_DAY = "2026-10-03";
 
 /**
- * run-otel-report's gate. As stage1RangeRefusal, except that `reread` (user
- * decision 2026-10-16, ROADMAP_BRIEF.md 2026-10-16) opens exactly H4's spent
- * judgment day again — as exploration: H4's verdict stays the one of 2026-10-06,
- * and the report says so. It exists to decide whether a new judgment day is
- * worth running under the variogram null, not to re-judge H4.
+ * run-otel-report's gate: stage1RangeRefusal. `reread` (`--reread-spent-h4-day`,
+ * user decision 2026-10-16) opened exactly H4's spent judgment day as
+ * exploration before spent holdouts were opened in general (2026-10-22); it is
+ * still accepted, and still refuses to combine with --holdout, but no longer
+ * needed — the report labels any read of a spent day as exploration either way.
  */
 export function otelRangeRefusal(fromDay: string, toDay: string, holdout: boolean, reread: boolean): string | undefined {
-  if (!reread) return stage1RangeRefusal(fromDay, toDay, holdout);
-  if (holdout) return "refusing: --reread-spent-h4-day is exploration and does not combine with --holdout";
-  if (fromDay !== H4_JUDGMENT_DAY || toDay !== H4_JUDGMENT_DAY) {
-    return `refusing: --reread-spent-h4-day reads exactly ${H4_JUDGMENT_DAY}`;
-  }
-  return undefined;
+  if (reread && holdout) return "refusing: --reread-spent-h4-day is exploration and does not combine with --holdout";
+  return stage1RangeRefusal(fromDay, toDay, holdout);
 }
 
 /**
  * run-h3-report's gate, now that H3's single look was spent on 2026-10-14
- * (ROADMAP_BRIEF.md 2026-10-14): the same as stage 1's — exploration outside
- * both holdouts, `--holdout` refused outright. Until then run-h3-report only
- * refused a holdout read that came too early, so the spent look could be taken again.
+ * (ROADMAP_BRIEF.md 2026-10-14): the same as stage 1's — `--holdout` refused
+ * outright, exploration anywhere but an unspent holdout. Until then
+ * run-h3-report only refused a holdout read that came too early, so the spent
+ * look could be taken again.
  */
 export function h3RangeRefusal(fromDay: string, toDay: string, holdout: boolean): string | undefined {
   if (holdout) {
@@ -139,9 +176,11 @@ export function h3RangeRefusal(fromDay: string, toDay: string, holdout: boolean)
  *
  * The day in a file name is the collector's ARRIVAL day, not the event's: a
  * straggler from just before midnight lands in the next day's file, and events
- * re-fetched after downtime land in the day they were fetched. Arrival is never
- * earlier than event time, so a `toDay` range can never contain a later day's
- * events (the holdout stays sealed); it can only miss a few seconds at its end.
+ * re-fetched after downtime land in the day they were fetched — hours of them
+ * after an outage across midnight (2026-10-21's second half sat in
+ * 2026-10-22.jsonl). So the files after `toDay` are read as well, for their
+ * events inside the range only (loadDayFiles). Arrival is never earlier than
+ * event time, so no file before `fromDay` can hold a range event.
  */
 export async function loadWikiDir(
   dir: string,
@@ -1386,6 +1425,327 @@ export function runPositionProfile(
   };
 }
 
+// ── Calibration by volume, and detection at steady volume (2026-10-22 (5)) ──
+
+/**
+ * The band of `volumeRatio` (window count ÷ the reference's median window count)
+ * read as ordinary volume — 2026-10-14 (7)'s band. Outside it, the window's
+ * volume moved with its rate: the stream's make-up changed (a bot batch starting
+ * or stopping), a real event by that decision, not a null to calibrate against.
+ * Only meaningful where the band is several Poisson SDs wide (10 s and 60 s
+ * windows on this stream, not 1 s ones); reports print the width.
+ */
+export const ORDINARY_VOLUME: readonly [number, number] = [0.8, 1.25];
+
+/** A curator like the reports' (curatorForNullModel / newCurator) that also records every window's score. */
+export function scoringCurator(nullModel: "independent" | "overdispersed" | "variogram", baseZ = 2.0): SnapshotCurator {
+  return new SnapshotCurator({
+    spikeZThreshold: baseZ, includeBaseline: true, maxTiles: HARNESS_MAX_TILES, recordWindowScores: true,
+    ...(nullModel === "independent" ? {} : { nullModel }),
+  });
+}
+
+export interface VolumeBandStats {
+  band: "ordinary" | "low" | "high";
+  /** (trial, window) pairs: overlapping trials score one window against several references. */
+  windows: number;
+  meanGateZ: number;
+  varGateZ: number;
+  /** Share with |gateZ| ≥ 1, 2, 3 (N(0, 1): 31.7%, 4.55%, 0.27%) and ≥ the package's own gate. */
+  over1: number;
+  over2: number;
+  over3: number;
+  overGate: number;
+  /** overGate under a calibrated null: the mean per-window two-sided alpha of the gates applied. */
+  nominalOverGate: number;
+  /** The raw sums the figures above come from, so runs can be pooled exactly. */
+  sums: GateZSums;
+}
+
+/** VolumeBandStats' figures from its sums. */
+export function bandFigures(band: VolumeBandStats["band"], a: GateZSums): VolumeBandStats {
+  const mean = a.n > 0 ? a.s / a.n : 0;
+  return {
+    band, windows: a.n, meanGateZ: mean, varGateZ: a.n > 1 ? (a.ss - a.n * mean * mean) / (a.n - 1) : 0,
+    over1: a.n > 0 ? a.o1 / a.n : 0, over2: a.n > 0 ? a.o2 / a.n : 0, over3: a.n > 0 ? a.o3 / a.n : 0,
+    overGate: a.n > 0 ? a.og / a.n : 0, nominalOverGate: a.n > 0 ? a.alpha / a.n : 0, sums: { ...a },
+  };
+}
+
+/** Pool b into a (exact: the sums add). */
+export function addGateZSums(a: GateZSums, b: GateZSums): void {
+  a.n += b.n;
+  a.s += b.s;
+  a.ss += b.ss;
+  a.o1 += b.o1;
+  a.o2 += b.o2;
+  a.o3 += b.o3;
+  a.og += b.og;
+  a.alpha += b.alpha;
+}
+
+/** Running sums of the gate's z over a set of (trial, window) pairs. */
+export interface GateZSums {
+  n: number;
+  /** Σz and Σz². */
+  s: number;
+  ss: number;
+  /** Pairs with |z| ≥ 1, ≥ 2, ≥ 3, and ≥ the package's own gate. */
+  o1: number;
+  o2: number;
+  o3: number;
+  og: number;
+  /** Σ of the per-window two-sided alpha of the gates applied (the nominal count for `og`). */
+  alpha: number;
+}
+
+export const emptyGateZSums = (): GateZSums => ({ n: 0, s: 0, ss: 0, o1: 0, o2: 0, o3: 0, og: 0, alpha: 0 });
+
+export interface VolumeCalibrationDay {
+  day: string;
+  trials: number;
+  flagged: number;
+  flaggedOrdinary: number;
+  episodes: number;
+  compositionEpisodes: number;
+  /** The gate's z at ordinary volume that day — for day-to-day spread (a day is the resampling unit). */
+  ordinary: GateZSums;
+}
+
+export interface VolumeCalibrationResult {
+  trials: number;
+  unusableReference: number;
+  blindByGap: number;
+  /** Packages with any statistical tile — the alarm every earlier figure counted. */
+  flagged: number;
+  /** Packages whose gate fired on a window of ordinary volume. */
+  flaggedOrdinary: number;
+  /** flaggedOrdinary / trials under a calibrated null: the mean over trials of 1 − (1 − α′)^(ordinary windows scored). */
+  expectedOrdinaryRate: number;
+  bands: VolumeBandStats[];
+  /** Runs of alarming trials one stride apart — the independent units the alarm rate is made of. */
+  episodes: number;
+  /** Episodes in which the gate fired, and fired only on windows off ordinary volume. */
+  compositionEpisodes: number;
+  byDay: VolumeCalibrationDay[];
+  /** Median count of the scored windows' reference median — what the band's width in Poisson SDs is read from. */
+  typicalWindowCount: number;
+  designTarget: number;
+}
+
+/**
+ * "Preceding span as reference" trials (runPositionProfile's) with the gate's
+ * score recorded for EVERY window and split by volume. Two questions the
+ * package alarm rate alone cannot tell apart on unlabelled real data
+ * (ROADMAP_BRIEF.md 2026-10-22 (4)): is the predictive distribution right where
+ * the null's assumptions hold (ordinary volume: the bulk and the tail of gateZ
+ * against N(0, 1), and the ordinary-volume package rate against what the gate
+ * promises for that many windows) — and how much of the alarm rate is the
+ * stream's make-up changing (episodes whose fired windows all moved in volume).
+ * `curator` must record window scores (scoringCurator).
+ */
+export function runVolumeCalibration(
+  stream: LoadedStream,
+  opts: HarnessOptions & { historyMs?: number; obsFromTs?: number; band?: readonly [number, number] },
+): VolumeCalibrationResult {
+  const spanMs = opts.spanMs ?? 10_000;
+  const strideMs = opts.strideMs ?? 2 * spanMs;
+  const baseZ = opts.baseZThreshold ?? 2.0;
+  const curator = opts.curator;
+  if (curator === undefined) throw new RangeError("runVolumeCalibration needs a curator that records window scores (scoringCurator)");
+  const [lo, hi] = opts.band ?? ORDINARY_VOLUME;
+  const lens: QObserveParams = opts.lens ?? { window_ms: 1_000 };
+  const grid = gridFor(stream, lens, spanMs, strideMs);
+  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs, strideMs, obsFromTs: opts.obsFromTs });
+  const acc = new Map<VolumeBandStats["band"], GateZSums>();
+  for (const b of ["ordinary", "low", "high"] as const) acc.set(b, emptyGateZSums());
+  const bandOf = (r: number): VolumeBandStats["band"] => (r < lo ? "low" : r > hi ? "high" : "ordinary");
+  const out: VolumeCalibrationResult = {
+    trials: 0, unusableReference: 0, blindByGap: blind, flagged: 0, flaggedOrdinary: 0, expectedOrdinaryRate: 0,
+    bands: [], episodes: 0, compositionEpisodes: 0, byDay: [], typicalWindowCount: 0, designTarget: familyWiseAlpha(baseZ),
+  };
+  const days = new Map<string, VolumeCalibrationDay>();
+  const typical: number[] = [];
+  let expectedSum = 0;
+  // The open episode: the last alarming trial's obsFrom, and whether any of its fired windows sat at ordinary volume.
+  let open: { last: number; day: VolumeCalibrationDay; anyFired: boolean; anyOrdinary: boolean } | undefined;
+  const closeEpisode = () => {
+    if (open === undefined) return;
+    out.episodes++;
+    open.day.episodes++;
+    if (open.anyFired && !open.anyOrdinary) {
+      out.compositionEpisodes++;
+      open.day.compositionEpisodes++;
+    }
+    open = undefined;
+  };
+  for (const t of trials) {
+    const pkg = curateOnGrid(curator, grid, t, opts.historyMs ?? 0);
+    if (!pkg.referenceUsable) {
+      out.unusableReference++;
+      continue;
+    }
+    const scores = pkg.windowScores;
+    if (scores === undefined) throw new RangeError("runVolumeCalibration: the curator did not record window scores (scoringCurator)");
+    const dayKey = new Date(t.obsFrom).toISOString().slice(0, 10);
+    let day = days.get(dayKey);
+    if (day === undefined) {
+      days.set(dayKey, (day = { day: dayKey, trials: 0, flagged: 0, flaggedOrdinary: 0, episodes: 0, compositionEpisodes: 0, ordinary: emptyGateZSums() }));
+    }
+    out.trials++;
+    day.trials++;
+    const gateAt = pkg.selection.effectiveZThreshold;
+    const alpha = familyWiseAlpha(gateAt);
+    let ordinaryWindows = 0;
+    let firedOrdinary = false;
+    let fired = false;
+    for (const s of scores) {
+      if (!Number.isFinite(s.volumeRatio)) continue;
+      const band = bandOf(s.volumeRatio);
+      const g = Math.abs(s.gateZ);
+      for (const a of band === "ordinary" ? [acc.get(band)!, day.ordinary] : [acc.get(band)!]) {
+        a.n++;
+        a.s += s.gateZ;
+        a.ss += s.gateZ * s.gateZ;
+        if (g >= 1) a.o1++;
+        if (g >= 2) a.o2++;
+        if (g >= 3) a.o3++;
+        if (g >= gateAt) a.og++;
+        a.alpha += alpha;
+      }
+      if (g >= gateAt) {
+        fired = true;
+        if (band === "ordinary") firedOrdinary = true;
+      }
+      if (band === "ordinary") ordinaryWindows++;
+      typical.push(s.count / s.volumeRatio);
+    }
+    expectedSum += 1 - Math.pow(1 - alpha, ordinaryWindows);
+    const alarm = statisticalTiles(pkg).length > 0;
+    if (alarm) {
+      out.flagged++;
+      day.flagged++;
+    }
+    if (firedOrdinary) {
+      out.flaggedOrdinary++;
+      day.flaggedOrdinary++;
+    }
+    if (alarm) {
+      if (open !== undefined && t.obsFrom - open.last !== strideMs) closeEpisode();
+      if (open === undefined) open = { last: t.obsFrom, day, anyFired: false, anyOrdinary: false };
+      open.last = t.obsFrom;
+      open.anyFired ||= fired;
+      open.anyOrdinary ||= firedOrdinary;
+    } else {
+      closeEpisode();
+    }
+  }
+  closeEpisode();
+  out.expectedOrdinaryRate = out.trials > 0 ? expectedSum / out.trials : 0;
+  out.bands = [...acc.entries()].map(([band, a]) => bandFigures(band, a));
+  out.byDay = [...days.values()].sort((a, b) => (a.day < b.day ? -1 : 1));
+  typical.sort((a, b) => a - b);
+  out.typicalWindowCount = typical.length > 0 ? typical[typical.length >> 1] : 0;
+  return out;
+}
+
+/**
+ * `shift` added to a binary, unweighted window's mean by flipping whole events
+ * (0 → 1 for a positive shift, 1 → 0 for a negative one) — the window's count,
+ * i.e. its volume, is unchanged. Undefined when the window is not 0/1 data, is
+ * weighted, or has too few events on the side to flip.
+ */
+export function shiftBinaryWindow(w: WindowStat, shift: number): { window: WindowStat; shift: number } | undefined {
+  if (w.weights !== undefined || w.aggFunc !== undefined || !(w.count > 0)) return undefined;
+  const ones = Math.round(w.mean * w.count);
+  if (Math.abs(ones - w.mean * w.count) > 1e-6 || Math.abs(w.sumSq - ones) > 1e-6) return undefined;
+  const k = Math.round(Math.abs(shift) * w.count);
+  const after = shift < 0 ? ones - k : ones + k;
+  if (after < 0 || after > w.count) return undefined;
+  return {
+    window: {
+      ...w, mean: after / w.count, sumSq: after,
+      ...(w.range !== undefined ? { range: { min: after < w.count ? 0 : 1, max: after > 0 ? 1 : 0 } } : {}),
+    },
+    shift: (after - ones) / w.count,
+  };
+}
+
+export interface ShiftInjectionResult {
+  trials: number;
+  /** A statistical tile on the shifted windows, in the shift's direction. */
+  detected: number;
+  power: number;
+  /** The same trials with nothing planted: tiles on those windows in that direction. */
+  controlDetected: number;
+  controlRate: number;
+  /** Mean shift actually planted (whole events), over scored trials. */
+  meanShiftTruth: number;
+  /** Trials whose shifted windows were missing, unscorable, or short of events to flip. */
+  skipped: number;
+  unusableReference: number;
+  blindByGap: number;
+}
+
+/**
+ * Measurement ② for the "preceding span" trials on one grid (the variogram
+ * null's trials, with history): plant a sustained shift of the window mean,
+ * at steady volume, into the first `windows` windows of each observation — the
+ * trial whose reference ends where the change begins, the way runFlagDetection
+ * reads a fault's edge — and see whether the curator names it. The same trials
+ * scored unplanted give the control. The history ends where the reference does,
+ * so the plant never widens its own yardstick. Mixed (ungrouped) lens only.
+ */
+export function runShiftInjection(
+  stream: LoadedStream,
+  opts: HarnessOptions & { historyMs?: number; obsFromTs?: number; shift: number; windows: number; every?: number },
+): ShiftInjectionResult {
+  const spanMs = opts.spanMs ?? 10_000;
+  const strideMs = opts.strideMs ?? 2 * spanMs;
+  const curator = opts.curator ?? newCurator(opts.baseZThreshold ?? 2.0);
+  const lens: QObserveParams = opts.lens ?? { window_ms: 1_000 };
+  if ((lens.group_by ?? []).length > 0) throw new RangeError("runShiftInjection plants into the mixed stream; a grouped lens is not supported");
+  const windowMs = lens.window_ms ?? 1_000;
+  const every = Math.max(1, Math.floor(opts.every ?? 1));
+  const grid = gridFor(stream, lens, spanMs, strideMs);
+  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs, strideMs, obsFromTs: opts.obsFromTs });
+  const out: ShiftInjectionResult = {
+    trials: 0, detected: 0, power: 0, controlDetected: 0, controlRate: 0, meanShiftTruth: 0, skipped: 0, unusableReference: 0, blindByGap: blind,
+  };
+  const tags = opts.shift < 0 ? new Set(["dip", "step_down"]) : new Set(["spike", "step_up"]);
+  let truth = 0;
+  for (let k = 0; k < trials.length; k += every) {
+    const t = trials[k];
+    const from = t.obsFrom;
+    const to = t.obsFrom + opts.windows * windowMs;
+    const obs = grid.slice(t.obsFrom, t.obsTo);
+    const ref = grid.slice(t.refFrom, t.obsFrom);
+    const context = (opts.historyMs ?? 0) > 0 ? { history: grid.slice(t.refFrom - (opts.historyMs ?? 0), t.obsFrom) } : {};
+    const target = obs.windows.filter((w) => w.windowStart >= from && w.windowStart < to);
+    const planted = target.map((w) => shiftBinaryWindow(w, opts.shift));
+    if (target.length < opts.windows || !target.every(isScorable) || planted.some((p) => p === undefined)) {
+      out.skipped++;
+      continue;
+    }
+    const swap = new Map(target.map((w, i) => [w, planted[i]!.window]));
+    const pkg = curator.curate({ ...obs, windows: obs.windows.map((w) => swap.get(w) ?? w) }, ref, context);
+    if (!pkg.referenceUsable) {
+      out.unusableReference++;
+      continue;
+    }
+    const control = curator.curate(obs, ref, context);
+    const hit = (p: SnapshotPackage) => statisticalTiles(p).some((x) => tags.has(x.shapeTag) && x.regionStart < to && x.regionEnd > from);
+    out.trials++;
+    truth += planted.reduce((s, p) => s + p!.shift, 0) / planted.length;
+    if (hit(pkg)) out.detected++;
+    if (hit(control)) out.controlDetected++;
+  }
+  out.power = out.trials > 0 ? out.detected / out.trials : 0;
+  out.controlRate = out.trials > 0 ? out.controlDetected / out.trials : 0;
+  out.meanShiftTruth = out.trials > 0 ? truth / out.trials : 0;
+  return out;
+}
+
 function pearson(x: readonly number[], y: readonly number[]): number {
   const n = x.length;
   if (n < 3) return NaN;
@@ -1448,6 +1808,57 @@ export function stage3HoldoutRefusal(fromDay: string, toDay: string, _nowMs: num
 
 /** Above this share of planned holdout trials blind by collection gaps, stage 3 gives no verdict. */
 export const STAGE3_MAX_BLIND_SHARE = 0.2;
+
+/**
+ * Stage 4's single look (ROADMAP_BRIEF.md 2026-10-22 (6)): `--holdout` is taken
+ * only for exactly the holdout week and only once it is complete (the UTC day
+ * after its Sunday has begun), so an early look at a partial week cannot spend
+ * it. Returns the refusal message, or undefined.
+ */
+export function stage4HoldoutRefusal(fromDay: string, toDay: string, nowMs: number): string | undefined {
+  if (fromDay !== STAGE4_HOLDOUT_FROM_DAY || toDay !== STAGE4_HOLDOUT_TO_DAY) {
+    return `refusing: stage 4's --holdout reads exactly ${STAGE4_HOLDOUT_FROM_DAY}…${STAGE4_HOLDOUT_TO_DAY}`;
+  }
+  if (new Date(nowMs).toISOString().slice(0, 10) <= STAGE4_HOLDOUT_TO_DAY) {
+    return `refusing: stage 4's holdout is not complete until ${STAGE4_HOLDOUT_TO_DAY} has ended (UTC)`;
+  }
+  return undefined;
+}
+
+/**
+ * Stage 4's rule (claim C, 2026-10-22 (6)), on the gate's z at ORDINARY volume
+ * under the variogram null, pooled over the holdout week, per arm:
+ *   SUPPORTED — |z| ≥ 2 share ≤ 6.0%, |z| ≥ 3 share ≤ 0.8%, and var z in [0.6, 1.25], on both arms;
+ *   REJECTED  — on either arm |z| ≥ 2 > 9.1% (2× nominal), |z| ≥ 3 > 1.35% (5×), or var z > 1.5 (liberal);
+ *   HELD      — otherwise, with the reason (too conservative, or between the lines).
+ * NO VERDICT when an arm scored nothing or is blind by collection gaps for more
+ * than STAGE3_MAX_BLIND_SHARE of its planned trials. The package alarm rate,
+ * composition episodes and detection are reported beside it, not judged.
+ */
+export const STAGE4_RULE = {
+  support: { over2: 0.06, over3: 0.008, varLo: 0.6, varHi: 1.25 },
+  reject: { over2: 0.091, over3: 0.0135, varHi: 1.5 },
+} as const;
+
+export function stage4Verdict(arms: ReadonlyArray<{ name: string; ordinary: GateZSums; trials: number; blindByGap: number }>): string {
+  for (const a of arms) {
+    if (a.trials === 0 || a.ordinary.n === 0) return `NO VERDICT: ${a.name} scored no trials`;
+    if (a.blindByGap / (a.trials + a.blindByGap) > STAGE3_MAX_BLIND_SHARE) {
+      return `NO VERDICT: ${a.name} is blind by collection gaps for ${(100 * a.blindByGap / (a.trials + a.blindByGap)).toFixed(1)}% of its trials (> ${100 * STAGE3_MAX_BLIND_SHARE}%)`;
+    }
+  }
+  const figs = arms.map((a) => ({ name: a.name, f: bandFigures("ordinary", a.ordinary) }));
+  const pct = (x: number) => `${(100 * x).toFixed(2)}%`;
+  const said = figs.map(({ name, f }) => `${name}: |z|≥2 ${pct(f.over2)}, |z|≥3 ${pct(f.over3)}, var ${f.varGateZ.toFixed(3)}`).join("; ");
+  const r = STAGE4_RULE.reject;
+  const liberal = figs.filter(({ f }) => f.over2 > r.over2 || f.over3 > r.over3 || f.varGateZ > r.varHi);
+  if (liberal.length > 0) return `REJECTED (${said}; ${liberal.map((x) => x.name).join(", ")} past a reject line)`;
+  const s = STAGE4_RULE.support;
+  const off = figs.filter(({ f }) => !(f.over2 <= s.over2 && f.over3 <= s.over3 && f.varGateZ >= s.varLo && f.varGateZ <= s.varHi));
+  if (off.length === 0) return `SUPPORTED (${said})`;
+  const why = off.map(({ name, f }) => `${name} ${f.varGateZ < s.varLo ? "too conservative" : "between the support and reject lines"}`).join(", ");
+  return `HELD: ${said} — ${why}`;
+}
 
 /**
  * The pre-registered stage 3 rule (2026-10-14 (12)) on the variogram null's two

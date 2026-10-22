@@ -2,7 +2,8 @@
  * The variogram null on the collected Wikimedia stream, against the other two
  * (ROADMAP_BRIEF.md 2026-10-14 (2) item 1, (5)). Exploration only: every
  * collected day has been seen, so these figures are exploration whatever the
- * range, and the range must stay outside both holdouts (stage1RangeRefusal).
+ * range. Spent holdout days may be read and are labelled in the output; an
+ * unspent holdout is refused (stage1RangeRefusal).
  *
  *   cd server && npm run build && node dist/run-variogram-report.js --from 2026-10-06 --to 2026-10-10
  *
@@ -15,15 +16,10 @@
  * span — flat when the null is right about drift. H3's arm also gets the
  * diurnal correlation, for reading against the 2026-10-14 verdict.
  *
- * Stage 3's single look (ROADMAP_BRIEF.md 2026-10-14 (12)) is the one exception
- * to "exploration only":
- *
- *   node dist/run-variogram-report.js --from 2026-10-19 --to 2026-10-21 --holdout
- *
- * reads exactly the holdout days once they are complete (stage3HoldoutRefusal),
- * plus the two days before them for references and history, scores only trials
- * observing inside the holdout, and prints stage3Verdict on the variogram null's
- * arms V-a and V-b with the pre-registered settings (`--history-spans` refused).
+ * `--full-history` loads the two days before `--from` as well and scores only
+ * trials observing from `--from` 00:00Z on, so every trial has its whole
+ * reference and history — the way stage 3's single look read its holdout
+ * (2026-10-22, commit f0b338c). That look is spent: `--holdout` is refused.
  */
 import { join } from "node:path";
 import {
@@ -31,10 +27,9 @@ import {
   loadWikiDir,
   runDiurnalAlarms,
   runPositionProfile,
+  spentHoldoutNote,
   stage1RangeRefusal,
   stage3HoldoutRefusal,
-  stage3Verdict,
-  STAGE3_HOLDOUT_FROM_DAY,
 } from "./real-data-harness.js";
 
 function arg(name: string): string | undefined {
@@ -46,14 +41,16 @@ const fromDay = arg("from");
 const toDay = arg("to");
 const historySpans = Number(arg("history-spans") ?? 24);
 if (fromDay === undefined || toDay === undefined || !(historySpans >= 0)) {
-  console.error("usage: run-variogram-report --from YYYY-MM-DD --to YYYY-MM-DD [--history-spans 24]");
+  console.error("usage: run-variogram-report --from YYYY-MM-DD --to YYYY-MM-DD [--history-spans 24] [--full-history]");
   process.exit(2);
 }
-const holdout = process.argv.includes("--holdout");
-const refusal = holdout
-  ? stage3HoldoutRefusal(fromDay, toDay, Date.now()) ??
-    (arg("history-spans") !== undefined ? "refusing: stage 3's holdout reads the pre-registered 24 history spans" : undefined)
-  : stage1RangeRefusal(fromDay, toDay, false);
+const fullHistory = process.argv.includes("--full-history");
+const DAY = 86_400_000;
+const obsFromTs = fullHistory ? Date.parse(`${fromDay}T00:00:00Z`) : undefined;
+const loadFrom = obsFromTs !== undefined ? new Date(obsFromTs - 2 * DAY).toISOString().slice(0, 10) : fromDay;
+const refusal = process.argv.includes("--holdout")
+  ? stage3HoldoutRefusal(fromDay, toDay, Date.now())
+  : stage1RangeRefusal(loadFrom, toDay, false);
 if (refusal !== undefined) {
   console.error(refusal);
   process.exit(2);
@@ -67,60 +64,21 @@ const ARMS = [
   { label: "H3 60 s windows, 60 min span", window: 60_000, span: 3_600_000, stride: 600_000 },
 ];
 
-if (holdout) {
-  // V-a's first trial observes from the holdout's first instant: its reference is
-  // the hour before and its history the 24 h before that, so two days before the
-  // holdout are loaded. Only trials observing inside the holdout are planned.
-  const DAY = 86_400_000;
-  const obsFromTs = Date.parse(`${STAGE3_HOLDOUT_FROM_DAY}T00:00:00Z`);
-  const loadFrom = new Date(obsFromTs - 2 * DAY).toISOString().slice(0, 10);
-  const s = await loadWikiDir(dir, { fromDay: loadFrom, toDay });
-  console.log(`STAGE 3 HOLDOUT ${fromDay}…${toDay} (loaded from ${loadFrom} for references and history): ${s.events.length} events, ${s.gaps.length} collection gaps`);
-  const arm = (window: number, span: number, stride: number) =>
-    runPositionProfile(s, {
-      lens: { window_ms: window }, spanMs: span, strideMs: stride, obsFromTs,
-      curator: curatorForNullModel("variogram", 2.0, { history: true }), historyMs: 24 * span,
-    });
-  const a = arm(60_000, 3_600_000, 600_000);
-  const b = arm(1_000, 10_000, 20_000);
-  for (const [name, p] of [["V-a (60 s windows, 60 min)", a], ["V-b (1 s windows, 10 s)", b]] as const) {
-    console.log(
-      `${name}: trials ${p.trials}, alarm ${(100 * p.rate).toFixed(2)}%, step ${(100 * p.stepPackages / Math.max(1, p.trials)).toFixed(1)}%, ` +
-        `blind by gap ${p.blindByGap}, unusable reference ${p.unusableReference}; by position ` +
-        p.perWindowByPosition.map((x) => `${(1000 * x).toFixed(2)}‰`).join("  "),
-    );
-  }
-  console.log(`VERDICT: ${stage3Verdict(a, b)}`);
-
-  // Report-only rows, pre-registered as not part of the verdict.
-  console.log("\nreport only (not the verdict):");
-  for (const x of ARMS) {
-    for (const nullModel of ["independent", "overdispersed", "variogram"]) {
-      const r = runPositionProfile(s, {
-        lens: { window_ms: x.window }, spanMs: x.span, strideMs: x.stride, obsFromTs,
-        curator: curatorForNullModel(nullModel, 2.0, { history: true }), historyMs: nullModel === "variogram" ? 24 * x.span : 0,
-      });
-      console.log(`  ${x.label}, ${nullModel}: alarm ${(100 * r.rate).toFixed(2)}% of ${r.trials}; by position ` +
-        r.perWindowByPosition.map((y) => `${(1000 * y).toFixed(2)}‰`).join("  "));
-    }
-  }
-  const d = runDiurnalAlarms(s, {
-    spanMs: 3_600_000, lens: { window_ms: 60_000 }, obsFromTs,
-    curator: curatorForNullModel("variogram", 2.0, { history: true }), historyMs: 24 * 3_600_000,
-  });
-  console.log(`  H3's arm, variogram: r(rate, slope) ${d.correlation.toFixed(3)} (hourly curve from the loaded days)`);
-  process.exit(0);
-}
-const stream = await loadWikiDir(dir, { fromDay, toDay });
+const stream = await loadWikiDir(dir, { fromDay: loadFrom, toDay });
 const pct = (x: number) => `${(100 * x).toFixed(1)}%`;
-console.log(`${stream.events.length} events, ${stream.gaps.length} collection gaps (${fromDay}…${toDay}), history ${historySpans} spans`);
+console.log(
+  `${stream.events.length} events, ${stream.gaps.length} collection gaps (${fromDay}…${toDay}` +
+    (fullHistory ? `, loaded from ${loadFrom} for references and history` : "") + `), history ${historySpans} spans`,
+);
+const spentNote = spentHoldoutNote(loadFrom, toDay);
+if (spentNote !== undefined) console.log(spentNote);
 
 for (const a of ARMS) {
   console.log(`\n— ${a.label}`);
   console.log("null           trials  alarm   step    spike/dip per window, first → last sixth of the observation");
   for (const nullModel of ["independent", "overdispersed", "variogram"]) {
     const r = runPositionProfile(stream, {
-      lens: { window_ms: a.window }, spanMs: a.span, strideMs: a.stride,
+      lens: { window_ms: a.window }, spanMs: a.span, strideMs: a.stride, obsFromTs,
       curator: curatorForNullModel(nullModel, 2.0, { history: true }), historyMs: nullModel === "variogram" ? historySpans * a.span : 0,
     });
     console.log(
@@ -137,7 +95,7 @@ for (const a of ARMS) {
 console.log("\n— H3's diurnal correlation on these days (60 min arm, one grid anchored at the stream's first event; compare the nulls with each other — run-h3-report windows each trial separately, so its figures differ; exploration, not a verdict)");
 for (const nullModel of ["overdispersed", "variogram"]) {
   const r = runDiurnalAlarms(stream, {
-    spanMs: 3_600_000, lens: { window_ms: 60_000 }, curator: curatorForNullModel(nullModel, 2.0, { history: true }),
+    spanMs: 3_600_000, lens: { window_ms: 60_000 }, obsFromTs, curator: curatorForNullModel(nullModel, 2.0, { history: true }),
     historyMs: nullModel === "variogram" ? historySpans * 3_600_000 : 0,
   });
   const trials = r.bins.reduce((s, b) => s + b.trials, 0);

@@ -8,9 +8,9 @@
  * (default <repo>/data/wikimedia).
  *
  * The holdout is enforced here, not left to discipline (stage1RangeRefusal):
- * stage 1's holdout (days 5–7) had its one look on 2026-10-06 and is now
- * refused outright, as are H3's holdout days; every other day is open to
- * exploration.
+ * stage 1's holdout (days 5–7) had its one look on 2026-10-06 and `--holdout`
+ * is refused outright. Spent holdout days are exploration since 2026-10-22 and
+ * are labelled so in the output (spentHoldoutNote); an unspent holdout is refused.
  */
 import { join } from "node:path";
 import {
@@ -21,6 +21,7 @@ import {
   runInjectionPower,
   runNullCalibration,
   topKeyValues,
+  spentHoldoutNote,
   stage1RangeRefusal,
 } from "./real-data-harness.js";
 
@@ -55,6 +56,8 @@ console.log(
   `${stream.events.length} events over ${hours.toFixed(1)} h, ${stream.gaps.length} collection gaps ` +
     `(${fromDay}…${toDay}${holdout ? ", HOLDOUT" : ""}, null model: ${nullModel ?? "independent"})`,
 );
+const spentNote = spentHoldoutNote(fromDay, toDay);
+if (spentNote !== undefined) console.log(spentNote);
 
 console.log("\n— H1: dependence —");
 for (const windowMs of [1_000, 10_000, 60_000]) {

@@ -26,8 +26,12 @@ import {
   runPositionProfile,
   shuffleValues,
   stage1RangeRefusal,
+  explorationRangeRefusal,
+  spentHoldoutNote,
   h3RangeRefusal,
   stage3HoldoutRefusal,
+  stage4HoldoutRefusal,
+  stage4Verdict,
   otelRangeRefusal,
   stage3Verdict,
   type PositionProfile,
@@ -39,10 +43,15 @@ import {
   thinEvents,
   topKeyValues,
   windowedStream,
+  runVolumeCalibration,
+  runShiftInjection,
+  scoringCurator,
+  shiftBinaryWindow,
   type DiurnalResult,
   type TracedEvent,
 } from "./real-data-harness.js";
 import { mulberry32 } from "./calibration.js";
+import type { LensEvent } from "./lens.js";
 
 const HOUR = 3_600_000;
 
@@ -439,11 +448,12 @@ describe("fault-flag truth (H4 / measurement ③)", () => {
 });
 
 describe("run-otel-report's gate", () => {
-  it("re-reads exactly the spent judgment day only when asked, and never with --holdout", () => {
-    assert.match(otelRangeRefusal("2026-10-03", "2026-10-03", false, false) ?? "", /stage 1's holdout/);
+  it("reads the spent judgment day as exploration with or without the old flag, never with --holdout", () => {
+    assert.equal(otelRangeRefusal("2026-10-03", "2026-10-03", false, false), undefined);
     assert.equal(otelRangeRefusal("2026-10-03", "2026-10-03", false, true), undefined);
-    assert.match(otelRangeRefusal("2026-10-02", "2026-10-03", false, true) ?? "", /exactly 2026-10-03/);
+    assert.equal(otelRangeRefusal("2026-10-02", "2026-10-03", false, true), undefined);
     assert.match(otelRangeRefusal("2026-10-03", "2026-10-03", true, true) ?? "", /--holdout/);
+    assert.match(otelRangeRefusal("2026-10-03", "2026-10-03", true, false) ?? "", /spent/);
     assert.equal(otelRangeRefusal("2026-10-22", "2026-10-22", false, false), undefined);
   });
 });
@@ -544,18 +554,59 @@ describe("stage 3's single look", () => {
 });
 
 describe("stage 1's reports after their holdout was spent", () => {
-  it("open outside every holdout, refused on any day touching one, and --holdout refused outright", () => {
+  it("read every spent holdout as exploration (2026-10-22) and refuse --holdout outright", () => {
     assert.equal(stage1RangeRefusal("2026-09-29", "2026-10-02", false), undefined);
-    assert.equal(stage1RangeRefusal("2026-10-06", "2026-10-10", false), undefined);
-    assert.equal(stage1RangeRefusal("2026-10-14", "2026-10-18", false), undefined);
-    assert.equal(stage1RangeRefusal("2026-10-22", "2026-10-25", false), undefined);
-    assert.match(stage1RangeRefusal("2026-10-18", "2026-10-19", false) ?? "", /stage 3's holdout/);
-    assert.match(stage1RangeRefusal("2026-10-21", "2026-10-22", false) ?? "", /stage 3's holdout/);
-    assert.match(stage1RangeRefusal("2026-10-02", "2026-10-03", false) ?? "", /stage 1's holdout/);
-    assert.match(stage1RangeRefusal("2026-10-05", "2026-10-06", false) ?? "", /stage 1's holdout/);
-    assert.match(stage1RangeRefusal("2026-10-10", "2026-10-11", false) ?? "", /H3's holdout/);
-    assert.match(stage1RangeRefusal("2026-09-29", "2026-10-20", false) ?? "", /holdout/);
+    assert.equal(stage1RangeRefusal("2026-10-02", "2026-10-03", false), undefined);
+    assert.equal(stage1RangeRefusal("2026-10-10", "2026-10-11", false), undefined);
+    assert.equal(stage1RangeRefusal("2026-10-18", "2026-10-19", false), undefined);
+    assert.equal(stage1RangeRefusal("2026-09-29", "2026-10-22", false), undefined);
     assert.match(stage1RangeRefusal("2026-10-03", "2026-10-05", true) ?? "", /spent/);
+  });
+});
+
+describe("holdouts: sealed until their single look, exploration after it (revision 2026-10-22)", () => {
+  const sealed = [
+    { name: "a spent one", from: "2026-10-03", to: "2026-10-05", spentOn: "2026-10-06" },
+    { name: "a new one", from: "2026-10-26", to: "2026-11-01" },
+  ];
+  it("refuses only an unspent holdout's days", () => {
+    assert.equal(explorationRangeRefusal("2026-10-03", "2026-10-05", sealed), undefined);
+    assert.equal(explorationRangeRefusal("2026-10-20", "2026-10-25", sealed), undefined);
+    assert.match(explorationRangeRefusal("2026-10-25", "2026-10-26", sealed) ?? "", /a new one .* sealed/);
+    assert.match(explorationRangeRefusal("2026-10-01", "2026-11-05", sealed) ?? "", /a new one/);
+  });
+  it("labels a read of spent days, naming the verdict that stands", () => {
+    assert.match(spentHoldoutNote("2026-10-04", "2026-10-04", sealed) ?? "", /a spent one 2026-10-03…2026-10-05, verdict of 2026-10-06/);
+    assert.equal(spentHoldoutNote("2026-10-06", "2026-10-20", sealed), undefined);
+    assert.match(spentHoldoutNote("2026-10-18", "2026-10-19") ?? "", /stage 3's holdout/);
+    assert.equal(explorationRangeRefusal("2026-09-29", "2026-10-25"), undefined, "every holdout before stage 4 is spent");
+  });
+  it("seals stage 4's week (2026-10-26…11-01) from every exploration report", () => {
+    assert.match(explorationRangeRefusal("2026-10-25", "2026-10-26") ?? "", /stage 4's holdout .* sealed/);
+    assert.match(stage1RangeRefusal("2026-10-30", "2026-11-05", false) ?? "", /stage 4's holdout/);
+    assert.match(h3RangeRefusal("2026-11-01", "2026-11-01", false) ?? "", /stage 4's holdout/);
+    assert.equal(explorationRangeRefusal("2026-11-02", "2026-11-05"), undefined);
+  });
+});
+
+describe("stage 4's single look (claim C, 2026-10-22 (6))", () => {
+  const sums = (n: number, over2: number, over3: number, v: number) => ({
+    n, s: 0, ss: v * (n - 1), o1: 0, o2: Math.round(over2 * n), o3: Math.round(over3 * n), og: 0, alpha: 0,
+  });
+  const arm = (name: string, over2: number, over3: number, v: number, blind = 0) =>
+    ({ name, ordinary: sums(100_000, over2, over3, v), trials: 1000, blindByGap: blind });
+  it("--holdout takes exactly the week, and only after its Sunday has ended (UTC)", () => {
+    const after = Date.parse("2026-11-02T00:00:01Z");
+    assert.equal(stage4HoldoutRefusal("2026-10-26", "2026-11-01", after), undefined);
+    assert.match(stage4HoldoutRefusal("2026-10-26", "2026-11-01", Date.parse("2026-11-01T23:59:59Z")) ?? "", /not complete/);
+    assert.match(stage4HoldoutRefusal("2026-10-27", "2026-11-01", after) ?? "", /exactly/);
+  });
+  it("supports both arms inside the support lines, rejects a liberal arm, holds the rest with a reason", () => {
+    assert.match(stage4Verdict([arm("V-a", 0.036, 0.0024, 0.83), arm("10 s", 0.03, 0.0018, 0.81)]), /^SUPPORTED/);
+    assert.match(stage4Verdict([arm("V-a", 0.103, 0.0225, 1.53), arm("10 s", 0.03, 0.0018, 0.81)]), /^REJECTED .*V-a past a reject line/);
+    assert.match(stage4Verdict([arm("V-a", 0.07, 0.004, 1.1), arm("10 s", 0.03, 0.0018, 0.81)]), /^HELD: .*V-a between/);
+    assert.match(stage4Verdict([arm("V-a", 0.02, 0.0005, 0.5), arm("10 s", 0.03, 0.0018, 0.81)]), /^HELD: .*V-a too conservative/);
+    assert.match(stage4Verdict([arm("V-a", 0.036, 0.0024, 0.83, 300), arm("10 s", 0.03, 0.0018, 0.81)]), /^NO VERDICT: V-a is blind/);
   });
 });
 
@@ -598,13 +649,81 @@ describe("one grid for observation, reference and history (the variogram null's 
   });
 });
 
+describe("calibration by volume and detection at steady volume (2026-10-22 (5))", () => {
+  // 4 h of iid 0/1 at 20 events/s, plus a "bot batch": 10 minutes of extra
+  // value-1 events at another 20/s — volume and rate move together.
+  const base = synthesizeStream({ durationMs: 4 * HOUR, rate: 20, p: 0.5, seed: 11 });
+  const t0 = base.events[0].ts;
+  const batch: LensEvent[] = [];
+  for (let t = t0 + 2 * HOUR; t < t0 + 2 * HOUR + 600_000; t += 50) batch.push({ ts: t, value: 1, keys: { wiki: "wikidatawiki", type: "edit", namespace: "0" } });
+  const withBatch = { events: [...base.events, ...batch].sort((a, b) => a.ts - b.ts), gaps: [] };
+  const arm = { lens: { window_ms: 10_000 }, spanMs: 300_000, strideMs: 300_000 };
+
+  it("records every scorable window's gate z and leaves the package otherwise unchanged", () => {
+    const grid = windowedStream(base, { window_ms: 10_000 });
+    const obs = grid.slice(t0 + HOUR, t0 + HOUR + 300_000);
+    const ref = grid.slice(t0 + HOUR - 300_000, t0 + HOUR);
+    const context = { history: grid.slice(t0, t0 + HOUR) };
+    const recorded = scoringCurator("variogram").curate(obs, ref, context);
+    const plain = curatorForNullModel("variogram", 2.0, { history: true })!.curate(obs, ref, context);
+    assert.equal(plain.windowScores, undefined);
+    assert.deepEqual(recorded.tiles.map((t) => [t.shapeTag, t.regionStart]), plain.tiles.map((t) => [t.shapeTag, t.regionStart]));
+    assert.equal(recorded.windowScores?.length, obs.windows.length);
+    const gate = recorded.selection.effectiveZThreshold;
+    const fired = recorded.windowScores!.filter((s) => Math.abs(s.gateZ) >= gate).map((s) => s.windowStart);
+    assert.deepEqual(fired, recorded.tiles.filter((t) => t.shapeTag === "spike" || t.shapeTag === "dip").map((t) => t.regionStart));
+    assert.ok(recorded.windowScores!.every((s) => s.volumeRatio > 0.6 && s.volumeRatio < 1.6));
+  });
+
+  it("on iid data the gate z is N(0, 1)-like at ordinary volume, and nothing is called composition", () => {
+    const r = runVolumeCalibration(base, { ...arm, curator: scoringCurator("independent") });
+    const ord = r.bands.find((b) => b.band === "ordinary")!;
+    assert.ok(ord.windows > 600, `${ord.windows}`);
+    assert.ok(ord.varGateZ > 0.75 && ord.varGateZ < 1.3, `var ${ord.varGateZ}`);
+    assert.ok(ord.over2 > 0.015 && ord.over2 < 0.09, `over2 ${ord.over2}`);
+    assert.equal(r.compositionEpisodes, 0);
+    assert.ok(r.typicalWindowCount > 150 && r.typicalWindowCount < 250, `${r.typicalWindowCount}`);
+  });
+
+  it("a bot batch fires off ordinary volume only and is counted as a composition episode", () => {
+    const r = runVolumeCalibration(withBatch, { ...arm, curator: scoringCurator("variogram"), historyMs: 2 * HOUR });
+    assert.ok(r.compositionEpisodes >= 1, JSON.stringify(r.byDay));
+    assert.ok(r.flagged > r.flaggedOrdinary, `${r.flagged} vs ${r.flaggedOrdinary}`);
+    const high = r.bands.find((b) => b.band === "high")!;
+    assert.ok(high.overGate > 0.1, `high-volume windows past the gate: ${high.overGate}`);
+  });
+
+  it("shiftBinaryWindow flips whole events and keeps the count; refuses what it cannot shift", () => {
+    const w = { windowStart: 0, windowEnd: 1_000, count: 10, mean: 0.6, sumSq: 6, valid: true, range: { min: 0, max: 1 } };
+    const down = shiftBinaryWindow(w, -0.2)!;
+    assert.deepEqual([down.window.count, down.window.mean, down.window.sumSq, down.shift], [10, 0.4, 4, -0.2]);
+    assert.deepEqual(shiftBinaryWindow(w, -0.6)!.window.range, { min: 0, max: 0 });
+    assert.equal(shiftBinaryWindow(w, 0.5), undefined);
+    assert.equal(shiftBinaryWindow({ ...w, sumSq: 4.2 }, -0.1), undefined, "not 0/1 data");
+  });
+
+  it("a planted steady-volume shift is found where it begins; nothing planted reads as the control", () => {
+    const opts = { lens: { window_ms: 1_000 }, spanMs: 10_000, strideMs: 20_000, every: 4 };
+    const big = runShiftInjection(base, { ...opts, shift: -0.45, windows: 3 });
+    // About half the trials lack 9 value-1 events in some window to flip (20 events, p 0.5): skipped, not missed.
+    assert.ok(big.trials > 60 && big.skipped > 0 && big.power > 0.9, `power ${big.power} over ${big.trials}, ${big.skipped} skipped`);
+    assert.ok(Math.abs(big.meanShiftTruth + 0.45) < 0.03, `${big.meanShiftTruth}`);
+    const none = runShiftInjection(base, { ...opts, shift: -0.0001, windows: 3 });
+    assert.equal(none.detected, none.controlDetected);
+    assert.ok(none.controlRate < 0.1, `${none.controlRate}`);
+    const vg = runShiftInjection(base, { ...opts, shift: -0.45, windows: 3, curator: curatorForNullModel("variogram", 2.0, { history: true }), historyMs: 240_000 });
+    assert.ok(vg.power > 0.8, `variogram power ${vg.power}`);
+    assert.throws(() => runShiftInjection(base, { ...opts, lens: { window_ms: 1_000, group_by: ["wiki"] }, shift: -0.1, windows: 1 }), /mixed/);
+  });
+});
+
 describe("run-h3-report after H3's holdout was spent (2026-10-14)", () => {
-  it("refuses --holdout outright, even for exactly the holdout days, and explores outside both holdouts", () => {
+  it("refuses --holdout outright, even for exactly the holdout days, and explores spent holdouts too", () => {
     assert.match(h3RangeRefusal("2026-10-11", "2026-10-13", true) ?? "", /H3's holdout .* spent/);
     assert.equal(h3RangeRefusal("2026-10-07", "2026-10-10", false), undefined);
     assert.equal(h3RangeRefusal("2026-10-14", "2026-10-14", false), undefined);
-    assert.match(h3RangeRefusal("2026-10-10", "2026-10-11", false) ?? "", /H3's holdout/);
-    assert.match(h3RangeRefusal("2026-10-01", "2026-10-03", false) ?? "", /stage 1's holdout/);
+    assert.equal(h3RangeRefusal("2026-10-10", "2026-10-11", false), undefined);
+    assert.equal(h3RangeRefusal("2026-10-01", "2026-10-03", false), undefined);
   });
 });
 

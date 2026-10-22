@@ -12,9 +12,11 @@
  * H3's holdout (H3_HOLDOUT_FROM_DAY…H3_HOLDOUT_TO_DAY) had its single look on
  * 2026-10-14 under H3_NULL_MODEL ("overdispersed", revision 2026-10-07 (2)),
  * with the code at commit 9d90c16 (output: data/logs/h3-holdout-report-20261014.txt).
- * Like stage 1's reports, this one now reads only days outside both holdouts
- * and refuses `--holdout` (h3RangeRefusal). The default null model is still
- * H3_NULL_MODEL; `--null-model independent` is for comparison.
+ * Like stage 1's reports, this one refuses `--holdout` (h3RangeRefusal) and,
+ * since 2026-10-22, reads spent holdout days as exploration, saying so in the
+ * output. The default null model is still H3_NULL_MODEL; `--null-model
+ * independent` is for comparison. Its verdict line is a mechanical reading of
+ * the rule on exploration data, never H3's verdict (that was 2026-10-14's).
  */
 import { join } from "node:path";
 import {
@@ -24,6 +26,7 @@ import {
   curatorForNullModel,
   loadWikiDir,
   runDiurnalAlarms,
+  spentHoldoutNote,
 } from "./real-data-harness.js";
 
 function arg(name: string): string | undefined {
@@ -56,6 +59,8 @@ console.log(
   `${stream.events.length} events over ${hours.toFixed(1)} h, ${stream.gaps.length} collection gaps ` +
     `(${fromDay}…${toDay}, null model: ${nullModel})`,
 );
+const spentNote = spentHoldoutNote(fromDay, toDay);
+if (spentNote !== undefined) console.log(spentNote);
 
 let verdict = "";
 for (const [label, spanMs, windowMs] of [["60 min", 3_600_000, 60_000], ["1 min", 60_000, 1_000]] as const) {
@@ -76,4 +81,4 @@ for (const [label, spanMs, windowMs] of [["60 min", 3_600_000, 60_000], ["1 min"
   }
   if (spanMs === 3_600_000) verdict = h3Verdict(r);
 }
-console.log(`\nH3 (pre-registered rule, 60-minute arm, ${nullModel} null): ${verdict}`);
+console.log(`\nthe pre-registered H3 rule applied to this exploration (NOT H3's verdict; 60-minute arm, ${nullModel} null): ${verdict}`);

@@ -280,8 +280,33 @@ export interface SnapshotPackage {
     df: number;
     extrapolatedFromLag?: number;
   }>;
+  /**
+   * Present only with `CurationOptions.recordWindowScores`: every scorable
+   * window's comparison, in scoring order — the windows the gate passed over as
+   * well as those it fired on. For calibration measurements only.
+   */
+  windowScores?: WindowScore[];
   /** The curated tiles, sorted by regionStart ascending. */
   tiles: SnapshotTile[];
+}
+
+/**
+ * One scorable window's comparison (CurationOptions.recordWindowScores). The
+ * gate fires when |gateZ| ≥ the package's effectiveZThreshold, so a measurement
+ * can read the gate's whole predictive distribution — its bulk as well as the
+ * tail the few fired windows show — and split it by the window's volume.
+ */
+export interface WindowScore {
+  windowStart: number;
+  /** LensGroup.label, when the lens was grouped. */
+  group?: string;
+  count: number;
+  /** count ÷ the median count of the reference windows it was scored against (SnapshotTile.volumeRatio's definition). */
+  volumeRatio: number;
+  /** (window mean − reference mean) / comparison SE, uncorrected — what a tile reports as `magnitude`. */
+  z: number;
+  /** The signed z the gate compares with the Šidák threshold (continuity-corrected / exact tail / studentized). */
+  gateZ: number;
 }
 
 /** One direction the gate could not fire in, and the arithmetic that says so. */
@@ -403,6 +428,15 @@ export interface CurationOptions {
    * SnapshotTile.volumeRatio (2026-10-14 (7)).
    */
   nullModel?: NullModel;
+  /**
+   * Record every scorable window's comparison on the package
+   * (`SnapshotPackage.windowScores`), not only the windows the gate fired on.
+   * For calibration measurements (ROADMAP_BRIEF.md 2026-10-22 (5)): on real data
+   * the package alarm rate is hostage to a few real events, while the gate's z
+   * over ALL windows — split by volume — says whether the predictive
+   * distribution itself is right. Off by default; nothing else changes with it.
+   */
+  recordWindowScores?: boolean;
 }
 
 /** CurationOptions.nullModel's values — also what $Q[compare]'s `null_model` names. */
@@ -437,6 +471,7 @@ export class SnapshotCurator {
       includeBaseline: opts.includeBaseline !== false,
       divergenceZThreshold: opts.divergenceZThreshold ?? 1.5,
       nullModel: opts.nullModel ?? "independent",
+      recordWindowScores: opts.recordWindowScores ?? false,
     };
   }
 
@@ -601,6 +636,7 @@ export class SnapshotCurator {
     // alone (see detectSteps' `variogram`).
     const effectiveZThreshold = sidakCorrectedThreshold(this.opts.spikeZThreshold, scorableCount);
     const unreachableTails: UnreachableTail[] = [];
+    const windowScores: WindowScore[] | undefined = this.opts.recordWindowScores ? [] : undefined;
 
     for (const unit of units) {
       const tag = unit.group !== undefined ? `[${unit.group}] ` : "";
@@ -628,6 +664,7 @@ export class SnapshotCurator {
       // Windows the gate fired on, by direction — what a step may describe
       // under "variogram".
       const gatedDir = new Map<WindowStat, 1 | -1>();
+      const scoreCount = windowScores !== undefined ? medianCount(unit.refWindows) : 0;
       for (const w of unit.windows) {
         if (!isScorable(w)) continue;
         const wref = refFor(unit, w);
@@ -635,6 +672,14 @@ export class SnapshotCurator {
         if (!(se > 0)) continue;
         const z = (w.mean - unit.ref.mean) / se;
         const gated = gate(w, wref, se, lattice, model);
+        windowScores?.push({
+          windowStart: w.windowStart,
+          ...(unit.group !== undefined ? { group: unit.group } : {}),
+          count: w.count,
+          volumeRatio: scoreCount > 0 ? w.count / scoreCount : NaN,
+          z,
+          gateZ: gated,
+        });
         if (gated >= effectiveZThreshold) {
           gatedDir.set(w, 1);
           const v = volume(w);
@@ -785,6 +830,7 @@ export class SnapshotCurator {
             })),
           }
         : {}),
+      ...(windowScores !== undefined ? { windowScores } : {}),
       tiles: capped,
     };
   }

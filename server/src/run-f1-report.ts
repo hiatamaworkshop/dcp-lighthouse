@@ -1,7 +1,8 @@
 /**
  * F1, periodic references, on the collected Wikimedia stream (ROADMAP_BRIEF.md
- * 2026-10-14 (2) item 3). Exploration only: every collected day has been seen,
- * and the range must stay outside both holdouts (stage1RangeRefusal).
+ * 2026-10-14 (2) item 3). Exploration only: every collected day has been seen;
+ * spent holdout days may be read (labelled in the output), an unspent one may not
+ * (stage1RangeRefusal).
  *
  *   cd server && npm run build && node dist/run-f1-report.js --from 2026-10-06 --to 2026-10-10
  *
@@ -14,7 +15,7 @@
  * observation's second half (`--deltas`, in bot share).
  */
 import { join } from "node:path";
-import { loadWikiDir, runContrastDiurnal, stage1RangeRefusal } from "./real-data-harness.js";
+import { loadWikiDir, runContrastDiurnal, spentHoldoutNote, stage1RangeRefusal } from "./real-data-harness.js";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -38,6 +39,8 @@ if (refusal !== undefined) {
 const dir = process.env.WIKI_DATA_DIR ?? join(process.cwd(), "..", "data", "wikimedia");
 const stream = await loadWikiDir(dir, { fromDay, toDay });
 console.log(`${stream.events.length} events, ${stream.gaps.length} collection gaps (${fromDay}…${toDay}), history ${historyHours} h`);
+const spentNote = spentHoldoutNote(fromDay, toDay);
+if (spentNote !== undefined) console.log(spentNote);
 
 const base = { spanMs: 3_600_000, windowMs: 60_000, historyMs: historyHours * 3_600_000, strideMs: 600_000 };
 const pct = (x: number) => `${(100 * x).toFixed(1)}%`;
