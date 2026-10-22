@@ -10,7 +10,7 @@
  *
  *   ["$Q", "<layer>:<target>", { ...parameters }]
  *
- *     <layer>  ::= "pipeline" | "observe" | "schema" | "compare"
+ *     <layer>  ::= "pipeline" | "observe" | "schema" | "compare" | "forecast"
  *     <target> ::= "*" | "<schema-id>" | "<schema-id>#<view-tag>"
  *
  * It does NOT ride on FieldMapping (path resolution only) — see MODEL.md §148.
@@ -25,7 +25,7 @@ import type { NullModel } from "./snapshot-curator.js";
 
 // ── Layer + scope ──────────────────────────────────────────────
 
-export type QLayer = "pipeline" | "observe" | "schema" | "compare";
+export type QLayer = "pipeline" | "observe" | "schema" | "compare" | "forecast";
 
 /** Parsed form of a scope string like "observe:test_result:v1#agents". */
 export interface QScope {
@@ -226,7 +226,31 @@ export interface QCompareParams {
   history_ms?: number;
 }
 
-export type QParams = QObserveParams | QPipelineParams | QSchemaParams | QCompareParams;
+/**
+ * $Q[forecast] — the `$F` rows a view publishes (ROADMAP_BRIEF.md 2026-10-22 (8),
+ * forecast.ts): the predicted mean of windows not yet observed, with intervals.
+ * Scoped like $Q[compare] ("forecast:<schema>#<view>" pairs with
+ * "observe:<schema>#<view>"); the lens is the view's, read from window
+ * summaries, so it must be one a summary can be kept for (epoch grid, no
+ * decay, mean). A declaration, not a lens stage: a forecast reads a lens
+ * output, it does not transform the stream.
+ */
+export interface QForecastParams {
+  /** Windows the forecast weights: the last K whole windows before the origin. */
+  recent_windows: number;
+  /** Windows ahead to forecast; 1 = the window after the origin. */
+  horizons: number[];
+  /** History ending at the origin that γ̂ is estimated from, in ms. */
+  history_ms: number;
+  /** Central predictive interval level, in (0, 1). Default 0.95. */
+  level?: number;
+  /** Default "kriging"; "persistence" = the reference mean the comparison already uses. */
+  method?: ForecastMethodName;
+}
+
+export type ForecastMethodName = "kriging" | "persistence";
+
+export type QParams = QObserveParams | QPipelineParams | QSchemaParams | QCompareParams | QForecastParams;
 
 // Records keyed by the unions, so adding a value to a type without adding it
 // here is a compile error rather than a runtime refusal.
@@ -258,6 +282,27 @@ export function validateCompareParams(p: QCompareParams): void {
     if (!(Number.isFinite(p.history_ms) && p.history_ms > 0)) {
       throw new RangeError(`compare: history_ms must be a positive number of ms, got ${String(p.history_ms)}`);
     }
+  }
+}
+
+const FORECAST_METHODS = Object.keys({ kriging: true, persistence: true } satisfies Record<ForecastMethodName, true>) as ForecastMethodName[];
+
+/** The $Q[forecast] rulebook, run on write. Like compare's, unknown values are refused, not defaulted. */
+export function validateForecastParams(p: QForecastParams): void {
+  if (!(Number.isInteger(p.recent_windows) && p.recent_windows >= 2)) {
+    throw new RangeError(`forecast: recent_windows must be an integer ≥ 2, got ${String(p.recent_windows)}`);
+  }
+  if (!Array.isArray(p.horizons) || p.horizons.length === 0 || !p.horizons.every((h) => Number.isInteger(h) && h >= 1)) {
+    throw new RangeError(`forecast: horizons must be a non-empty list of positive integers, got ${JSON.stringify(p.horizons)}`);
+  }
+  if (!(Number.isFinite(p.history_ms) && p.history_ms > 0)) {
+    throw new RangeError(`forecast: history_ms must be a positive number of ms, got ${String(p.history_ms)}`);
+  }
+  if (p.level !== undefined && !(p.level > 0 && p.level < 1)) {
+    throw new RangeError(`forecast: level must be in (0, 1), got ${String(p.level)}`);
+  }
+  if (p.method !== undefined && !FORECAST_METHODS.includes(p.method)) {
+    throw new RangeError(`forecast: unknown method "${String(p.method)}" (${FORECAST_METHODS.join(" | ")})`);
   }
 }
 
@@ -312,6 +357,7 @@ export class QRegistry {
     const parsed = typeof scope === "string" ? parseScope(scope) : scope;
     if (parsed.layer === "observe") validateObserveParams(params as QObserveParams);
     if (parsed.layer === "compare") validateCompareParams(params as QCompareParams);
+    if (parsed.layer === "forecast") validateForecastParams(params as QForecastParams);
     for (const g of this.gates.get(parsed.layer) ?? []) g(params);
     const key = formatScope(parsed);
     this.store.set(key, params);
@@ -374,6 +420,18 @@ export class QRegistry {
     return undefined;
   }
 
+  /** Read the forecast declared for a schema's view, resolved like getCompare. */
+  getForecast(schemaId: string, view?: string): QForecastParams | undefined {
+    const candidates: string[] = [];
+    if (view) candidates.push(`forecast:${schemaId}#${view}`);
+    candidates.push(`forecast:${schemaId}`, "forecast:*");
+    for (const key of candidates) {
+      const v = this.store.get(key);
+      if (v) return v as QForecastParams;
+    }
+    return undefined;
+  }
+
   /** Read pipeline-layer params (target is typically "*"). */
   getPipeline(target = "*"): QPipelineParams | undefined {
     return this.store.get(`pipeline:${target}`) as QPipelineParams | undefined;
@@ -393,7 +451,7 @@ export class QRegistry {
 
 // ── Scope parsing ──────────────────────────────────────────────
 
-const LAYERS: readonly QLayer[] = ["pipeline", "observe", "schema", "compare"];
+const LAYERS: readonly QLayer[] = ["pipeline", "observe", "schema", "compare", "forecast"];
 
 /**
  * Parse "<layer>:<target>" where target may contain colons (schema ids like

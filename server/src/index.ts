@@ -12,7 +12,7 @@
  * LensViews react via onChange; DashboardServer streams $Q history.
  */
 
-import { QRegistry, parseScope, type QCompareParams } from "./q-registry.js";
+import { QRegistry, parseScope, type QCompareParams, type QForecastParams } from "./q-registry.js";
 import { MockStreamGenerator } from "./mock-stream-generator.js";
 import { TestorAdapter, testEventExtractor } from "./testor-adapter.js";
 import { RetentionBuffer } from "./retention-buffer.js";
@@ -23,6 +23,7 @@ import type { QObserveParams } from "./q-registry.js";
 import type { SnapshotPackage } from "./snapshot-curator.js";
 import { Comparator, assertComparable } from "./comparison.js";
 import { WindowHistory } from "./window-history.js";
+import { Forecaster } from "./forecast.js";
 import { RuleBrain } from "./rule-brain.js";
 import { BRAIN_ANSWER_SCHEMA, ClaudeBrain } from "./claude-brain.js";
 import { ShadowBrain } from "./shadow-brain.js";
@@ -123,6 +124,17 @@ registry.addWriteGate("compare", (p) => {
   }
 });
 registry.set("compare:test_result:v1", { reference: "preceding", null_model: "independent" });
+// The `$F` rows each view publishes (ROADMAP_BRIEF.md 2026-10-22 (8), forecast.ts):
+// kriging from the last windows, γ̂ from the window summaries. The history a row
+// may ask for is bounded by what this process keeps, like $Q[compare]'s.
+registry.addWriteGate("forecast", (p) => {
+  const f = p as QForecastParams;
+  if (f.history_ms > HISTORY_WINDOW_MS) {
+    throw new RangeError(`forecast: history_ms ${f.history_ms} exceeds the ${HISTORY_WINDOW_MS} ms of window summaries this process keeps`);
+  }
+});
+registry.set("forecast:test_result:v1#coarse", { recent_windows: 30, horizons: [1, 6, 30], history_ms: HISTORY_WINDOW_MS, level: 0.95, method: "kriging" });
+registry.set("forecast:test_result:v1#fine", { recent_windows: 10, horizons: [1, 5, 10], history_ms: 600_000, level: 0.95, method: "kriging" });
 
 // ── Build layers ──────────────────────────────────────────────────────────────
 
@@ -146,6 +158,7 @@ const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true 
 // several agents alarming at once a real flag could be cut and the claim
 // scored unbacked (2026-10-14 (9) review). Same scoring, no cap.
 const gateComparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true, maxTiles: Infinity }, windowHistory);
+const forecaster = new Forecaster(windowHistory);
 const ruleBrain  = new RuleBrain(registry);
 
 /**
@@ -296,7 +309,7 @@ if (BRAIN_MODE === "claude") {
   throw new Error(`BRAIN_MODE must be "rule" or "claude", got "${BRAIN_MODE}"`);
 }
 
-const dashboard  = new DashboardServer(generator, adapter, brain, registry, comparator, overlay, buffer, brainDiagnostics);
+const dashboard  = new DashboardServer(generator, adapter, brain, registry, comparator, overlay, buffer, brainDiagnostics, forecaster);
 
 // Two parallel observation views
 overlay.add("coarse", "test_result:v1", { view: "coarse" });

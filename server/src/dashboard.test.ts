@@ -662,3 +662,55 @@ test("isReroutedAgentBacked: a real flag survives a crowded package (2026-10-14 
   const uncapped = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true, maxTiles: Infinity });
   assert.equal(isReroutedAgentBacked(buf, uncapped, COARSE_LENS, {}, "agent-C", GATE_NOW), true);
 });
+
+// ── /forecast and /control/forecast: the `$F` rows (2026-10-22 (8)) ──────────
+
+test("/forecast serves the view's virtual `$F` rows from window summaries; /control/forecast writes the declaration", async () => {
+  const { WindowHistory } = await import("./window-history.js");
+  const { Forecaster } = await import("./forecast.js");
+  const buf = new RetentionBuffer<{ ts: number; value: number }>((raw) => raw, { retentionWindowMs: 600_000 });
+  // 9 minutes at 20 events/s, value 1 three times in four.
+  for (let i = 0; i < 9 * 60 * 20; i++) buf.observe({ ts: i * 50, value: i % 4 === 0 ? 0 : 1 }, "s");
+  const registry = new QRegistry();
+  registry.set("observe:test_result:v1#coarse", { window_ms: 10_000, align: "epoch" });
+  registry.set("forecast:test_result:v1#coarse", { recent_windows: 6, horizons: [1, 3], history_ms: 300_000 });
+  const history = new WindowHistory(buf, { maxHistoryMs: 3_600_000 });
+  const server = new DashboardServer(
+    { getCurrentLoad: () => ({}) } as never,
+    null as never,
+    { reset: () => {} } as never,
+    registry,
+    new Comparator({ spikeZThreshold: 2.0, includeBaseline: true }, history),
+    new ObservationOverlay(registry),
+    buf,
+    undefined,
+    new Forecaster(history),
+  ).start({ port: 0 });
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  const addr = server.address();
+  const base = `http://127.0.0.1:${typeof addr === "object" && addr !== null ? addr.port : 0}`;
+  try {
+    const res = await fetch(`${base}/forecast?view=coarse&at=535000`);
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.scope, "forecast:test_result:v1#coarse");
+    assert.equal(body.rows.length, 2);
+    for (const row of body.rows) {
+      assert.equal(row.virtual, true);
+      assert.equal(row.origin, 530_000);
+      assert.ok(Math.abs(row.mean - 0.75) < 0.05, `mean ${row.mean}`);
+    }
+    assert.deepEqual(body.rows.map((r: { targetStart: number }) => r.targetStart), [530_000, 550_000]);
+
+    assert.equal((await fetch(`${base}/forecast?view=nope`)).status, 400);
+    const write = await fetch(`${base}/control/forecast?view=coarse&horizons=1,2,4&recent_windows=5`);
+    assert.equal(write.status, 200);
+    assert.deepEqual(registry.getForecast("test_result:v1", "coarse")?.horizons, [1, 2, 4]);
+    const bad = await fetch(`${base}/control/forecast?view=coarse&method=arima`);
+    assert.equal(bad.status, 400);
+    assert.match((await bad.json()).error, /unknown method/);
+    assert.equal((await (await fetch(`${base}/forecast?view=coarse&at=535000`)).json()).rows.length, 3);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

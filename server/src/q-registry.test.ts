@@ -299,3 +299,35 @@ describe("QRegistry — compare layer (2026-10-14 (8))", () => {
     assert.deepEqual(reg.getCompare("t:v1"), { null_model: "variogram" });
   });
 });
+
+describe("QRegistry — forecast layer (2026-10-22 (8))", () => {
+  const ok = { recent_windows: 30, horizons: [1, 6, 30], history_ms: 3_600_000 };
+  it("parses forecast scopes and resolves them most-specific first", () => {
+    assert.deepEqual(parseScope("forecast:test_result:v1#coarse"), { layer: "forecast", target: "test_result:v1", view: "coarse" });
+    const reg = new QRegistry();
+    reg.set("forecast:test_result:v1", ok);
+    assert.deepEqual(reg.getForecast("test_result:v1", "fine"), ok);
+    reg.set("forecast:test_result:v1#fine", { ...ok, recent_windows: 10 });
+    assert.equal(reg.getForecast("test_result:v1", "fine")?.recent_windows, 10);
+    assert.equal(reg.getForecast("other:v1"), undefined);
+  });
+
+  it("refuses rows the rulebook does not know, leaving no trace", () => {
+    const reg = new QRegistry();
+    const bad: unknown[] = [
+      { ...ok, recent_windows: 1 },
+      { ...ok, recent_windows: 2.5 },
+      { ...ok, horizons: [] },
+      { ...ok, horizons: [0, 1] },
+      { ...ok, horizons: "1,6" },
+      { ...ok, history_ms: 0 },
+      { recent_windows: 30, horizons: [1] },
+      { ...ok, level: 1 },
+      { ...ok, method: "arima" },
+    ];
+    for (const p of bad) assert.throws(() => reg.set("forecast:t:v1", p as never), RangeError, JSON.stringify(p));
+    assert.deepEqual(reg.rows(), []);
+    reg.set("forecast:t:v1", { ...ok, level: 0.8, method: "persistence" });
+    assert.equal(reg.rows().length, 1);
+  });
+});

@@ -11,7 +11,9 @@
  *   GET /control/baseline-delta?value=N — write $Q[schema].baseline_delta
  *   GET /control/coarse-downsample?factor=N — write $Q[observe:...#coarse].downsample_factor
  *   GET /control/compare?null_model=&history_ms= — write $Q[compare:test_result:v1]
+ *   GET /control/forecast?view=&horizons=&recent_windows=&history_ms=&level=&method= — write $Q[forecast:test_result:v1#view]
  *   GET /control/replay?fromTs=&toTs=&window_ms= — manual replay + reference score
+ *   GET /forecast?view=coarse|fine[&at=ms] — the view's `$F` rows (virtual, from window summaries)
  *   GET /status             — current load
  *   GET /brain              — Brain diagnostics (shadow tally, LLM counters)
  *
@@ -25,8 +27,9 @@ import { resolve } from "node:path";
 import type { MockStreamGenerator } from "./mock-stream-generator.js";
 import type { TestorAdapter, STSnapshot } from "./testor-adapter.js";
 import type { ResettableBrain } from "./brain-adapter.js";
-import type { QRegistry, QObserveParams, QCompareParams } from "./q-registry.js";
+import type { QRegistry, QObserveParams, QCompareParams, QForecastParams } from "./q-registry.js";
 import type { Comparator } from "./comparison.js";
+import type { Forecaster } from "./forecast.js";
 import type { ObservationOverlay } from "./lens-view.js";
 import { floorToWindow, resolveAlign, type LensResult } from "./lens.js";
 import type { BrainDecision } from "./brain-adapter.js";
@@ -304,6 +307,8 @@ export class DashboardServer {
      * how a refusal spent a whole run being reported as unparseable.
      */
     private readonly brainDiagnostics?: () => unknown,
+    /** Makes the `$F` rows GET /forecast serves (ROADMAP_BRIEF.md 2026-10-22 (8)); absent = the route says so. */
+    private readonly forecaster?: Forecaster,
   ) {}
 
   /**
@@ -698,6 +703,33 @@ export class DashboardServer {
       return;
     }
 
+    if (url.startsWith("/control/forecast")) {
+      // Operator write surface for $Q[forecast:test_result:v1#<view>] (2026-10-22 (8)).
+      // Transport-only checks; the rulebook (validateForecastParams) and index.ts's
+      // write gate judge the row, and their RangeError comes back as a 400 (handle()).
+      const q = parseQuery(url);
+      const view = q.get("view") ?? "coarse";
+      const row = { ...(this.registry.getForecast("test_result:v1", view) ?? {}) } as QForecastParams;
+      const num = (name: string): number | undefined => {
+        const raw = q.get(name);
+        return raw === null ? undefined : Number(raw);
+      };
+      const horizons = q.get("horizons");
+      if (horizons !== null) row.horizons = horizons.split(",").map(Number);
+      const recent = num("recent_windows");
+      if (recent !== undefined) row.recent_windows = recent;
+      const history = num("history_ms");
+      if (history !== undefined) row.history_ms = history;
+      const level = num("level");
+      if (level !== undefined) row.level = level;
+      const method = q.get("method");
+      if (method !== null) row.method = method as QForecastParams["method"];
+      this.registry.set(`forecast:test_result:v1#${view}`, row);
+      jsonHeaders(res);
+      res.end(JSON.stringify({ scope: `forecast:test_result:v1#${view}`, ...row }));
+      return;
+    }
+
     if (url.startsWith("/control/replay")) {
       // Manual replay trigger (ROADMAP L5, 2026-08-22). Everything else that
       // replays a span is Brain-driven and has so far only ever
@@ -729,6 +761,35 @@ export class DashboardServer {
       this.broadcastReplay(pkg);
       jsonHeaders(res);
       res.end(JSON.stringify(pkg));
+      return;
+    }
+
+    if (url.startsWith("/forecast")) {
+      // The view's `$F` rows (2026-10-22 (8)): read-only, made on request from the
+      // window summaries. Every row says `virtual: true` — a forecast is never an
+      // observation, and a reader that shows one must show it as such (2026-10-08).
+      const q = parseQuery(url);
+      const view = q.get("view") ?? "coarse";
+      const lens = this.registry.getObserve("test_result:v1", view);
+      const decl = this.registry.getForecast("test_result:v1", view);
+      if (this.forecaster === undefined || lens === undefined || decl === undefined) {
+        jsonHeaders(res, 400);
+        res.end(JSON.stringify({
+          error: this.forecaster === undefined ? "this process has no forecaster"
+            : lens === undefined ? `no $Q[observe] for view "${view}"` : `no $Q[forecast] declared for view "${view}"`,
+        }));
+        return;
+      }
+      const atRaw = q.get("at");
+      const at = atRaw === null ? Date.now() : Number(atRaw);
+      if (!Number.isFinite(at)) {
+        jsonHeaders(res, 400);
+        res.end(JSON.stringify({ error: `at must be a number of ms, got ${JSON.stringify(atRaw)}` }));
+        return;
+      }
+      const rows = this.forecaster.forecast(lens, decl, at);
+      jsonHeaders(res);
+      res.end(JSON.stringify({ scope: `forecast:test_result:v1#${view}`, lens, declaration: decl, at, rows }));
       return;
     }
 

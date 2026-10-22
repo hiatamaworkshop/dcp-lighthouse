@@ -31,6 +31,9 @@ import {
 import type { QObserveParams } from "./q-registry.js";
 import { SnapshotCurator, familyWiseAlpha, isScorable, studentUpperTail, type SnapshotPackage, type SnapshotTile } from "./snapshot-curator.js";
 import { mulberry32 } from "./calibration.js";
+import {
+  forecastModel, forecastMse, forecastPoint, krigingWeights, persistenceWeights, pooledEventVariance, variogramAt,
+} from "./forecast.js";
 
 // ── Loading ─────────────────────────────────────────────────────────────────
 
@@ -1743,6 +1746,129 @@ export function runShiftInjection(
   out.power = out.trials > 0 ? out.detected / out.trials : 0;
   out.controlRate = out.trials > 0 ? out.controlDetected / out.trials : 0;
   out.meanShiftTruth = out.trials > 0 ? truth / out.trials : 0;
+  return out;
+}
+
+// ── F2: forecast calibration (2026-10-22 (8)) ──────────────────────────────
+
+/** Sums over (origin, horizon) pairs of one forecast method: z = (realized − forecast) / predictive SD. */
+export interface ForecastCell {
+  n: number;
+  s: number;
+  ss: number;
+  o2: number;
+  o3: number;
+  /** Σ predictive SD and Σ squared error of the point forecast. */
+  sd: number;
+  se: number;
+}
+
+export const emptyForecastCell = (): ForecastCell => ({ n: 0, s: 0, ss: 0, o2: 0, o3: 0, sd: 0, se: 0 });
+
+export function addForecastCell(a: ForecastCell, b: ForecastCell): void {
+  a.n += b.n;
+  a.s += b.s;
+  a.ss += b.ss;
+  a.o2 += b.o2;
+  a.o3 += b.o3;
+  a.sd += b.sd;
+  a.se += b.se;
+}
+
+/** The forecasts compared: the F2 row (kriging on the fitted γ), persistence (the curator's comparison) on the fitted and on the raw γ̂, and kriging on the raw γ̂ (why the fit is there). */
+export const FORECAST_METHODS = ["kriging", "persistence", "persistence-raw", "kriging-raw"] as const;
+export type ForecastMethod = (typeof FORECAST_METHODS)[number];
+
+export interface ForecastCalibrationResult {
+  origins: number;
+  blindByGap: number;
+  /** Cells keyed `${method}|${horizon}|${band}`, band = "ordinary" | "off" (the target window's volume against the recent windows' median). */
+  cells: Map<string, ForecastCell>;
+  /** Per UTC day of the origin: the F2 row at the first horizon, ordinary volume. */
+  byDay: Map<string, ForecastCell>;
+  /** Origins where kriging could not be solved on the fitted γ (fell back to persistence). */
+  krigingFellBack: number;
+}
+
+/**
+ * F2 measured (ROADMAP_BRIEF.md 2026-10-22 (7) step 2): at each origin — the
+ * end of K recent windows, stepping by `strideMs` — forecast the windows
+ * 1…H steps ahead with every FORECAST_METHODS entry, from the same γ̂ (history
+ * ending at the origin) and the same windows, and score each realized window:
+ * z = (realized mean − forecast) / √(latent forecast variance + event variance /
+ * the realized count). Split by the realized window's volume like
+ * runVolumeCalibration, since an ordinary-volume window is where the latent
+ * model claims to hold.
+ */
+export function runForecastCalibration(
+  stream: LoadedStream,
+  opts: { lens: QObserveParams; recentWindows: number; horizons: readonly number[]; historyMs: number; strideMs: number; obsFromTs?: number; band?: readonly [number, number] },
+): ForecastCalibrationResult {
+  const w = opts.lens.window_ms ?? 1_000;
+  const K = opts.recentWindows;
+  const spanMs = K * w;
+  const maxH = Math.max(...opts.horizons);
+  if (maxH > K) throw new RangeError(`horizons up to ${K} windows (the trial's observation span), got ${maxH}`);
+  const [lo, hi] = opts.band ?? ORDINARY_VOLUME;
+  const grid = gridFor(stream, opts.lens, spanMs, opts.strideMs);
+  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs, strideMs: opts.strideMs, obsFromTs: opts.obsFromTs });
+  const out: ForecastCalibrationResult = { origins: 0, blindByGap: blind, cells: new Map(), byDay: new Map(), krigingFellBack: 0 };
+  const cell = (key: string): ForecastCell => {
+    let c = out.cells.get(key);
+    if (c === undefined) out.cells.set(key, (c = emptyForecastCell()));
+    return c;
+  };
+  const add = (c: ForecastCell, z: number, sd: number, err: number) => {
+    c.n++;
+    c.s += z;
+    c.ss += z * z;
+    if (Math.abs(z) >= 2) c.o2++;
+    if (Math.abs(z) >= 3) c.o3++;
+    c.sd += sd;
+    c.se += err * err;
+  };
+  for (const t of trials) {
+    const recentAll = grid.slice(t.refFrom, t.obsFrom).windows;
+    const recent = recentAll.filter(isScorable);
+    if (recent.length < 2) continue;
+    const gridOrigin = t.refFrom;
+    const idx = (x: { windowStart: number }) => Math.round((x.windowStart - gridOrigin) / w);
+    const model = forecastModel(grid.slice(t.refFrom - opts.historyMs, t.obsFrom).windows, t.obsFrom, w, K - 1 + maxH, gridOrigin);
+    const fitted = (h: number) => variogramAt(model.fitted, h);
+    const raw = (h: number) => model.estimate.gamma[Math.min(model.estimate.gamma.length - 1, Math.abs(h))];
+    const points = recent.map((x) => forecastPoint(x, idx(x)));
+    const eventVar = pooledEventVariance(recent);
+    const counts = recent.map((x) => x.count).sort((a, b) => a - b);
+    const typical = counts[counts.length >> 1];
+    const persistence = persistenceWeights(points);
+    const observed = new Map(grid.slice(t.obsFrom, t.obsTo).windows.map((x) => [idx(x), x]));
+    out.origins++;
+    for (const h of opts.horizons) {
+      const target = observed.get(K - 1 + h);
+      if (target === undefined || !isScorable(target)) continue;
+      const T = K - 1 + h;
+      const ratio = typical > 0 ? target.count / typical : NaN;
+      const band = ratio >= lo && ratio <= hi ? "ordinary" : "off";
+      for (const method of FORECAST_METHODS) {
+        const gamma = method === "kriging" || method === "persistence" ? fitted : raw;
+        const kriged = method === "kriging" || method === "kriging-raw" ? krigingWeights(points, T, gamma) : undefined;
+        if (method === "kriging" && kriged === undefined) out.krigingFellBack++;
+        const weights = kriged?.weights ?? persistence;
+        const latentVar = kriged?.latentVar ?? Math.max(0, forecastMse(points, weights, T, gamma));
+        const mean = points.reduce((s, p, k) => s + weights[k] * p.mean, 0);
+        const sd = Math.sqrt(latentVar + eventVar / effectiveN(target));
+        const err = target.mean - mean;
+        const z = sd > 0 ? err / sd : 0;
+        add(cell(`${method}|${h}|${band}`), z, sd, err);
+        if (method === "kriging" && h === opts.horizons[0] && band === "ordinary") {
+          const day = new Date(t.obsFrom).toISOString().slice(0, 10);
+          let d = out.byDay.get(day);
+          if (d === undefined) out.byDay.set(day, (d = emptyForecastCell()));
+          add(d, z, sd, err);
+        }
+      }
+    }
+  }
   return out;
 }
 

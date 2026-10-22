@@ -270,10 +270,15 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       **帰無の改良はここで打ち切り**。詳細は ROADMAP_BRIEF.md 2026-10-22 (4)〜(7)
 - [ ] **第 4 段階** (2026-10-22 事前登録) — 平常の量での較正 (主張 C) を、月〜日の 1 週間
       **10-26〜11-01** (封印済み) で確かめる。11-02 以降に `run-volume-report --holdout` を 1 回。詳細は ROADMAP_BRIEF.md 2026-10-22 (6)
-- [ ] **次**: F2 `$F` の行 (kriging の予見をハーネスで作り、同じ物差しで較正を測る) → 仮想ストリームの常設。
-      順序は ROADMAP_BRIEF.md 2026-10-22 (7)
+- [x] **F2 `$F` の行** (2026-10-22) — variogram の帰無と同じ γ̂ に、有効な型 (ナゲット + べき乗 / 指数) を当てて
+      **kriging** で次の窓の平均と予測分散を出す (`forecast.ts`)。21 日の実データで、平常の量の窓では較正を保ったまま
+      (60 s 窓の 1 窓先で z の分散 0.85・|z|≥2 3.6%) 予測区間が今の比較 (参照の平均 = 持続の予測) より **23% 狭く**、
+      点予測の誤差も 23% 小さい。遠い先ほど差は縮む (60 窓先で 3%)。本番は `$Q[forecast:<schema>#<view>]` の宣言と
+      `GET /forecast?view=coarse|fine` (行はすべて `virtual: true`、窓要約の履歴から作る)。詳細は ROADMAP_BRIEF.md 2026-10-22 (8)
+- [ ] **次**: 予見との比較 (実現した窓を予見と比べ、package が「比べた相手は予見」と名乗る) → dashboard での表示
+      (仮想として) → 仮想ストリームの常設 (F3)。順序は ROADMAP_BRIEF.md 2026-10-22 (8)
 
-現在テスト計 566 件、全 green。
+現在テスト計 576 件、全 green。
 
 ## 実データ較正期間の運用
 
@@ -286,6 +291,7 @@ node dist/run-real-data-report.js --from 2026-09-29 --to 2026-10-02   # H1 (φ�
 node dist/run-h3-report.js --from 2026-10-07 --to 2026-10-10          # H3 (日周変動。既定は過分散の帰無)
 node dist/run-variogram-report.js --from 2026-10-06 --to 2026-10-10   # 3 つの帰無を同じ窓で比較 (位置別の警報率)
 node dist/run-volume-report.js --from 2026-10-01 --to 2026-10-21      # 平常の量での較正・構成の変化・量を変えない変化の検出 (全履歴)
+node dist/run-forecast-report.js --from 2026-10-01 --to 2026-10-21    # F2: kriging と持続の予見の較正・区間の幅・誤差 (horizon 別)
 node dist/run-f1-report.js --from 2026-10-06 --to 2026-10-10          # F1: 直前区間 / 前日の同時刻 / 差の差
 node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
 node dist/run-otel-flag-schedule.js        # H4 の障害フラグ切替 (既定: paymentFailure 50%、休止 10%、≒ 24 h)。真値は data/otel/flags.jsonl

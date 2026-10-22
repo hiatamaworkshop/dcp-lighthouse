@@ -1066,7 +1066,76 @@ function latentModel(
   const refHi = Math.max(...ref.map((r) => r.i));
   const maxLag = Math.max(1, refHi - refLo, ...obsWindows.map((w) => idx(w) - refLo));
 
-  const hist = histWindows.filter((w) => w.windowEnd <= refEnd && isScorable(w) && effectiveN(w) > 1);
+  const est = semivariogramFromWindows(histWindows, refEnd, window_ms, maxLag, origin);
+  const { gamma, extrapolatedFromLag: from } = est;
+  const B = est.blockGammas.length;
+
+  const selfOf = (g: Float64Array): number => {
+    let s = 0;
+    for (const a of ref) for (const b of ref) s += a.w * b.w * g[Math.abs(a.i - b.i)];
+    return s;
+  };
+  const obsIs = obsWindows.filter(isScorable).map(idx);
+  const meanContrast = (g: Float64Array): number => {
+    if (obsIs.length === 0) return 0;
+    const self = selfOf(g);
+    let total = 0;
+    for (const i of obsIs) total += Math.max(0, contrastCross(g, ref, i, maxLag) - self);
+    return total / obsIs.length;
+  };
+  let df = 1;
+  if (B >= 2) {
+    const vb = est.blockGammas.map((g) => meanContrast(g));
+    const vbar = meanContrast(gamma);
+    const mb = vb.reduce((s, x) => s + x, 0) / B;
+    const s2 = vb.reduce((s, x) => s + (x - mb) ** 2, 0) / (B - 1);
+    df = s2 > 0 ? (2 * B * vbar * vbar) / s2 : Infinity;
+  }
+  return {
+    gamma, origin, window_ms, ref, refSelf: selfOf(gamma), df, historyWindows: est.historyWindows,
+    ...(from !== undefined ? { extrapolatedFromLag: from } : {}),
+  };
+}
+
+/** What semivariogramFromWindows estimated. */
+export interface SemivariogramEstimate {
+  /** γ̂(h) for h = 0…maxLag, in window lags; γ̂(0) = 0. */
+  gamma: Float64Array;
+  /** The first lag no window pair reached: its γ̂ and every later one repeat the last estimate. Absent when every lag was estimated. */
+  extrapolatedFromLag?: number;
+  /**
+   * The same curve from each of B ≤ 8 consecutive blocks of the history (B =
+   * how many blocks of at least two maxLag spans it holds) — the variogram
+   * null's degrees of freedom are read from how far they disagree.
+   */
+  blockGammas: Float64Array[];
+  /** Windows the estimate rests on (ending by `until`, scorable, n_eff > 1). */
+  historyWindows: number;
+}
+
+/**
+ * The latent semivariogram of a run of window summaries — the variogram null's
+ * estimator (latentModel), shared with the forecast (forecast.ts) so a
+ * forecast and the gate that later judges it read one γ̂:
+ *
+ *   γ̂(h) = max(0, mean over pairs at lag h of ½(mₐ − m_b)² − ½(vₐ + v_b))
+ *
+ * vᵢ = the window's own sampling variance of its mean (Bessel: s²/n, so
+ * m(1 − m)/(n − 1) on 0/1 data). The classical (Matheron) estimator, not a
+ * robust one (see latentModel). Only windows ending by `until` enter — the
+ * caller's "nothing from what is being judged or predicted" — and only
+ * scorable ones with n_eff > 1 (a sampling variance must exist to subtract).
+ * Lags are window steps from `origin` (any point on the windows' grid).
+ */
+export function semivariogramFromWindows(
+  histWindows: readonly WindowStat[],
+  until: number,
+  window_ms: number,
+  maxLag: number,
+  origin = 0,
+): SemivariogramEstimate {
+  const idx = (w: WindowStat): number => Math.round((w.windowStart - origin) / window_ms);
+  const hist = histWindows.filter((w) => w.windowEnd <= until && isScorable(w) && effectiveN(w) > 1);
   const his = hist.map(idx);
   const lo = his.length > 0 ? Math.min(...his) : 0;
   const len = his.length > 0 ? Math.max(...his) - lo + 1 : 0;
@@ -1110,31 +1179,11 @@ function latentModel(
     return { gamma, from };
   };
   const { gamma, from } = curve(sum, cnt);
-
-  const selfOf = (g: Float64Array): number => {
-    let s = 0;
-    for (const a of ref) for (const b of ref) s += a.w * b.w * g[Math.abs(a.i - b.i)];
-    return s;
-  };
-  const obsIs = obsWindows.filter(isScorable).map(idx);
-  const meanContrast = (g: Float64Array): number => {
-    if (obsIs.length === 0) return 0;
-    const self = selfOf(g);
-    let total = 0;
-    for (const i of obsIs) total += Math.max(0, contrastCross(g, ref, i, maxLag) - self);
-    return total / obsIs.length;
-  };
-  let df = 1;
-  if (B >= 2) {
-    const vb = bsum.map((s, b) => meanContrast(curve(s, bcnt[b]).gamma));
-    const vbar = meanContrast(gamma);
-    const mb = vb.reduce((s, x) => s + x, 0) / B;
-    const s2 = vb.reduce((s, x) => s + (x - mb) ** 2, 0) / (B - 1);
-    df = s2 > 0 ? (2 * B * vbar * vbar) / s2 : Infinity;
-  }
   return {
-    gamma, origin, window_ms, ref, refSelf: selfOf(gamma), df, historyWindows: hist.length,
+    gamma,
     ...(from !== undefined ? { extrapolatedFromLag: from } : {}),
+    blockGammas: bsum.map((s, b) => curve(s, bcnt[b]).gamma),
+    historyWindows: hist.length,
   };
 }
 
@@ -1876,7 +1925,7 @@ function normalCdf(z: number): number {
 }
 
 /** Inverse standard normal CDF via Acklam's rational approximation (max error ~1.15e-9). */
-function normalQuantile(p: number): number {
+export function normalQuantile(p: number): number {
   if (p <= 0) return -Infinity;
   if (p >= 1) return Infinity;
   const a = [-3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2, 1.383577518672690e2, -3.066479806614716e1, 2.506628277459239e0];
