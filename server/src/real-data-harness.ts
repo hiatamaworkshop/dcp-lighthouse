@@ -215,15 +215,30 @@ class KeysPool {
   }
 }
 
+/** Day files after `toDay` that are also read, for events that arrived late across midnight. */
+const LATE_ARRIVAL_DAYS = 2;
+
+const utcDayOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+
 async function loadDayFiles(
   dir: string,
   range: { fromDay?: string; toDay?: string },
   toEvent: (raw: Record<string, unknown>) => LensEvent,
 ): Promise<LoadedStream> {
+  // The collector files an event under the UTC day it ARRIVED, not the day of its
+  // `ts`: after an outage across midnight the backfill lands in the next day's file
+  // (2026-10-21's second half sat in 2026-10-22.jsonl). So the files just after
+  // `toDay` are read too, keeping only their events whose `ts` is inside the range;
+  // the in-range files are read whole, as they always were. Nothing arrives before
+  // its `ts`, so no file before `fromDay` can hold a range event.
+  const lateLimit = range.toDay === undefined ? undefined : utcDayOf(Date.parse(`${range.toDay}T00:00:00Z`) + LATE_ARRIVAL_DAYS * DAY_MS);
+  const isLate = (day: string) => range.toDay !== undefined && lateLimit !== undefined && day > range.toDay && day <= lateLimit;
   const files = readdirSync(dir)
     .filter((f) => /^\d{4}-\d{2}-\d{2}\.jsonl(\.gz)?$/.test(f))
-    .filter((f) => (range.fromDay === undefined || f.slice(0, 10) >= range.fromDay) &&
-      (range.toDay === undefined || f.slice(0, 10) <= range.toDay))
+    .filter((f) => {
+      const day = f.slice(0, 10);
+      return (range.fromDay === undefined || day >= range.fromDay) && (range.toDay === undefined || day <= range.toDay || isLate(day));
+    })
     .sort();
   // A raw `.jsonl` next to a `.jsonl.gz` of the same day means the collector died
   // mid-rollover: the raw file was complete before gzip began, the .gz may be
@@ -236,13 +251,16 @@ async function loadDayFiles(
     return !shadowed;
   });
   const events: LensEvent[] = [];
+  const rangeHi = range.toDay === undefined ? Infinity : Date.parse(`${range.toDay}T00:00:00Z`) + DAY_MS;
   for (const f of readable) {
+    const late = isLate(f.slice(0, 10));
     const raw = createReadStream(join(dir, f));
     const input = f.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
     for await (const line of createInterface({ input, crlfDelay: Infinity })) {
       if (line === "") continue;
       try {
-        events.push(toEvent(JSON.parse(line) as Record<string, unknown>));
+        const ev = toEvent(JSON.parse(line) as Record<string, unknown>);
+        if (!late || ev.ts < rangeHi) events.push(ev);
       } catch {
         // A torn final line from a crash: the collector's own restart logic skips these too.
       }
@@ -1414,19 +1432,18 @@ export function h3Verdict(r: DiurnalResult): string {
 }
 
 /**
- * Stage 3's single look (ROADMAP_BRIEF.md 2026-10-14 (12)): `--holdout` is
- * taken only for exactly the holdout days, and only once they are complete
- * (the UTC day after the last has begun) — so an early look at a partial
- * holdout cannot spend it. Returns the refusal message, or undefined.
+ * Stage 3's single look (ROADMAP_BRIEF.md 2026-10-14 (12)) was taken on
+ * 2026-10-22 and is spent (ROADMAP_BRIEF.md 2026-10-22): every `--holdout` is
+ * refused from now on, as stage 1's and H3's are. The look read the stream only
+ * up to 2026-10-21T15:43Z (the rest sat in the next day's file; see loadDayFiles);
+ * the verdict stands as taken (user decision 2026-10-22). Returns the refusal.
  */
-export function stage3HoldoutRefusal(fromDay: string, toDay: string, nowMs: number): string | undefined {
+export function stage3HoldoutRefusal(fromDay: string, toDay: string, _nowMs: number): string | undefined {
   if (fromDay !== STAGE3_HOLDOUT_FROM_DAY || toDay !== STAGE3_HOLDOUT_TO_DAY) {
     return `refusing: stage 3's --holdout reads exactly ${STAGE3_HOLDOUT_FROM_DAY}…${STAGE3_HOLDOUT_TO_DAY}`;
   }
-  if (new Date(nowMs).toISOString().slice(0, 10) <= STAGE3_HOLDOUT_TO_DAY) {
-    return `refusing: stage 3's holdout is not complete until ${STAGE3_HOLDOUT_TO_DAY} has ended (UTC)`;
-  }
-  return undefined;
+  // Spent on 2026-10-22 (ROADMAP_BRIEF.md 2026-10-22): the one look has been taken.
+  return `refusing: stage 3's holdout (${STAGE3_HOLDOUT_FROM_DAY}…${STAGE3_HOLDOUT_TO_DAY}) was spent on 2026-10-22 — it had one look`;
 }
 
 /** Above this share of planned holdout trials blind by collection gaps, stage 3 gives no verdict. */

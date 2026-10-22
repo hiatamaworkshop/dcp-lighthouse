@@ -291,6 +291,22 @@ describe("loading a collector directory", () => {
     assert.equal(s.events.length, 2);
   });
 
+  it("events that arrived after midnight sit in the next day's file but belong to their ts day (2026-10-22)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wiki-"));
+    const rec = (ts: number) => JSON.stringify({ ts, value: 1, wiki: "enwiki", type: "edit", namespace: 0, eid: `e${ts}` });
+    const d1 = Date.parse("2026-10-01T20:00:00Z"); // arrived in time: day 1's file
+    const late = Date.parse("2026-10-01T22:00:00Z"); // backfilled after midnight: day 2's file
+    const d2 = Date.parse("2026-10-02T03:00:00Z"); // day 2's own
+    const d3 = Date.parse("2026-10-03T03:00:00Z");
+    writeFileSync(join(dir, "2026-10-01.jsonl"), rec(d1) + "\n");
+    writeFileSync(join(dir, "2026-10-02.jsonl"), [rec(late), rec(d2)].join("\n") + "\n");
+    writeFileSync(join(dir, "2026-10-03.jsonl"), rec(d3) + "\n");
+    const s = await loadWikiDir(dir, { fromDay: "2026-10-01", toDay: "2026-10-01" });
+    assert.deepEqual(s.events.map((e) => e.ts), [d1, late]); // the next file's own days stay out
+    const both = await loadWikiDir(dir, { fromDay: "2026-10-01", toDay: "2026-10-02" });
+    assert.deepEqual(both.events.map((e) => e.ts), [d1, late, d2]);
+  });
+
   it("events with the same wiki/type/namespace share one keys object", async () => {
     const dir = mkdtempSync(join(tmpdir(), "wiki-"));
     const d = Date.parse("2026-10-01T12:00:00Z");
@@ -508,10 +524,10 @@ describe("stage 3's single look", () => {
     trials, flagged: Math.round(rate * trials), rate, stepPackages: 0, unusableReference: 0, blindByGap,
     designTarget: 0.0455, perWindowByPosition: [],
   });
-  it("--holdout takes exactly the holdout days, and only after they have ended (UTC)", () => {
+  it("--holdout was spent on 2026-10-22: refused for the holdout days at any time, and for any other range", () => {
     const after = Date.parse("2026-10-22T00:00:01Z");
-    assert.equal(stage3HoldoutRefusal("2026-10-19", "2026-10-21", after), undefined);
-    assert.match(stage3HoldoutRefusal("2026-10-19", "2026-10-21", Date.parse("2026-10-21T23:59:59Z")) ?? "", /not complete/);
+    assert.match(stage3HoldoutRefusal("2026-10-19", "2026-10-21", after) ?? "", /spent/);
+    assert.match(stage3HoldoutRefusal("2026-10-19", "2026-10-21", Date.parse("2026-10-23T00:00:00Z")) ?? "", /spent/);
     assert.match(stage3HoldoutRefusal("2026-10-19", "2026-10-20", after) ?? "", /exactly/);
     assert.match(stage3HoldoutRefusal("2026-10-18", "2026-10-21", after) ?? "", /exactly/);
   });
