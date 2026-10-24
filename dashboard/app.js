@@ -184,6 +184,122 @@ function renderQHistory(rows) {
   }).join("");
 }
 
+// ── Forecast ($F, ROADMAP_BRIEF.md 2026-10-22 (8), 2026-10-24) ───────────────
+//
+// A forecast is virtual (2026-10-08): it is drawn dashed and hatched, under a
+// "virtual" tag, so it cannot be read as a measurement. The one solid mark is
+// the REALIZED window of an earlier forecast, green inside its interval and red
+// outside. Polled, not pushed: the rows are made on request from window summaries.
+
+const FORECAST_VIEWS = [
+  { view: "coarse", el: "forecast-coarse", pollMs: 5000 },
+  { view: "fine",   el: "forecast-fine",   pollMs: 2000 },
+];
+// Display hint only: the harness's ORDINARY_VOLUME (real-data-harness.ts). The calibration
+// of a forecast holds for a window of ordinary volume; outside it the make-up changed.
+const ORDINARY_VOLUME = [0.8, 1.25];
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const pctOf = (x) => `${(x * 100).toFixed(1)}%`;
+const clock = (ms) => new Date(ms).toISOString().substr(11, 8);
+
+// The values are pass rates, so [0, 1]; a normal interval around a rate near 1 (or a
+// far extrapolation from a young history) spills past it. Drawn clipped, and said so.
+const rate01 = (x) => Math.min(1, Math.max(0, x));
+function clippedBand(r) {
+  const lo = rate01(r.interval.lo);
+  const hi = rate01(r.interval.hi);
+  return { lo, hi, mean: rate01(r.mean), clipped: r.interval.lo < 0 || r.interval.hi > 1 || r.mean < 0 || r.mean > 1 };
+}
+const bandText = (b) => `${pctOf(b.mean)} [${(b.lo * 100).toFixed(1)}–${(b.hi * 100).toFixed(1)}]${b.clipped ? ' <span class="fc-flag">clipped to 0–100%</span>' : ""}`;
+
+function forecastAxis(rows, scores) {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const r of rows) { const b = clippedBand(r); lo = Math.min(lo, b.lo); hi = Math.max(hi, b.hi); }
+  for (const s of scores) {
+    const b = clippedBand(s.forecast);
+    lo = Math.min(lo, b.lo, s.realized.mean);
+    hi = Math.max(hi, b.hi, s.realized.mean);
+  }
+  const pad = Math.max(0.01, (hi - lo) * 0.1);
+  lo = Math.max(0, lo - pad);
+  hi = Math.min(1, hi + pad);
+  if (hi - lo < 0.02) { const mid = (lo + hi) / 2; lo = Math.max(0, mid - 0.01); hi = Math.min(1, mid + 0.01); }
+  return { lo, hi, at: (x) => `${(100 * (Math.min(hi, Math.max(lo, x)) - lo) / (hi - lo)).toFixed(2)}%` };
+}
+
+function forecastFlags(row) {
+  const flags = [];
+  if (row.basis.fellBack) flags.push("persistence fallback");
+  if (row.basis.extrapolatedFromLag !== undefined) flags.push("young history");
+  return flags.length ? ` <span class="fc-flag">${flags.join(", ")}</span>` : "";
+}
+
+function forecastRowHtml(r, axis, label) {
+  const b = clippedBand(r);
+  return `<div class="fc-row">
+    <span class="fc-h">${esc(label)}</span>
+    <div class="fc-track">
+      <div class="fc-int" style="left:${axis.at(b.lo)};width:calc(${axis.at(b.hi)} - ${axis.at(b.lo)})"></div>
+      <div class="fc-mean" style="left:${axis.at(b.mean)}"></div>
+    </div>
+    <span class="fc-num">${bandText(b)}${forecastFlags(r)}</span>
+  </div>`;
+}
+
+function forecastScoreHtml(s, axis) {
+  const r = s.forecast;
+  const off = s.volumeRatio < ORDINARY_VOLUME[0] || s.volumeRatio > ORDINARY_VOLUME[1];
+  const label = `${r.group !== undefined ? `${r.group} ` : ""}+${r.horizon} · ${clock(r.targetStart)}`;
+  const b = clippedBand(r);
+  return `<div class="fc-row">
+    <span class="fc-h">${esc(label)}</span>
+    <div class="fc-track">
+      <div class="fc-int" style="left:${axis.at(b.lo)};width:calc(${axis.at(b.hi)} - ${axis.at(b.lo)})"></div>
+      <div class="fc-real ${s.insideInterval ? "" : "out"}" style="left:${axis.at(s.realized.mean)}"></div>
+    </div>
+    <span class="fc-num">forecast ${bandText(b)} → <b>${pctOf(s.realized.mean)}</b> · z ${s.z.toFixed(1)}${
+      off ? ` <span class="fc-flag">volume ×${s.volumeRatio.toFixed(2)}</span>` : ""}</span>
+  </div>`;
+}
+
+function renderForecast(elId, rows, scores) {
+  const el = document.getElementById(elId);
+  if (rows.length === 0 && scores.length === 0) {
+    el.innerHTML = '<span style="color:var(--muted);font-size:11px">No forecast yet (history still filling).</span>';
+    return;
+  }
+  const axis = forecastAxis(rows, scores);
+  const grouped = rows.some((r) => r.group !== undefined);
+  const next = rows.map((r) => forecastRowHtml(r, axis,
+    `${grouped && r.group !== undefined ? `${r.group} ` : ""}+${r.horizon} · ${clock(r.targetStart)}`)).join("");
+  const back = scores.length === 0 ? "" :
+    `<div class="fc-sub">earlier forecast vs realized</div>${scores.map((s) => forecastScoreHtml(s, axis)).join("")}`;
+  el.innerHTML = `${next}${back}<div class="fc-note">axis ${pctOf(axis.lo)}–${pctOf(axis.hi)} · interval = ${Math.round((rows[0] ?? scores[0].forecast).interval.level * 100)}% · ${esc((rows[0] ?? scores[0].forecast).method)}</div>`;
+}
+
+async function pollForecast(v) {
+  const el = document.getElementById(v.el);
+  try {
+    const head = await (await fetch(`${API}/forecast?view=${v.view}`)).json();
+    if (head.error) {
+      el.innerHTML = `<span style="color:var(--muted);font-size:11px">${esc(head.error)}</span>`;
+      return;
+    }
+    // The realized side: a forecast made two windows ago has its next window whole by now.
+    const w = (head.lens.window_ms ?? 1000) * (head.lens.downsample_factor ?? 1);
+    const earlier = await (await fetch(`${API}/forecast?view=${v.view}&at=${Date.now() - 2 * w}`)).json();
+    renderForecast(v.el, head.rows ?? [], earlier.scores ?? []);
+  } catch (_) {
+    el.innerHTML = '<span style="color:var(--muted);font-size:11px">forecast unavailable</span>';
+  } finally {
+    setTimeout(() => pollForecast(v), v.pollMs);
+  }
+}
+
+for (const v of FORECAST_VIEWS) pollForecast(v);
+
 // ── Scenario controls ────────────────────────────────────────────────────────
 
 function runScenario(id) {
