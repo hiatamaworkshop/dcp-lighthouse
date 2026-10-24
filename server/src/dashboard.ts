@@ -14,6 +14,7 @@
  *   GET /control/forecast?view=&horizons=&recent_windows=&history_ms=&level=&method= — write $Q[forecast:test_result:v1#view]
  *   GET /control/replay?fromTs=&toTs=&window_ms= — manual replay + reference score
  *   GET /forecast?view=coarse|fine[&at=ms] — the view's `$F` rows (virtual, from window summaries)
+ *                                            and `scores`: rows already realized, judged against it
  *   GET /status             — current load
  *   GET /brain              — Brain diagnostics (shadow tally, LLM counters)
  *
@@ -788,8 +789,11 @@ export class DashboardServer {
         return;
       }
       const rows = this.forecaster.forecast(lens, decl, at);
+      // `scores`: the rows whose target window is already whole, judged against
+      // what was realized (`against: "forecast"`). Empty for an `at` still ahead.
+      const scores = this.forecaster.score(lens, decl, at, Date.now());
       jsonHeaders(res);
-      res.end(JSON.stringify({ scope: `forecast:test_result:v1#${view}`, lens, declaration: decl, at, rows }));
+      res.end(JSON.stringify({ scope: `forecast:test_result:v1#${view}`, lens, declaration: decl, at, rows, scores }));
       return;
     }
 

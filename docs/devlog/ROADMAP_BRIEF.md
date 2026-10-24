@@ -6154,3 +6154,25 @@ variogram の帰無は平常の量の窓ではむしろ保守側で、帰無そ�
 2. dashboard での表示 (仮想であることが一目で分かる形で)
 3. F3 仮想ストリームの常設
 - 第 4 段階には影響しない (curator の出力はバイト一致のまま。コードは 10-26 00:00Z の HEAD で固定)
+
+## 2026-10-24 — F2 の残り 1: 実現した窓を予見と比べる (`ForecastScore`)
+
+(8) の「次」の 1。**curator は触っていない** (第 4 段階の測定器は 10-26 00:00Z の HEAD で固定、出力はバイト一致のまま)。
+比べる側を `forecast.ts` に足しただけ。
+
+- `scoreForecast(row, realized)`: z = (実現した平均 − 予見) / √(潜在の分散 + 事象あたりの分散 ÷ **実現した窓の事象数**)。
+  `runForecastCalibration` が測った式と同じなので、スコアと較正表は同じ量を読む。`insideInterval` は row の水準で実現した事象数のもとで判定
+  (row.interval は典型の事象数を仮定している)
+- package 側の名乗り: `against: "forecast"` と比べた row そのものを持つ (`SnapshotPackage.comparison` が参照と帰無を名乗るのと同じ作法)。
+  `virtual: true` も付ける — 予見に寄りかかった値を観測と読ませない (10-08)
+- `volumeRatio` (実現した事象数 ÷ 予見が仮定した事象数) を載せるが、**帯には切らない**。較正が成り立つのは平常の量の窓
+  (`ORDINARY_VOLUME` 0.8〜1.25)、量の外れた窓 (構成の変化) ではどの予見も外れる (分散 1.4〜2.1)。帯は読み手が決める (variogram の `volumeRatio` と同じ)。
+  `ORDINARY_VOLUME` は harness にあり forecast.ts は harness を import しないので、定数を複製せずに済ませた
+- `Forecaster.score(lens, decl, at, nowTs)`: `at` に作った row のうち、対象の窓が `nowTs` までに閉じたものを採点する。
+  予見の読みは origin の前で終わり、実現した窓は origin から始まる**別の要求**で読む (1 回の要求に両方を載せない)。
+  まだ閉じていない窓・薄くて採点できない窓は**スコアなし** (「通った」ではなく「未・不能」)
+- `GET /forecast?view=&at=` の応答に `scores` を追加 (`at` が過去なら実現済みの row が採点される。未来なら空)
+- テスト 581 件 (forecast 5・dashboard の既存 1 件に断言を追加)。AR(1) 合成で多数の起点にわたり z の分散 0.6〜1.5・95% 区間の被覆 > 88% を固定
+
+**次**: 60 s の 1 窓先の裾 (|z|≥3 0.63%) を判定に使う前に確かめる (これは実データの探索日で `ForecastScore` の z を集めて見る)、
+dashboard での表示 (仮想であることが一目で分かる形)、F3。

@@ -8,6 +8,7 @@ import {
   forecastRow,
   krigingWeights,
   persistenceWeights,
+  scoreForecast,
   variogramAt,
   type ForecastPoint,
 } from "./forecast.js";
@@ -167,5 +168,76 @@ describe("Forecaster: production `$F` rows from window summaries", () => {
 
   it("refuses a lens no summary can be kept for", () => {
     assert.throws(() => new Forecaster(source).forecast({ window_ms: W }, decl, 450 * W), /absolute grid/);
+  });
+});
+
+describe("scoreForecast / Forecaster.score: a realized window against the forecast made for it", () => {
+  const theta = ar1(600, 0.95, 0.05, 0.5, 9);
+  const all = binaryWindows(theta, 200, 10);
+  const asked: Array<[number, number]> = [];
+  const source = {
+    history: (_lens: unknown, fromTs: number, toTs: number) => {
+      asked.push([fromTs, toTs]);
+      return { window_ms: W, windows: all.filter((w) => w.windowStart >= fromTs && w.windowEnd <= toTs + 1) };
+    },
+  };
+  const lens = { window_ms: W, align: "epoch" as const };
+  const decl = { recent_windows: 30, horizons: [1, 5], history_ms: 300 * W };
+
+  it("z is the error over √(latent + event variance ÷ the realized count); the row stays on the score", () => {
+    const row = forecastRow(all.slice(400, 430), all.slice(130, 430), { window_ms: W, horizon: 1 })!;
+    const realized = all[430];
+    const s = scoreForecast(row, realized)!;
+    assert.equal(s.against, "forecast");
+    assert.equal(s.virtual, true);
+    assert.equal(s.forecast, row);
+    assert.equal(s.error, realized.mean - row.mean);
+    assert.ok(Math.abs(s.sd - Math.sqrt(row.latentVar + row.eventVar / realized.count)) < 1e-12);
+    assert.ok(Math.abs(s.z - s.error / s.sd) < 1e-12);
+    assert.equal(s.volumeRatio, realized.count / row.typicalCount);
+    assert.equal(s.insideInterval, Math.abs(s.z) <= 1.959964);
+  });
+
+  it("a window too thin to score gets no score", () => {
+    const row = forecastRow(all.slice(400, 430), all.slice(130, 430), { window_ms: W, horizon: 1 })!;
+    assert.equal(scoreForecast(row, { ...all[430], count: 1, valid: false }), undefined);
+  });
+
+  it("scores the rows whose target is whole by `now`, reading the realized windows only from the origin on", () => {
+    const at = 450 * W + 1_234;
+    const scores = new Forecaster(source).score(lens, decl, at, 455 * W + 1);
+    // horizon 1 targets window 450 (whole), horizon 5 targets 454 (whole at 455·W): both scored.
+    assert.deepEqual(scores.map((s) => s.forecast.horizon), [1, 5]);
+    for (const s of scores) {
+      const w = all[s.forecast.targetStart / W];
+      assert.equal(s.realized.mean, w.mean);
+      assert.equal(s.realized.windowStart, s.forecast.targetStart);
+    }
+    // The forecast's own request ends before the origin; the realized request starts at the first target.
+    assert.equal(asked.at(-2)![1], 450 * W - 1);
+    assert.equal(asked.at(-1)![0], 450 * W);
+  });
+
+  it("a target not yet whole yields no score — absence is not a pass", () => {
+    const scores = new Forecaster(source).score(lens, decl, 450 * W, 452 * W);
+    assert.deepEqual(scores.map((s) => s.forecast.horizon), [1]);
+    assert.deepEqual(new Forecaster(source).score(lens, decl, 450 * W, 450 * W), []);
+  });
+
+  it("over many origins the z has about unit variance and 95% intervals hold about 95%", () => {
+    const fc = new Forecaster(source);
+    const zs: number[] = [];
+    let inside = 0;
+    for (let o = 330; o < 590; o += 2) {
+      for (const s of fc.score(lens, { ...decl, horizons: [1] }, o * W, 600 * W)) {
+        zs.push(s.z);
+        if (s.insideInterval) inside++;
+      }
+    }
+    const mean = zs.reduce((a, b) => a + b, 0) / zs.length;
+    const variance = zs.reduce((a, b) => a + (b - mean) ** 2, 0) / zs.length;
+    assert.ok(zs.length > 100, `${zs.length}`);
+    assert.ok(variance > 0.6 && variance < 1.5, `z variance ${variance}`);
+    assert.ok(inside / zs.length > 0.88, `coverage ${inside / zs.length}`);
   });
 });

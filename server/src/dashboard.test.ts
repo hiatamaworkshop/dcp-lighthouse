@@ -701,6 +701,12 @@ test("/forecast serves the view's virtual `$F` rows from window summaries; /cont
       assert.ok(Math.abs(row.mean - 0.75) < 0.05, `mean ${row.mean}`);
     }
     assert.deepEqual(body.rows.map((r: { targetStart: number }) => r.targetStart), [530_000, 550_000]);
+    // Only the 530–540 s target was ever observed; the 550 s one has no events, so it has no score.
+    assert.equal(body.scores.length, 1);
+    assert.equal(body.scores[0].against, "forecast");
+    assert.equal(body.scores[0].virtual, true);
+    assert.equal(body.scores[0].forecast.targetStart, 530_000);
+    assert.ok(Math.abs(body.scores[0].realized.mean - 0.75) < 0.05, `realized ${body.scores[0].realized.mean}`);
 
     assert.equal((await fetch(`${base}/forecast?view=nope`)).status, 400);
     const write = await fetch(`${base}/control/forecast?view=coarse&horizons=1,2,4&recent_windows=5`);

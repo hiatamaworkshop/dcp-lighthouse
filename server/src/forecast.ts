@@ -312,6 +312,57 @@ export function forecastRow(
 }
 
 /**
+ * A realized window judged against the forecast made for it — the comparison
+ * whose reference is a forecast (ROADMAP_BRIEF.md 2026-10-14 (2) item 5), so the
+ * package that carries it names `against: "forecast"` and the row it compared
+ * with, the way SnapshotPackage.comparison names the reference and null it used.
+ *
+ * z = (realized mean − forecast) / √(latent forecast variance + event variance ÷
+ * the REALIZED window's event count) — the formula runForecastCalibration
+ * measured, so a score and the calibration table read the same quantity. That
+ * calibration holds for a window of ordinary volume: `volumeRatio` (realized
+ * count ÷ the count the forecast assumed) is carried so a reader can tell a
+ * window the latent model claims to cover from a change in composition, where
+ * every forecast misses (2026-10-22 (8): variance 1.4–2.1). It is not banded
+ * here; the band is the reader's, as with the variogram's `volumeRatio`.
+ *
+ * Virtual: the forecast side is, and a reader branching on that axis must not
+ * take a score for an observation (2026-10-08).
+ */
+export interface ForecastScore {
+  virtual: true;
+  against: "forecast";
+  forecast: ForecastRow;
+  realized: { windowStart: number; windowEnd: number; count: number; mean: number };
+  /** realized mean − forecast mean. */
+  error: number;
+  /** √(latent variance + event variance ÷ realized count): the spread z is read in. */
+  sd: number;
+  z: number;
+  /** Whether the realized mean lies in the central interval at the row's level, at the realized count (row.interval assumes the typical count). */
+  insideInterval: boolean;
+  volumeRatio: number;
+}
+
+/** Judge `realized` (the window the row was made for) against `row`. Undefined when the window cannot be scored (too few events — the same isScorable the calibration used). */
+export function scoreForecast(row: ForecastRow, realized: WindowStat): ForecastScore | undefined {
+  if (!isScorable(realized)) return undefined;
+  const sd = Math.sqrt(row.latentVar + row.eventVar / effectiveN(realized));
+  const error = realized.mean - row.mean;
+  return {
+    virtual: true,
+    against: "forecast",
+    forecast: row,
+    realized: { windowStart: realized.windowStart, windowEnd: realized.windowEnd, count: realized.count, mean: realized.mean },
+    error,
+    sd,
+    z: sd > 0 ? error / sd : 0,
+    insideInterval: Math.abs(error) <= normalQuantile(0.5 + row.interval.level / 2) * sd,
+    volumeRatio: row.typicalCount > 0 ? realized.count / row.typicalCount : NaN,
+  };
+}
+
+/**
  * Production's `$F` rows (ROADMAP_BRIEF.md 2026-10-22 (8)): a view's lens and
  * its declared $Q[forecast], forecast from the standing window summaries
  * (window-history.ts) — the same windows the variogram null reads its history
@@ -350,5 +401,32 @@ export class Forecaster {
       }
     }
     return rows;
+  }
+
+  /**
+   * The rows made at `at` (as forecast() would have made them then), each judged
+   * against its target window if that window is whole by `nowTs`. The forecast
+   * reads nothing at or after its origin; the realized windows are read in a
+   * second request that starts there, so one request never holds both. A
+   * window not yet whole, or too thin to score, yields no score — an absent
+   * score is "not yet / not scorable", never a pass.
+   */
+  score(lens: QObserveParams, decl: QForecastParams, at: number, nowTs: number): ForecastScore[] {
+    const rows = this.forecast(lens, decl, at).filter((r) => r.targetEnd <= nowTs);
+    if (rows.length === 0) return [];
+    const from = Math.min(...rows.map((r) => r.targetStart));
+    const to = Math.max(...rows.map((r) => r.targetEnd));
+    const read = this.history.history(lens, from, to - 1);
+    const grouped = (lens.group_by?.length ?? 0) > 0;
+    const byGroup = new Map<string | undefined, WindowStat[]>(
+      grouped ? (read.groups ?? []).map((g) => [g.label as string | undefined, g.windows] as const) : [[undefined, read.windows]],
+    );
+    const scores: ForecastScore[] = [];
+    for (const row of rows) {
+      const realized = byGroup.get(row.group)?.find((w) => w.windowStart === row.targetStart);
+      const s = realized !== undefined ? scoreForecast(row, realized) : undefined;
+      if (s !== undefined) scores.push(s);
+    }
+    return scores;
   }
 }
