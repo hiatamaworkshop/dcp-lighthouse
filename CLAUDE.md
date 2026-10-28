@@ -13,6 +13,7 @@ DCP Pipeline を観測層として、マルチエージェント開発時代の�
 - `docs/LIGHTHOUSE_MODEL.md` — 灯台モデルの概念・$Q shadow・stream replay・コード応用展望
 - `docs/LIGHTHOUSE_PILOT_DATA.md` — モックデータ要件・シナリオ・検証基準
 - `docs/devlog/ROADMAP_BRIEF.md` — 時系列の開発ログ (追記式。仕様ではない)
+- `docs/roadmap.md` — 作業の単位の台帳 (`### C<n>. 題`。agent-hub から依頼できる形。L1〜L5 は devlog 側の工程名で別物)
 
 ---
 
