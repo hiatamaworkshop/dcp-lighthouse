@@ -6,11 +6,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { Comparator, assertComparable } from "./comparison.js";
+import { Comparator, assertComparable, cleanHistoryByMedian, HISTORY_CLEAN_MAX_REMOVED } from "./comparison.js";
 import { RetentionBuffer } from "./retention-buffer.js";
 import { SnapshotCurator } from "./snapshot-curator.js";
 import { WindowHistory } from "./window-history.js";
-import type { LensEvent } from "./lens.js";
+import type { LensEvent, LensResult, WindowStat } from "./lens.js";
 
 const T0 = 1_000_000;
 const EPOCH = { window_ms: 1_000, align: "epoch" as const };
@@ -154,5 +154,62 @@ describe("assertComparable — the rule a proposal gate and compare() share", ()
       () => comparator.compare(bufferWith(T0, T0 + 1_000), { window_ms: 1_000, align: "epoch", decay: "step(cutoff=now-60s)" }, vario, { fromTs: T0, toTs: T0 + 999 }),
       /decayed lens/,
     );
+  });
+});
+
+describe("history_clean: median — leave a bot batch out of the history γ̂ is read from (ROADMAP C4)", () => {
+  const win = (i: number, count: number, extra: Partial<WindowStat> = {}): WindowStat =>
+    ({ windowStart: i * 1000, windowEnd: (i + 1) * 1000, count, mean: 0.5, sumSq: count * 0.25, valid: true, ...extra });
+  const result = (counts: number[]): LensResult => ({ window_ms: 1000, windows: counts.map((c, i) => win(i, c)) });
+
+  it("drops windows outside [0.8, 1.25]× the history's own median, and says how many", () => {
+    const { history, cleaning } = cleanHistoryByMedian(result([50, 50, 150, 150, 50, 50, 50, 50, 20, 50]));
+    assert.deepEqual(history.windows.map((w) => w.count), [50, 50, 50, 50, 50, 50, 50]);
+    assert.deepEqual(cleaning, { rule: "median", kept: 7, removed: 3 });
+    assert.equal(cleaning.declined, undefined);
+  });
+
+  it("reads the median of the whole history, so a stretch of batch does not make the rest look low", () => {
+    // 40% of the history is a batch at 3×; the median stays at the usual 50 and the batch is what goes.
+    const counts = [...Array(6).fill(50), ...Array(4).fill(150)];
+    assert.deepEqual(cleanHistoryByMedian(result(counts)).history.windows.map((w) => w.count), Array(6).fill(50));
+  });
+
+  it("uses a series whole, and says so, when too much of it would go", () => {
+    const counts = [50, 80, 110, 150, 200, 260, 330, 400, 500, 640]; // volume all over the place: 9 of 10 would go
+    const { history, cleaning } = cleanHistoryByMedian(result(counts), { maxRemovedShare: 0.5 });
+    assert.equal(history.windows.length, 10);
+    assert.deepEqual(cleaning, { rule: "median", kept: 10, removed: 0, declined: true });
+    assert.ok(HISTORY_CLEAN_MAX_REMOVED > 0 && HISTORY_CLEAN_MAX_REMOVED <= 1);
+  });
+
+  it("counts a thinned window by what it stands for, and cleans each group against its own median", () => {
+    const thinned = (i: number, kept: number, stands: number) => win(i, kept, { weights: { sumW: stands, sumW2: 2 * stands } });
+    const one = cleanHistoryByMedian({ window_ms: 1000, windows: [thinned(0, 25, 50), thinned(1, 25, 50), thinned(2, 75, 150), thinned(3, 25, 50), thinned(4, 25, 50)] });
+    assert.deepEqual(one.history.windows.map((w) => w.windowStart), [0, 1000, 3000, 4000]);
+    const grouped: LensResult = {
+      window_ms: 1000, windows: result([60, 60, 60, 60]).windows,
+      groups: [
+        { label: "a", windows: result([10, 10, 10, 40, 10]).windows },
+        { label: "b", windows: result([100, 100, 100, 100, 100]).windows },
+      ] as unknown as LensResult["groups"],
+    };
+    const g = cleanHistoryByMedian(grouped);
+    assert.deepEqual(g.history.groups!.map((x) => x.windows.length), [4, 5]);
+    assert.deepEqual(g.cleaning, { rule: "median", kept: 9, removed: 1 });
+  });
+
+  it("Comparator hands the variogram null the cleaned history, names what it left out, and changes nothing without the row", () => {
+    const buf = bufferWith(T0, T0 + 60_000);
+    for (let ts = T0 + 10_000; ts < T0 + 20_000; ts += 10) buf.observe({ ts, value: 1 }, "test_result:v1"); // +100 ev/s for 10 s
+    const obs = { fromTs: T0 + 50_000, toTs: T0 + 59_999 };
+    const decl = { null_model: "variogram" as const, history_ms: 40_000 };
+    const plain = new Comparator().compare(buf, EPOCH, decl, obs);
+    const cleaned = new Comparator().compare(buf, EPOCH, { ...decl, history_clean: "median" as const }, obs);
+    assert.equal(plain.comparison!.history!.cleaned, undefined);
+    assert.deepEqual(cleaned.comparison!.history!.cleaned, { rule: "median", kept: 40, removed: 10 });
+    assert.equal(cleaned.comparison!.history!.windowCount, 40);
+    assert.equal(cleaned.variogram![0].historyWindows, 40);
+    assert.equal(plain.variogram![0].historyWindows, 50);
   });
 });

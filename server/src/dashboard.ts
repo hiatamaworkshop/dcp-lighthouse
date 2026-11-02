@@ -10,7 +10,7 @@
  *   GET /demo/stop          — stop the generator
  *   GET /control/baseline-delta?value=N — write $Q[schema].baseline_delta
  *   GET /control/coarse-downsample?factor=N — write $Q[observe:...#coarse].downsample_factor
- *   GET /control/compare?null_model=&history_ms= — write $Q[compare:test_result:v1]
+ *   GET /control/compare?null_model=&history_ms=&history_clean=median|none — write $Q[compare:test_result:v1]
  *   GET /control/forecast?view=&horizons=&recent_windows=&history_ms=&level=&method= — write $Q[forecast:test_result:v1#view]
  *   GET /control/replay?fromTs=&toTs=&window_ms= — manual replay + reference score
  *   GET /forecast?view=coarse|fine[&at=ms] — the view's `$F` rows (virtual, from window summaries)
@@ -701,6 +701,11 @@ export class DashboardServer {
       } else if (row.null_model !== "variogram") {
         delete row.history_ms;
       }
+      // history_clean=median cleans the history (ROADMAP C4); history_clean=none removes it.
+      const clean = q.get("history_clean");
+      if (clean === "none") delete row.history_clean;
+      else if (clean !== null) row.history_clean = clean as QCompareParams["history_clean"];
+      if (row.history_ms === undefined) delete row.history_clean;
       this.registry.set("compare:test_result:v1", row);
       jsonHeaders(res);
       res.end(JSON.stringify({ scope: "compare:test_result:v1", ...row }));

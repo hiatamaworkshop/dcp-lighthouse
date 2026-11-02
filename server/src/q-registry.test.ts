@@ -278,11 +278,15 @@ describe("QRegistry — compare layer (2026-10-14 (8))", () => {
       { history_ms: 3_600_000 }, // read only by the variogram null
       { null_model: "overdispersed", history_ms: 3_600_000 },
       { null_model: "variogram", history_ms: 0 },
+      { history_clean: "median" }, // cleans the history, so it needs one
+      { null_model: "variogram", history_ms: 3_600_000, history_clean: "mean" },
     ];
     for (const p of bad) assert.throws(() => reg.set("compare:t:v1", p as never), RangeError, JSON.stringify(p));
     assert.deepEqual(reg.rows(), []);
     reg.set("compare:t:v1", { null_model: "variogram", history_ms: 86_400_000, reference_windows: 3 });
     assert.equal(reg.rows().length, 1);
+    reg.set("compare:t:v2", { null_model: "variogram", history_ms: 3_600_000, history_clean: "median" });
+    assert.equal(reg.getCompare("t:v2")?.history_clean, "median");
   });
 
   it("runs write gates before the store, and only on their own layer", () => {

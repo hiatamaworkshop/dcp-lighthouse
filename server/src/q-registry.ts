@@ -224,7 +224,21 @@ export interface QCompareParams {
    * reference stands in, and the package says so).
    */
   history_ms?: number;
+  /**
+   * Leave the history's windows off ordinary volume out of γ̂ before the variogram
+   * null reads it (ROADMAP C4, ROADMAP_BRIEF.md 2026-11-02 (9)): "median" = windows
+   * whose volume is outside [0.8, 1.25]× the history's median window. A history that
+   * holds the stream's make-up changing (a bot batch starting or stopping) widens γ̂
+   * and makes the gate conservative at ordinary volume; this takes those windows
+   * out. Absent = the history as recorded. Needs `history_ms`. A history of which
+   * too large a share would be left out is used whole, and the package says so.
+   */
+  history_clean?: HistoryClean;
 }
+
+/** QCompareParams.history_clean's values. */
+export const HISTORY_CLEANS = ["median"] as const;
+export type HistoryClean = (typeof HISTORY_CLEANS)[number];
 
 /**
  * $Q[forecast] — the `$F` rows a view publishes (ROADMAP_BRIEF.md 2026-10-22 (8),
@@ -281,6 +295,14 @@ export function validateCompareParams(p: QCompareParams): void {
     }
     if (!(Number.isFinite(p.history_ms) && p.history_ms > 0)) {
       throw new RangeError(`compare: history_ms must be a positive number of ms, got ${String(p.history_ms)}`);
+    }
+  }
+  if (p.history_clean !== undefined) {
+    if (!HISTORY_CLEANS.includes(p.history_clean)) {
+      throw new RangeError(`compare: unknown history_clean "${String(p.history_clean)}" (${HISTORY_CLEANS.join(" | ")})`);
+    }
+    if (p.history_ms === undefined) {
+      throw new RangeError(`compare: history_clean cleans the history, so it needs history_ms (null_model "variogram")`);
     }
   }
 }

@@ -53,9 +53,11 @@ const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const fromDay = arg("from");
 const toDay = arg("to");
 const cleanArg = arg("clean") ?? "both";
-const cleans = (cleanArg === "both" ? ["reference", "trailing"] : [cleanArg]) as Array<"reference" | "trailing">;
-if (fromDay === undefined || toDay === undefined || cleans.some((c) => c !== "reference" && c !== "trailing")) {
-  console.error("usage: run-history-mix-report --from YYYY-MM-DD --to YYYY-MM-DD [--clean reference|trailing|both]");
+const CLEANS = ["reference", "trailing", "history", "centered"] as const;
+type Clean = (typeof CLEANS)[number];
+const cleans = (cleanArg === "both" ? ["reference", "trailing"] : cleanArg.split(",")) as Clean[];
+if (fromDay === undefined || toDay === undefined || cleans.some((c) => !CLEANS.includes(c))) {
+  console.error("usage: run-history-mix-report --from YYYY-MM-DD --to YYYY-MM-DD [--clean reference|trailing|history|centered|both (comma list ok)]");
   process.exit(2);
 }
 if (process.argv.includes("--holdout")) {
@@ -101,6 +103,8 @@ for (let c = Date.parse(`${fromDay}T00:00:00Z`); c <= Date.parse(`${toDay}T00:00
     for (const clean of cleans) {
       const r = runHistoryMixCalibration(stream, {
         lens: { window_ms: arm.window }, spanMs: arm.span, strideMs: arm.stride, obsFromTs: c, historyMs: 24 * arm.span, clean,
+        ...(arg("max-removed") !== undefined ? { maxRemovedShare: Number(arg("max-removed")) } : {}),
+        ...(process.argv.includes("--fine-bins") ? { contaminationBins: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, Infinity] } : {}),
         inject: { shift: SHIFT, windows: 1, every: arm.injectEvery },
       });
       const key = `${arm.key}|${clean}`;

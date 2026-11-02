@@ -31,6 +31,7 @@ import {
 import type { QObserveParams } from "./q-registry.js";
 import { SnapshotCurator, familyWiseAlpha, isScorable, studentUpperTail, type SnapshotPackage, type SnapshotTile } from "./snapshot-curator.js";
 import { mulberry32 } from "./calibration.js";
+import { cleanHistoryByMedian } from "./comparison.js";
 import {
   ORDINARY_VOLUME_BAND, forecastModel, forecastMse, forecastPoint, krigingWeights, persistenceWeights, pooledEventVariance, variogramAt,
 } from "./forecast.js";
@@ -2016,6 +2017,25 @@ export function trailingVolumeRatios(windows: readonly WindowStat[], k: number):
   return out;
 }
 
+/**
+ * Each window's count over the median count of the windows within `k` places on
+ * either side of it on the grid, itself left out (NaN with fewer than 3 neighbours).
+ * A make-up change shorter than about k windows stands out from both sides; a longer
+ * one looks ordinary inside, and only its edges show. Looks at windows AFTER it, so it
+ * reads a history (windows already ended), never an observation.
+ */
+export function centeredVolumeRatios(windows: readonly WindowStat[], k: number): Map<number, number> {
+  const out = new Map<number, number>();
+  for (let i = 0; i < windows.length; i++) {
+    const near: number[] = [];
+    for (let j = Math.max(0, i - k); j <= Math.min(windows.length - 1, i + k); j++) if (j !== i) near.push(windows[j].count);
+    near.sort((a, b) => a - b);
+    const median = near.length >= 3 ? near[near.length >> 1] : 0;
+    out.set(windows[i].windowStart, median > 0 ? windows[i].count / median : NaN);
+  }
+  return out;
+}
+
 export interface HistoryMixBand {
   band: VolumeBandStats["band"];
   /** Gate z with the history as recorded. */
@@ -2088,7 +2108,11 @@ export function runHistoryMixCalibration(
     historyMs: number;
     obsFromTs?: number;
     band?: readonly [number, number];
-    clean?: "reference" | "trailing";
+    clean?: "reference" | "trailing" | "history" | "centered";
+    /** clean "history" only: cap on the removed share (cleanHistoryByMedian's maxRemovedShare); default none, to measure the rule uncapped. */
+    maxRemovedShare?: number;
+    /** Edges of the contamination bins (ascending, from 0, last Infinity); default CONTAMINATION_BINS. */
+    contaminationBins?: readonly number[];
     inject?: { shift: number; windows: number; every?: number };
   },
 ): HistoryMixResult {
@@ -2102,13 +2126,18 @@ export function runHistoryMixCalibration(
   const curator = scoringCurator("variogram", opts.baseZThreshold ?? 2.0);
   const grid = gridFor(stream, lens, spanMs, strideMs);
   const clean = opts.clean ?? "reference";
-  const ratios = clean === "trailing" ? trailingVolumeRatios(grid.slice(-Infinity, Infinity).windows, Math.max(1, Math.round(spanMs / windowMs))) : undefined;
+  const spanWindows = Math.max(1, Math.round(spanMs / windowMs));
+  const ratios =
+    clean === "trailing" ? trailingVolumeRatios(grid.slice(-Infinity, Infinity).windows, spanWindows)
+    : clean === "centered" ? centeredVolumeRatios(grid.slice(-Infinity, Infinity).windows, spanWindows)
+    : undefined;
   const offBand = (r: number | undefined): boolean => r !== undefined && Number.isFinite(r) && (r < lo || r > hi);
   const bandOf = (r: number): VolumeBandStats["band"] => (r < lo ? "low" : r > hi ? "high" : "ordinary");
   const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs, strideMs, obsFromTs: opts.obsFromTs });
   const pooled = new Map<VolumeBandStats["band"], { full: GateZSums; cleaned: GateZSums }>();
   for (const b of ["ordinary", "low", "high"] as const) pooled.set(b, { full: emptyGateZSums(), cleaned: emptyGateZSums() });
-  const bins = CONTAMINATION_BINS.slice(0, -1).map((from, i) => ({ from, to: CONTAMINATION_BINS[i + 1], trials: 0, full: emptyGateZSums(), cleaned: emptyGateZSums() }));
+  const edges = opts.contaminationBins ?? CONTAMINATION_BINS;
+  const bins = edges.slice(0, -1).map((from, i) => ({ from, to: edges[i + 1], trials: 0, full: emptyGateZSums(), cleaned: emptyGateZSums() }));
   const out: HistoryMixResult = {
     trials: 0, unusableReference: 0, blindByGap: blind, meanContamination: 0, historyWindows: 0, removedHistoryWindows: 0, bands: [], bins: [], byDay: [],
   };
@@ -2134,8 +2163,10 @@ export function runHistoryMixCalibration(
     const history = grid.slice(t.refFrom - opts.historyMs, t.obsFrom);
     const refCounts = ref.windows.map((w) => w.count).sort((a, b) => a - b);
     const refMedian = refCounts.length > 0 ? refCounts[refCounts.length >> 1] : 0;
-    const kept = history.windows.filter((w) =>
-      !offBand(ratios !== undefined ? ratios.get(w.windowStart) : refMedian > 0 ? w.count / refMedian : undefined));
+    // "history": the shipped rule (comparison.ts), against the median of the whole history, not of this trial's reference.
+    const kept = clean === "history"
+      ? cleanHistoryByMedian(history, { band: [lo, hi], maxRemovedShare: opts.maxRemovedShare ?? Infinity }).history.windows
+      : history.windows.filter((w) => !offBand(ratios !== undefined ? ratios.get(w.windowStart) : refMedian > 0 ? w.count / refMedian : undefined));
     const cleanedHistory: LensResult = { ...history, windows: kept };
     const full = curator.curate(obs, ref, { history });
     if (!full.referenceUsable) {

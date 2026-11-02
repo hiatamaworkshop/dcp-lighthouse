@@ -13,8 +13,9 @@
  */
 
 import type { QCompareParams, QObserveParams } from "./q-registry.js";
-import { resolveAlign } from "./lens.js";
-import { SnapshotCurator, type CurationOptions, type NullModel, type SnapshotPackage } from "./snapshot-curator.js";
+import { resolveAlign, weightTotal, type LensResult, type WindowStat } from "./lens.js";
+import { ORDINARY_VOLUME_BAND } from "./forecast.js";
+import { SnapshotCurator, type CurationOptions, type HistoryCleaning, type NullModel, type SnapshotPackage } from "./snapshot-curator.js";
 import type { ReplaySource, SpanRequest } from "./dashboard.js";
 import { summarizable, type HistorySource } from "./window-history.js";
 
@@ -36,6 +37,59 @@ export function assertComparable(lens: QObserveParams, decl: QCompareParams, sum
     throw new RangeError(`compare: the variogram null needs an absolute window grid (align:"epoch") so its lags are whole windows`);
   }
   if (summaries && decl.history_ms !== undefined) summarizable(lens);
+}
+
+/**
+ * The largest share of a series' windows history_clean may leave out. Past it the
+ * history's median is itself suspect (the stream spent that long off its usual
+ * volume) and the series is used whole. 0.5 = the median is itself in doubt. Measured on the
+ * fine contamination bins (ROADMAP_BRIEF.md 2026-11-02 (9)): below it the cleaned gate z's variance is
+ * 0.92–1.04 over three weeks and 1.0–1.3 in the heaviest week; above it the heaviest week is erratic
+ * (0.61, and |z|≥3 2.3% in the top bin).
+ */
+export const HISTORY_CLEAN_MAX_REMOVED = 0.5;
+
+/**
+ * `history_clean: "median"` (ROADMAP C4): leave out of `history` the windows whose
+ * volume (weightTotal: a thinned window counts what it stands for) is outside
+ * `band` × the series' own median window, so a bot batch starting or stopping does not
+ * widen the γ̂ the variogram null reads. The median is of the WHOLE series, not of
+ * this comparison's reference: a reference sitting inside a batch must not make the
+ * rest of the history look low (the 1b diagnostic's overshoot, 2026-11-02 (9)).
+ * Done per series — each group of a grouped lens against its own median. Shared with
+ * the harness's `clean: "history"`, so what is measured is what ships.
+ */
+export function cleanHistoryByMedian(
+  history: LensResult,
+  opts: { band?: readonly [number, number]; maxRemovedShare?: number } = {},
+): { history: LensResult; cleaning: HistoryCleaning } {
+  const [lo, hi] = opts.band ?? ORDINARY_VOLUME_BAND;
+  const cap = opts.maxRemovedShare ?? HISTORY_CLEAN_MAX_REMOVED;
+  let kept = 0;
+  let removed = 0;
+  let declined = false;
+  const clean = (windows: WindowStat[]): WindowStat[] => {
+    const vols = windows.map(weightTotal).sort((a, b) => a - b);
+    const median = vols.length > 0 ? vols[vols.length >> 1] : 0;
+    const out = median > 0 ? windows.filter((w) => weightTotal(w) / median >= lo && weightTotal(w) / median <= hi) : windows;
+    if (windows.length - out.length > cap * windows.length) {
+      declined = true;
+      return windows;
+    }
+    return out;
+  };
+  const count = (before: WindowStat[], after: WindowStat[]) => {
+    kept += after.length;
+    removed += before.length - after.length;
+  };
+  const windows = clean(history.windows);
+  const groups = history.groups?.map((g) => ({ ...g, windows: clean(g.windows) }));
+  if (groups !== undefined) history.groups!.forEach((g, i) => count(g.windows, groups[i].windows));
+  else count(history.windows, windows);
+  return {
+    history: { ...history, windows, ...(groups !== undefined ? { groups } : {}) },
+    cleaning: { rule: "median", kept, removed, ...(declined ? { declined: true as const } : {}) },
+  };
 }
 
 export class Comparator {
@@ -86,11 +140,17 @@ export class Comparator {
     const nullModel = decl.null_model ?? "independent";
     let history: SpanRequest | undefined;
     let historyResult;
+    let cleaning: HistoryCleaning | undefined;
     if (decl.history_ms !== undefined) {
       history = { fromTs: reference.fromTs - decl.history_ms, toTs: reference.toTs };
       historyResult = this.historySource !== undefined
         ? this.historySource.history(lens, history.fromTs, history.toTs)
         : source.replay(lens, history.fromTs, history.toTs);
+      if (decl.history_clean === "median") {
+        const cleaned = cleanHistoryByMedian(historyResult);
+        historyResult = cleaned.history;
+        cleaning = cleaned.cleaning;
+      }
     }
 
     const pkg = this.curatorFor(nullModel).curate(observed, referenced, {
@@ -116,6 +176,7 @@ export class Comparator {
                 ...history,
                 windowCount: historyResult.windows.length,
                 source: this.historySource !== undefined ? "window-summaries" as const : "replay" as const,
+                ...(cleaning !== undefined ? { cleaned: cleaning } : {}),
               },
             }
           : {}),

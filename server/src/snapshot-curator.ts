@@ -97,6 +97,16 @@ export interface SnapshotTile {
 
 // ── Snapshot package ────────────────────────────────────────────────────────
 
+/** What QCompareParams.history_clean did to the history the variogram null read. */
+export interface HistoryCleaning {
+  rule: "median";
+  /** Windows left in / out, over the series the curator reads (the groups of a grouped lens, else the stream). */
+  kept: number;
+  removed: number;
+  /** True when too large a share would have been removed in some series: that series was used whole. */
+  declined?: true;
+}
+
 /** The full LLM-facing artifact for one observation pass. */
 export interface SnapshotPackage {
   /** Generation timestamp (wall-clock ms). */
@@ -177,7 +187,14 @@ export interface SnapshotPackage {
      * (window-history.ts); "replay" = re-aggregated from the retained events,
      * whose older part is the thinned reference zone.
      */
-    history?: { fromTs: number; toTs: number; windowCount: number; source: "window-summaries" | "replay" };
+    history?: {
+      fromTs: number;
+      toTs: number;
+      windowCount: number;
+      source: "window-summaries" | "replay";
+      /** With `history_clean`: what was left out of γ̂ (comparison.ts, cleanHistoryByMedian). */
+      cleaned?: HistoryCleaning;
+    };
   };
   /**
    * Group labels that were observed but could not be scored, because the

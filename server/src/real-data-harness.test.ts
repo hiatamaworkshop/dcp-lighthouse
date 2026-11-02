@@ -53,6 +53,7 @@ import {
   runHistoryMixCalibration,
   historyMixReading,
   trailingVolumeRatios,
+  centeredVolumeRatios,
   type DiurnalResult,
   type TracedEvent,
 } from "./real-data-harness.js";
@@ -821,6 +822,18 @@ describe("step 1 (2026-11-02 (2)): what the gate can see, and what the history d
     assert.ok(Number.isNaN(r.get(0)!) && Number.isNaN(r.get(2)!));
     assert.equal(r.get(3), 2);
     assert.equal(r.get(4), 1);
+  });
+
+  it("centeredVolumeRatios reads each window against its neighbours on both sides, itself left out", () => {
+    const ws = [10, 10, 40, 10, 10, 10].map((count, i) => ({ windowStart: i, windowEnd: i + 1, count, mean: 0, sumSq: 0, valid: true }));
+    const r = centeredVolumeRatios(ws, 2);
+    assert.equal(r.get(2), 4, "a short burst stands out from both sides");
+    assert.equal(r.get(1), 1);
+    assert.ok(Number.isNaN(r.get(0)!), "the first window has only 2 neighbours: no ratio");
+    // A burst as long as the neighbourhood hides itself: inside it the neighbours are the burst.
+    const long = [10, 10, 40, 40, 40, 40, 40, 10, 10].map((count, i) => ({ windowStart: i, windowEnd: i + 1, count, mean: 0, sumSq: 0, valid: true }));
+    assert.equal(centeredVolumeRatios(long, 2).get(4), 1);
+    assert.ok(Number.isNaN(centeredVolumeRatios([ws[0], ws[1]], 2).get(0)!), "fewer than 3 neighbours: no ratio");
   });
 
   // 10 h of iid 0/1 at 20 events/s, plus four 15-minute "bot batches" of extra
