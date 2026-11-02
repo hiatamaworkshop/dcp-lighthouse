@@ -155,7 +155,11 @@ for (const view of ["coarse", "fine"]) windowHistory.track(registry.getObserve("
 // sensitivityPower: every package Brain and the dashboard read also states its
 // reach — the one-window shift its gate would catch 80% of the time
 // (ROADMAP_BRIEF.md 2026-11-02 (2)). A description: no score or tile moves.
-const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true, sensitivityPower: 0.8 }, windowHistory);
+// volumeChannel: the stream's make-up (how many events a window held) is judged
+// in a channel of its own beside the rate tiles (ROADMAP C3). Opt-in and read
+// by nothing that decides: gateComparator, which the §A claim check uses, has
+// no volume channel, and no Brain reads it.
+const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true, sensitivityPower: 0.8, volumeChannel: true }, windowHistory);
 // The §A gate asks "did the curator flag this agent", which must not depend on
 // how many tiles a reader is shown: maxTiles drops the smallest first, so with
 // several agents alarming at once a real flag could be cut and the claim

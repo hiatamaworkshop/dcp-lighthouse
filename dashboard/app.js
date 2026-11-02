@@ -145,7 +145,37 @@ function reachText(pkg) {
   return `reach at ${Math.round(100 * s.power)}% power, one window: ${units.join(" · ")}`;
 }
 
+// ── Volume channel (SnapshotPackage.volume, ROADMAP C3) ─────────────────────
+//
+// How many events a window held, judged apart from its rate: a dashed tile is
+// the stream's MAKE-UP changing (a bot batch starting or stopping), not a rate
+// finding. Shown beside the rate tiles so the two are never read as one.
+
+function volumeTileHtml(t) {
+  return `<div class="tile volume">
+    <div class="tile-label"><span class="tile-mag">${Math.abs(t.z).toFixed(1)}σ</span>${t.label}</div>
+    <div class="tile-desc">${t.description}</div>
+  </div>`;
+}
+
+function renderVolume(noteId, gridId, pkg) {
+  const note = document.getElementById(noteId);
+  const grid = document.getElementById(gridId);
+  const v = pkg && pkg.volume;
+  if (!v) {
+    note.textContent = "";
+    grid.innerHTML = "";
+    return;
+  }
+  const blind = v.units.length > 0 && v.units.every((u) => u.blind);
+  note.textContent = blind
+    ? "volume channel: no yardstick (the reference held too few windows) — blind, not quiet"
+    : `volume channel (make-up of the stream, not a rate finding): ${v.scoredWindowCount} windows scored, ${v.tiles.length} flagged`;
+  grid.innerHTML = v.tiles.map(volumeTileHtml).join("");
+}
+
 function renderTiles(pkg) {
+  renderVolume("tiles-volume-note", "tiles-volume", pkg);
   document.getElementById("tiles-reach").textContent = reachText(pkg);
   const el = document.getElementById("tiles");
   if (!pkg || !pkg.tiles || pkg.tiles.length === 0) {
@@ -158,6 +188,7 @@ function renderTiles(pkg) {
 // ── Replay tiles (fine-window re-observation, ROADMAP L2-3) ─────────────────
 
 function renderReplayTiles(pkg) {
+  renderVolume("replay-volume-note", "replay-volume", pkg);
   document.getElementById("replay-reach").textContent = reachText(pkg);
   const el = document.getElementById("replay-tiles");
   if (!pkg || !pkg.tiles || pkg.tiles.length === 0) {

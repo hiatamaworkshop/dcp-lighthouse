@@ -67,6 +67,8 @@
     .tile.step_up { border-left: 3px solid var(--pass); }
     .tile.divergence { border-left: 3px solid var(--accent); }
     .tile.baseline { border-left: 3px solid var(--border); }
+    .tile.volume { border-left: 3px dashed var(--accent); }
+    .volume-note { font-size: 10px; color: var(--muted); margin: 6px 0 4px; overflow-wrap: anywhere; }
     .tile-label { font-size: 11px; font-weight: bold; color: var(--text); }
     .tile-desc { font-size: 11px; color: var(--muted); margin-top: 3px; }
     .tile-mag { float: right; font-size: 10px; color: var(--muted); }
@@ -137,6 +139,8 @@
           <div class="col-label">coarse (live)</div>
           <div class="reach" id="tiles-reach"></div>
           <div class="tile-grid" id="tiles"></div>
+          <div class="volume-note" id="tiles-volume-note"></div>
+          <div class="tile-grid" id="tiles-volume"></div>
         </div>
         <div class="snapshot-col">
           <div class="col-label">fine (last RC replay)</div>
@@ -144,6 +148,8 @@
           <div class="tile-grid" id="replay-tiles">
             <span style="color:var(--muted);font-size:11px">No replay yet.</span>
           </div>
+          <div class="volume-note" id="replay-volume-note"></div>
+          <div class="tile-grid" id="replay-volume"></div>
         </div>
       </div>
     </section>

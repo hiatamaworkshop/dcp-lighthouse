@@ -1441,11 +1441,14 @@ export function runPositionProfile(
 export const ORDINARY_VOLUME: readonly [number, number] = [0.8, 1.25];
 
 /** A curator like the reports' (curatorForNullModel / newCurator) that also records every window's score. */
-export function scoringCurator(nullModel: "independent" | "overdispersed" | "variogram", baseZ = 2.0, sensitivityPower?: number): SnapshotCurator {
+export function scoringCurator(
+  nullModel: "independent" | "overdispersed" | "variogram", baseZ = 2.0, sensitivityPower?: number, volumeChannel?: boolean,
+): SnapshotCurator {
   return new SnapshotCurator({
     spikeZThreshold: baseZ, includeBaseline: true, maxTiles: HARNESS_MAX_TILES, recordWindowScores: true,
     ...(nullModel === "independent" ? {} : { nullModel }),
     ...(sensitivityPower !== undefined ? { sensitivityPower } : {}),
+    ...(volumeChannel ? { volumeChannel } : {}),
   });
 }
 
@@ -1514,6 +1517,34 @@ export interface VolumeCalibrationDay {
   compositionEpisodes: number;
   /** The gate's z at ordinary volume that day — for day-to-day spread (a day is the resampling unit). */
   ordinary: GateZSums;
+  /** With a volume-channel curator: trials whose volume channel had a tile, and its z over every window that day. */
+  volumeFlagged?: number;
+  volumeZ?: GateZSums;
+  /** Of that day's compositionEpisodes (by the episode's first trial), those the volume channel also flagged. */
+  compositionCaught?: number;
+}
+
+/** What the volume channel (CurationOptions.volumeChannel) did over the same trials — present only when the curator had it on. */
+export interface VolumeChannelFigures {
+  /** Scored trials whose volume channel was blind (too few reference windows) and so judged nothing. */
+  blindTrials: number;
+  /** Trials with a volume tile, in either direction. */
+  flagged: number;
+  /** The channel's z over every (trial, window) pair against N(0, 1); `og` counts pairs past its own gate. */
+  z: GateZSums;
+  /** Fired windows by direction. */
+  up: number;
+  down: number;
+  /** Runs of volume-flagged trials one stride apart — the independent units its alarm rate is made of. */
+  episodes: number;
+  /** Rate-alarm episodes (above) that were composition-only, and how many of those the volume channel also flagged in some trial of the episode. */
+  compositionEpisodes: number;
+  compositionEpisodesCaught: number;
+  /** Rate-alarm episodes with a fired window at ordinary volume, and how many of those the volume channel also flagged. */
+  ordinaryEpisodes: number;
+  ordinaryEpisodesCaught: number;
+  /** Packages where the rate gate fired at ordinary volume while the volume channel also fired in the same trial. */
+  ordinaryRateWithVolume: number;
 }
 
 export interface VolumeCalibrationResult {
@@ -1535,6 +1566,8 @@ export interface VolumeCalibrationResult {
   /** Median count of the scored windows' reference median — what the band's width in Poisson SDs is read from. */
   typicalWindowCount: number;
   designTarget: number;
+  /** Present only when the curator had the volume channel on. */
+  volume?: VolumeChannelFigures;
 }
 
 /**
@@ -1572,7 +1605,9 @@ export function runVolumeCalibration(
   const typical: number[] = [];
   let expectedSum = 0;
   // The open episode: the last alarming trial's obsFrom, and whether any of its fired windows sat at ordinary volume.
-  let open: { last: number; day: VolumeCalibrationDay; anyFired: boolean; anyOrdinary: boolean } | undefined;
+  let open: { last: number; day: VolumeCalibrationDay; anyFired: boolean; anyOrdinary: boolean; anyVolume: boolean } | undefined;
+  let vfig: VolumeChannelFigures | undefined;
+  let openVolume: number | undefined; // the last volume-flagged trial's obsFrom
   const closeEpisode = () => {
     if (open === undefined) return;
     out.episodes++;
@@ -1580,6 +1615,16 @@ export function runVolumeCalibration(
     if (open.anyFired && !open.anyOrdinary) {
       out.compositionEpisodes++;
       open.day.compositionEpisodes++;
+      if (vfig !== undefined) {
+        vfig.compositionEpisodes++;
+        if (open.anyVolume) {
+          vfig.compositionEpisodesCaught++;
+          open.day.compositionCaught = (open.day.compositionCaught ?? 0) + 1;
+        }
+      }
+    } else if (open.anyOrdinary && vfig !== undefined) {
+      vfig.ordinaryEpisodes++;
+      if (open.anyVolume) vfig.ordinaryEpisodesCaught++;
     }
     open = undefined;
   };
@@ -1625,6 +1670,43 @@ export function runVolumeCalibration(
       typical.push(s.count / s.volumeRatio);
     }
     expectedSum += 1 - Math.pow(1 - alpha, ordinaryWindows);
+    let volumeFired = false;
+    if (pkg.volume !== undefined) {
+      const vol = pkg.volume;
+      vfig ??= {
+        blindTrials: 0, flagged: 0, z: emptyGateZSums(), up: 0, down: 0, episodes: 0,
+        compositionEpisodes: 0, compositionEpisodesCaught: 0, ordinaryEpisodes: 0, ordinaryEpisodesCaught: 0, ordinaryRateWithVolume: 0,
+      };
+      day.volumeZ ??= emptyGateZSums();
+      day.volumeFlagged ??= 0;
+      if (vol.units.every((u) => u.blind)) vfig.blindTrials++;
+      const vAlpha = familyWiseAlpha(vol.effectiveZThreshold);
+      for (const s of vol.scores ?? []) {
+        const g = Math.abs(s.gateZ);
+        for (const a of [vfig.z, day.volumeZ]) {
+          a.n++;
+          a.s += s.gateZ;
+          a.ss += s.gateZ * s.gateZ;
+          if (g >= 1) a.o1++;
+          if (g >= 2) a.o2++;
+          if (g >= 3) a.o3++;
+          if (g >= vol.effectiveZThreshold) a.og++;
+          a.alpha += vAlpha;
+        }
+      }
+      for (const tl of vol.tiles) {
+        if (tl.direction === "up") vfig.up++;
+        else vfig.down++;
+      }
+      volumeFired = vol.tiles.length > 0;
+      if (volumeFired) {
+        vfig.flagged++;
+        day.volumeFlagged++;
+        if (openVolume === undefined || t.obsFrom - openVolume !== strideMs) vfig.episodes++;
+        openVolume = t.obsFrom;
+        if (firedOrdinary) vfig.ordinaryRateWithVolume++;
+      }
+    }
     const alarm = statisticalTiles(pkg).length > 0;
     if (alarm) {
       out.flagged++;
@@ -1636,15 +1718,17 @@ export function runVolumeCalibration(
     }
     if (alarm) {
       if (open !== undefined && t.obsFrom - open.last !== strideMs) closeEpisode();
-      if (open === undefined) open = { last: t.obsFrom, day, anyFired: false, anyOrdinary: false };
+      if (open === undefined) open = { last: t.obsFrom, day, anyFired: false, anyOrdinary: false, anyVolume: false };
       open.last = t.obsFrom;
       open.anyFired ||= fired;
       open.anyOrdinary ||= firedOrdinary;
+      open.anyVolume ||= volumeFired;
     } else {
       closeEpisode();
     }
   }
   closeEpisode();
+  if (vfig !== undefined) out.volume = vfig;
   out.expectedOrdinaryRate = out.trials > 0 ? expectedSum / out.trials : 0;
   out.bands = [...acc.entries()].map(([band, a]) => bandFigures(band, a));
   out.byDay = [...days.values()].sort((a, b) => (a.day < b.day ? -1 : 1));

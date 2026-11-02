@@ -93,7 +93,10 @@ export class Comparator {
         : source.replay(lens, history.fromTs, history.toTs);
     }
 
-    const pkg = this.curatorFor(nullModel).curate(observed, referenced, historyResult !== undefined ? { history: historyResult } : {});
+    const pkg = this.curatorFor(nullModel).curate(observed, referenced, {
+      ...(historyResult !== undefined ? { history: historyResult } : {}),
+      span: observation,
+    });
     // How much of the requested reference span held events — only this
     // function knows the span it asked for (SnapshotPackage.referenceCoverage).
     // Requests are inclusive, so k windows arrive as k·W ms ending one ms

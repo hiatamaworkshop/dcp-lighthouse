@@ -293,6 +293,13 @@ export interface SnapshotPackage {
    * far less than from one whose MDE is 0.03.
    */
   sensitivity?: SensitivityReport;
+  /**
+   * Present only with `CurationOptions.volumeChannel`: the stream's VOLUME
+   * judged on its own — windows whose event count left the reference's ordinary
+   * range, scored in a channel of their own. The rate gate above is untouched by
+   * it: no score, threshold or tile there reads this (ROADMAP C3).
+   */
+  volume?: VolumeChannel;
   /** The curated tiles, sorted by regionStart ascending. */
   tiles: SnapshotTile[];
 }
@@ -335,6 +342,85 @@ export interface MdeSummary {
    */
   unreachable: number;
 }
+
+/**
+ * SnapshotPackage.volume: the volume channel (CurationOptions.volumeChannel).
+ *
+ * Why a channel of its own (ROADMAP_BRIEF.md 2026-11-02 (3)): the rate gate's
+ * yardstick (the variogram null) is built from a history, and a stream whose
+ * make-up changes — a bot batch starting or stopping — puts windows into that
+ * history whose volume and rate both moved. They widen γ̂ and so make the gate
+ * conservative at ordinary volume (H-mix: var z 0.533 → 1.101 once cleaned), and
+ * until now the only trace of the change was `SnapshotTile.volumeRatio`, a
+ * description. This channel says it as a finding of its own, on the quantity
+ * that actually moved: how many events the window held.
+ */
+export interface VolumeChannel {
+  /** The family-wise budget the gate was given (CurationOptions.spikeZThreshold) and the Šidák-corrected gate used. */
+  baseZThreshold: number;
+  effectiveZThreshold: number;
+  /** Windows scored across all units — the Šidák family. */
+  scoredWindowCount: number;
+  units: VolumeUnit[];
+  /** Windows whose volume left the reference's range, by regionStart. */
+  tiles: VolumeTile[];
+  /** With `recordWindowScores`: every scored window's volume z, for calibration measurements. */
+  scores?: VolumeScore[];
+}
+
+/** One scoring unit's volume yardstick. A unit with too few reference windows is `blind`, not quiet. */
+export interface VolumeUnit {
+  group?: string;
+  /** Reference windows that held events (the volume yardstick's sample). */
+  referenceWindows: number;
+  /** Median window volume of the reference — what a tile's `volumeRatio` is read against. */
+  typicalVolume: number;
+  /** Spread of ln(volume) the gate used: 1.4826·MAD of the reference, floored at the Poisson 1/√typical. */
+  logScale: number;
+  /** Degrees of freedom the scale's own uncertainty is carried with (Infinity when the Poisson floor set the scale). */
+  df: number;
+  /** True when the reference had fewer than MIN_VOLUME_REFERENCE_WINDOWS windows: no volume yardstick, nothing scored. */
+  blind: boolean;
+}
+
+export interface VolumeTile {
+  label: string;
+  /** "up": more events than the reference's ordinary range; "down": fewer. */
+  direction: "up" | "down";
+  regionStart: number;
+  regionEnd: number;
+  group?: string;
+  /** The window's volume and its ratio to the reference's median window. */
+  volume: number;
+  volumeRatio: number;
+  /** (ln volume − reference centre) / the yardstick's SE, uncorrected; signed. */
+  z: number;
+  /** The z the gate compared with the Šidák threshold: `z` carried through the t tail of the scale's estimate. */
+  gateZ: number;
+  description: string;
+}
+
+export interface VolumeScore {
+  windowStart: number;
+  group?: string;
+  volume: number;
+  volumeRatio: number;
+  z: number;
+  /** The studentized z the gate compares (VolumeTile.gateZ) — what calibration reads against N(0, 1). */
+  gateZ: number;
+}
+
+/**
+ * Degrees of freedom per reference window of a MAD-based scale: its efficiency
+ * against the SD on normal data (0.37). The scale of m reference windows is
+ * then as uncertain as an SD from 0.37·(m − 1) of them, and a window's z is
+ * t-like in that many df — measured without this, 13.3% of iid packages
+ * (60-window reference, 60 observed) fired against a 4.55% budget.
+ */
+export const MAD_EFFICIENCY = 0.37;
+
+/** Fewest reference windows a volume yardstick is built from. */
+export const MIN_VOLUME_REFERENCE_WINDOWS = 8;
 
 /**
  * One scorable window's comparison (CurationOptions.recordWindowScores). The
@@ -516,6 +602,28 @@ export interface CurationOptions {
    * window firing is a tile).
    */
   sensitivityPower?: number;
+  /**
+   * Also judge the stream's VOLUME as a channel of its own (`SnapshotPackage.volume`).
+   * Off when absent; set, it changes no rate score, no threshold and no tile —
+   * the rate gate does not read it (default output is byte-identical).
+   *
+   * A window's volume is its event count (its weight sum under a weighting
+   * lens, so a thinned reference zone counts what it stands for). The yardstick
+   * is the reference's own windows: centre = median of ln(volume), spread =
+   * 1.4826·MAD of it, floored at the Poisson spread 1/√typical, and the
+   * comparison SE carries the reference's finite size (×√(1 + 1/m)). Robust on
+   * purpose: the reference of a stream whose make-up changes contains the very
+   * windows this channel exists to flag, and a plain SD would widen over them.
+   * (That is the opposite of the rate side's lesson, 2026-10-14 (4)(5), where
+   * a robust γ̂ was rightly rejected: there the heavy tail is a property of the
+   * quantity and the null must carry it. Here the question IS "is this window's
+   * volume off the ordinary range".) The gate is the same Šidák-corrected
+   * `spikeZThreshold`, with the family being the volume windows scored.
+   *
+   * Assumes full-width windows (an `align:"epoch"` grid or a span of whole
+   * windows): a partial window at a span's edge would read as "down".
+   */
+  volumeChannel?: boolean;
 }
 
 /** CurationOptions.nullModel's values — also what $Q[compare]'s `null_model` names. */
@@ -533,6 +641,14 @@ export interface CurationContext {
    * the package says so (`variogram[].extrapolatedFromLag`).
    */
   history?: LensResult;
+  /**
+   * The inclusive [fromTs, toTs] the observation was requested over. Read by
+   * `volumeChannel` only: a window that is not wholly inside it (a grid-snapped
+   * first window, the 1 ms tail a replay of [from, from + k·W] leaves) holds part
+   * of a window's events and would read as a drop in volume, so it is not
+   * scored. Absent: every observation window is taken as full.
+   */
+  span?: { fromTs: number; toTs: number };
 }
 
 // ── SnapshotCurator ─────────────────────────────────────────────────────────
@@ -552,6 +668,7 @@ export class SnapshotCurator {
       nullModel: opts.nullModel ?? "independent",
       recordWindowScores: opts.recordWindowScores ?? false,
       sensitivityPower: opts.sensitivityPower ?? 0,
+      volumeChannel: opts.volumeChannel ?? false,
     };
     const p = opts.sensitivityPower;
     if (p !== undefined && !(p > 0 && p < 1)) {
@@ -865,6 +982,11 @@ export class SnapshotCurator {
       }
     }
 
+    // ── 3b. Volume channel (opt-in; reads nothing the rate gate wrote) ──
+    const volume = this.opts.volumeChannel
+      ? scoreVolume(units, this.opts.spikeZThreshold, this.opts.recordWindowScores, context.span)
+      : undefined;
+
     // ── 4. Divergence vs an explicit reference ─────────────────
     // Only meaningful when reference is a genuinely different lens output —
     // comparing observation to itself window-by-window is always zero.
@@ -942,6 +1064,7 @@ export class SnapshotCurator {
         : {}),
       ...(windowScores !== undefined ? { windowScores } : {}),
       ...(sensitivityUnits !== undefined ? { sensitivity: { power, units: sensitivityUnits } } : {}),
+      ...(volume !== undefined ? { volume } : {}),
       tiles: capped,
     };
   }
@@ -2199,6 +2322,88 @@ function concentration(alpha: number[], od: CategoricalModel["overdispersion"], 
   // floor only guards the arithmetic (lgamma of ~0), it is not a tuning knob.
   const scaled = Math.max(1e-6, s2 / v - 1);
   return alpha.map((a) => (a * scaled) / A);
+}
+
+/** Median of an ascending-sorted array (the upper middle for an even length). */
+function sortedMedian(xs: readonly number[]): number {
+  return xs[xs.length >> 1];
+}
+
+/**
+ * The volume channel (CurationOptions.volumeChannel): each unit's windows against
+ * the unit's own reference volume, on the log scale, robustly. See the option's
+ * doc for the yardstick; the family is every window scored across units.
+ */
+function scoreVolume(
+  units: readonly ScoringUnit[], baseZ: number, recordScores: boolean, span?: { fromTs: number; toTs: number },
+): VolumeChannel {
+  const full = (w: WindowStat) => weightTotal(w) > 0 && (span === undefined || (w.windowStart >= span.fromTs && w.windowEnd - 1 <= span.toTs));
+  interface Yard { unit: ScoringUnit; vu: VolumeUnit; centre: number; se: number; df: number }
+  const yards: Yard[] = [];
+  for (const unit of units) {
+    const vols = unit.refWindows.map(weightTotal).filter((v) => v > 0);
+    const blind = vols.length < MIN_VOLUME_REFERENCE_WINDOWS;
+    if (blind) {
+      yards.push({
+        unit, centre: 0, se: NaN, df: Infinity,
+        vu: { ...(unit.group !== undefined ? { group: unit.group } : {}), referenceWindows: vols.length, typicalVolume: 0, logScale: 0, df: Infinity, blind: true },
+      });
+      continue;
+    }
+    const sorted = vols.slice().sort((a, b) => a - b);
+    const typical = sortedMedian(sorted);
+    const logs = sorted.map(Math.log);
+    const centre = sortedMedian(logs);
+    const mad = sortedMedian(logs.map((x) => Math.abs(x - centre)).sort((a, b) => a - b));
+    const poisson = 1 / Math.sqrt(Math.max(typical, 1));
+    const logScale = Math.max(1.4826 * mad, poisson);
+    // The spread was estimated from the reference unless the Poisson floor set it.
+    const df = 1.4826 * mad >= poisson ? MAD_EFFICIENCY * (vols.length - 1) : Infinity;
+    yards.push({
+      unit, centre, df, se: logScale * Math.sqrt(1 + 1 / vols.length),
+      vu: { ...(unit.group !== undefined ? { group: unit.group } : {}), referenceWindows: vols.length, typicalVolume: typical, logScale, df, blind: false },
+    });
+  }
+  const family = yards.reduce((n, y) => n + (y.vu.blind ? 0 : y.unit.windows.filter(full).length), 0);
+  const gate = sidakCorrectedThreshold(baseZ, family);
+  const tiles: VolumeTile[] = [];
+  const scores: VolumeScore[] = [];
+  for (const y of yards) {
+    if (y.vu.blind) continue;
+    const tag = y.unit.group !== undefined ? `[${y.unit.group}] ` : "";
+    const inGroup = y.unit.group !== undefined ? ` in group "${y.unit.group}"` : "";
+    for (const w of y.unit.windows) {
+      if (!full(w)) continue;
+      const v = weightTotal(w);
+      const z = (Math.log(v) - y.centre) / y.se;
+      const gateZ = Number.isFinite(y.df) ? Math.sign(z) * -normalQuantile(studentUpperTail(Math.abs(z), y.df)) : z;
+      const volumeRatio = v / y.vu.typicalVolume;
+      if (recordScores) scores.push({ windowStart: w.windowStart, ...(y.unit.group !== undefined ? { group: y.unit.group } : {}), volume: v, volumeRatio, z, gateZ });
+      if (Math.abs(gateZ) < gate) continue;
+      const direction = z > 0 ? "up" : "down";
+      tiles.push({
+        label: `${tag}volume ${direction} at t=${w.windowStart} (${volumeRatio.toFixed(2)}× the reference's median window)`,
+        direction,
+        regionStart: w.windowStart,
+        regionEnd: w.windowEnd,
+        ...(y.unit.group !== undefined ? { group: y.unit.group } : {}),
+        volume: v,
+        volumeRatio,
+        z,
+        gateZ,
+        description: `Window volume ${v.toFixed(0)} is ${volumeRatio.toFixed(2)}× the reference's median window (${y.vu.typicalVolume.toFixed(0)})${inGroup}, ${Math.abs(z).toFixed(1)}σ ${direction === "up" ? "above" : "below"} on the log scale. The stream's make-up changed; this is not a rate finding.`,
+      });
+    }
+  }
+  tiles.sort((a, b) => a.regionStart - b.regionStart);
+  return {
+    baseZThreshold: baseZ,
+    effectiveZThreshold: gate,
+    scoredWindowCount: family,
+    units: yards.map((y) => y.vu),
+    tiles,
+    ...(recordScores ? { scores } : {}),
+  };
 }
 
 /** Median event count of `windows` (the upper middle for an even count); 0 when empty. */

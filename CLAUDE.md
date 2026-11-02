@@ -157,7 +157,8 @@ dcp-lighthouse/
       run-real-data-report.ts / run-otel-report.ts / run-h3-report.ts / run-variogram-report.ts / run-f1-report.ts /
       run-volume-report.ts (平常の量での較正・構成の変化・量を変えない変化の検出。第 4 段階の --holdout は使用済み) /
       run-forecast-report.ts (F2: kriging と持続の予見の較正・区間の幅・誤差) /
-      run-sensitivity-report.ts (1a: 名乗る MDE を埋め込みで検算) / run-history-mix-report.ts (1b: H-mix の診断、履歴の除外は診断専用)
+      run-sensitivity-report.ts (1a: 名乗る MDE を埋め込みで検算) / run-history-mix-report.ts (1b: H-mix の診断、履歴の除外は診断専用) /
+      run-volume-channel-report.ts (C3: 量チャネルの z・構成の変化の捕捉)
                                  ← 起動口 (保留は全て使用済みで --holdout は拒否。未使用の保留が出来たらレポートは --holdout なしでの読みを拒否)
   server/otel/
       otelcol-config-lighthouse.yml ← OTel Demo のコレクタ extras (traces → 受け口へ OTLP/JSON)
@@ -641,7 +642,14 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     2160 package でバイト一致。本番のライブ `Comparator` に 0.8、dashboard の snapshot 欄に reach 行 (tile が空でも出す)
   - **1b 実装**: `runHistoryMixCalibration` (curator は触らない。履歴から量の外れた窓を除いた採点と比べる)。合成で機構は再現
     (一括作業入りの履歴で平常の var z 0.32 → 除外で 0.94、−0.1 の検出 10 → 43/118)。除外は行き過ぎうるので帰無にはしない (診断専用)。
-    読み方は実データ前に固定 (`historyMixReading`)。**実データでの読みは未実施** — 台帳 `docs/roadmap.md` の C2 (手元で実行)
+    読み方は実データ前に固定 (`historyMixReading`)。**実データの読み (2026-11-02、C2 完了)**: 第 4 段階の週は V-a・10 s とも**支持** (var z 0.533 → 1.101・
+    0.655 → 1.031、V-a は除外版が行き過ぎ)、3 週は V-a が**不明** (+0.132)・10 s 支持 (+0.179)。MDE の検算は V-a・10 s で検出 89〜94% = 名乗り 80% より上
+    (保守性の 2 つ目の読み)。詳細は ROADMAP_BRIEF.md 2026-11-02 (3)
+  - **2 手目 C3 (2026-11-02 (4))**: 量を独立した採点チャネルにした (`CurationOptions.volumeChannel` opt-in → `SnapshotPackage.volume`、率の gate は読まない)。
+    参照の窓の事象数の ln を median/MAD で採点 (MAD の効率 0.37 から df を出し t の裾を通す。参照の窓が 8 未満は盲目)、観測区間に収まらない窓は採点しない
+    (`CurationContext.span`)。既定の出力は HEAD と 360 package・`run-volume-report` 1 日分でバイト一致。**実データの較正は 1 s 窓だけ合う** (var z 0.97)、
+    10 s・60 s 窓は 1.4〜1.8 (第 4 段階の週は 1.6〜4.2) で package の 14〜44% が発火 = 量の帰無は時間依存を持たない。構成の変化の捕捉は 60 s で
+    73〜91%・10-19 は 3/7。ライブの粗窓は参照 3 窓で盲目。次は台帳 C7
 - **予定: 実データ較正期間 (2026-09-27 事前登録・第0段階: Wikimedia 収集器・再生ハーネス/指標 (φ・ラグ1・シャッフル帰無・注入) は実装・合成検算済 2026-09-29、ログオン時起動のタスク登録済。H4 用の OTLP 受け口・真値ログ・p 別の間引き再生も実装済 2026-09-29、OTel Demo の実走は第1段階の1日分)** — 統計層の前提、特に「窓内の事象は独立」
   が実データで成り立つかを、事前に固定した仮説で検証する (実データで調整する期間ではない)。
   データ源は Wikimedia EventStreams (無料・認証不要の SSE、value = bot 編集か否か) と
