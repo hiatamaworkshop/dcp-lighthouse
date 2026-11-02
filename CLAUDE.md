@@ -160,7 +160,7 @@ dcp-lighthouse/
       run-forecast-report.ts (F2: kriging と持続の予見の較正・区間の幅・誤差) /
       run-sensitivity-report.ts (1a: 名乗る MDE を埋め込みで検算) / run-history-mix-report.ts (1b: H-mix の診断、履歴の除外は診断専用) /
       run-volume-channel-report.ts (C3: 量チャネルの z・構成の変化の捕捉)
-                                 ← 起動口 (保留は全て使用済みで --holdout は拒否。未使用の保留が出来たらレポートは --holdout なしでの読みを拒否)
+                                 ← 起動口 (第 1〜4 段階の保留は使用済みで --holdout は拒否。未使用の保留 = 第 5 段階 2026-11-09〜11-15 は封印で、範囲に触れる読みはレポートが拒否)
   server/otel/
       otelcol-config-lighthouse.yml ← OTel Demo のコレクタ extras (traces → 受け口へ OTLP/JSON)
       compose.lighthouse.yaml    ← OTel Demo の compose 上書き (checkout の GC 空回り回避・負荷 50 HTTP ユーザ)

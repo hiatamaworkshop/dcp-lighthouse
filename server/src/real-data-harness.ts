@@ -87,6 +87,16 @@ export const STAGE3_HOLDOUT_TO_DAY = "2026-10-21";
 export const STAGE4_HOLDOUT_FROM_DAY = "2026-10-26";
 export const STAGE4_HOLDOUT_TO_DAY = "2026-11-01";
 
+/**
+ * Stage 5 (ROADMAP C6, ROADMAP_BRIEF.md 2026-11-02 (6), user: "推奨通りで良い"): one whole
+ * week, Monday to Sunday, for confirming what C4 / C7 change (the rate null, the volume
+ * yardstick) — every earlier holdout is spent and so exploration data. Sealed from
+ * 2026-11-02, before any of its data existed; its claim is pre-registered with the
+ * design it confirms, before the single look.
+ */
+export const STAGE5_HOLDOUT_FROM_DAY = "2026-11-09";
+export const STAGE5_HOLDOUT_TO_DAY = "2026-11-15";
+
 /** A holdout period and the day its single look was taken (`spentOn` absent = not yet looked at: sealed). */
 export interface Holdout {
   name: string;
@@ -101,6 +111,7 @@ export const HOLDOUTS: readonly Holdout[] = [
   { name: "H3's holdout", from: H3_HOLDOUT_FROM_DAY, to: H3_HOLDOUT_TO_DAY, spentOn: "2026-10-14" },
   { name: "stage 3's holdout", from: STAGE3_HOLDOUT_FROM_DAY, to: STAGE3_HOLDOUT_TO_DAY, spentOn: "2026-10-22" },
   { name: "stage 4's holdout", from: STAGE4_HOLDOUT_FROM_DAY, to: STAGE4_HOLDOUT_TO_DAY, spentOn: "2026-11-02" },
+  { name: "stage 5's holdout", from: STAGE5_HOLDOUT_FROM_DAY, to: STAGE5_HOLDOUT_TO_DAY },
 ];
 
 /**

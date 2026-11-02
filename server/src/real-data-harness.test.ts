@@ -10,6 +10,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  HOLDOUTS,
   dispersionProfile,
   flagExclusion,
   fnv1a32,
@@ -591,6 +592,23 @@ describe("holdouts: sealed until their single look, exploration after it (revisi
     assert.equal(explorationRangeRefusal("2026-11-02", "2026-11-05"), undefined);
     assert.match(spentHoldoutNote("2026-10-30", "2026-11-05") ?? "", /stage 4's holdout/);
     assert.match(spentHoldoutNote("2026-10-30", "2026-11-05") ?? "", /verdict of 2026-11-02/);
+  });
+});
+
+describe("stage 5's holdout (2026-11-09…11-15, sealed 2026-11-02 before its data existed)", () => {
+  it("is one whole week, Monday to Sunday, and unspent", () => {
+    const h = HOLDOUTS.find((x) => x.name === "stage 5's holdout")!;
+    assert.equal(h.spentOn, undefined);
+    assert.equal(new Date(`${h.from}T00:00:00Z`).getUTCDay(), 1, "starts on a Monday");
+    assert.equal(new Date(`${h.to}T00:00:00Z`).getUTCDay(), 0, "ends on a Sunday");
+    assert.equal((Date.parse(`${h.to}T00:00:00Z`) - Date.parse(`${h.from}T00:00:00Z`)) / 86_400_000, 6);
+  });
+  it("shuts exploration out of any range touching it and leaves the days before it open", () => {
+    assert.equal(explorationRangeRefusal("2026-11-02", "2026-11-08"), undefined);
+    for (const [from, to] of [["2026-11-08", "2026-11-09"], ["2026-11-10", "2026-11-12"], ["2026-11-15", "2026-11-20"], ["2026-11-01", "2026-11-30"]]) {
+      assert.match(explorationRangeRefusal(from, to) ?? "", /stage 5's holdout .* sealed/, `${from}…${to}`);
+    }
+    assert.equal(explorationRangeRefusal("2026-11-16", "2026-11-20"), undefined, "open again after the week (it is spent only by its single look)");
   });
 });
 
