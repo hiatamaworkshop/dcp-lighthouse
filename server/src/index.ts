@@ -24,6 +24,7 @@ import type { SnapshotPackage } from "./snapshot-curator.js";
 import { Comparator, assertComparable } from "./comparison.js";
 import { WindowHistory } from "./window-history.js";
 import { Forecaster } from "./forecast.js";
+import { ForecastMonitor } from "./forecast-monitor.js";
 import { RuleBrain } from "./rule-brain.js";
 import { BRAIN_ANSWER_SCHEMA, ClaudeBrain } from "./claude-brain.js";
 import { ShadowBrain } from "./shadow-brain.js";
@@ -166,6 +167,11 @@ const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true,
 // scored unbacked (2026-10-14 (9) review). Same scoring, no cap.
 const gateComparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true, maxTiles: Infinity }, windowHistory);
 const forecaster = new Forecaster(windowHistory);
+// The first reader of `$F`: scores each view's forecasts as their targets become whole and
+// says whether the intervals keep their promise (ROADMAP C5). Read by GET /forecast and the
+// dashboard; nothing that decides reads it.
+const forecastMonitor = new ForecastMonitor(forecaster);
+let forecastMonitorFailed = false;
 const ruleBrain  = new RuleBrain(registry);
 
 /**
@@ -316,7 +322,7 @@ if (BRAIN_MODE === "claude") {
   throw new Error(`BRAIN_MODE must be "rule" or "claude", got "${BRAIN_MODE}"`);
 }
 
-const dashboard  = new DashboardServer(generator, adapter, brain, registry, comparator, overlay, buffer, brainDiagnostics, forecaster);
+const dashboard  = new DashboardServer(generator, adapter, brain, registry, comparator, overlay, buffer, brainDiagnostics, forecaster, forecastMonitor);
 
 // Two parallel observation views
 overlay.add("coarse", "test_result:v1", { view: "coarse" });
@@ -352,6 +358,21 @@ const TICK_MS = 1000;
 let shadowLogCursor = -1;
 
 setInterval(() => {
+  // Calibration monitoring of `$F`: a failure here must cost the monitor, not the tick.
+  // Logged once — a lens no window summary can be kept for fails every second.
+  try {
+    const views = (["coarse", "fine"] as const).flatMap((view) => {
+      const lens = registry.getObserve("test_result:v1", view);
+      const decl = registry.getForecast("test_result:v1", view);
+      return lens !== undefined && decl !== undefined ? [{ view, lens, decl }] : [];
+    });
+    forecastMonitor.update(Date.now(), views);
+  } catch (err) {
+    if (!forecastMonitorFailed) {
+      forecastMonitorFailed = true;
+      console.warn(`[forecast-monitor] update failed (further failures are not logged): ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   const snapshot = adapter.snapshot();
   brain.observe(snapshot);
   const decisions = brain.decide();

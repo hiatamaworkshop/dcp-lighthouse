@@ -33,6 +33,21 @@ import { summarizable, type HistorySource } from "./window-history.js";
 import { isScorable, normalQuantile, semivariogramFromWindows, type SemivariogramEstimate } from "./snapshot-curator.js";
 
 /**
+ * The band of `volumeRatio` (window count ÷ the count the reference's typical window
+ * holds) read as ordinary volume — 2026-10-14 (7)'s band. A forecast's calibration
+ * is a claim about windows inside it; outside it the stream's make-up changed and
+ * every forecast misses (2026-10-22 (8): variance 1.4–2.1). One definition, read by
+ * the harness's calibration tables and by the calibration monitor.
+ */
+export const ORDINARY_VOLUME_BAND: readonly [number, number] = [0.8, 1.25];
+
+/** The width of one window of `lens`, after downsampling — what a forecast's horizon counts in. */
+export function viewWindowMs(lens: QObserveParams): number {
+  const normalized = summarizable(lens);
+  return (normalized.window_ms ?? 1_000) * (normalized.downsample_factor ?? 1);
+}
+
+/**
  * A valid latent semivariogram, γ(0) = 0 and for h ≠ 0:
  *   "power":       nugget + scale·|h|^shape                 (0 < shape < 2)
  *   "exponential": nugget + scale·(1 − e^(−|h|/shape))       (shape = the range, in windows)
@@ -380,7 +395,7 @@ export class Forecaster {
    */
   forecast(lens: QObserveParams, decl: QForecastParams, nowTs: number): ForecastRow[] {
     const normalized = summarizable(lens);
-    const windowMs = (normalized.window_ms ?? 1_000) * (normalized.downsample_factor ?? 1);
+    const windowMs = viewWindowMs(lens);
     const origin = floorToWindow(nowTs, windowMs, normalized.origin ?? 0);
     const span = decl.recent_windows * windowMs;
     const read = this.history.history(lens, origin - span - decl.history_ms, origin - 1);

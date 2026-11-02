@@ -31,6 +31,7 @@ import type { ResettableBrain } from "./brain-adapter.js";
 import type { QRegistry, QObserveParams, QCompareParams, QForecastParams } from "./q-registry.js";
 import type { Comparator } from "./comparison.js";
 import type { Forecaster } from "./forecast.js";
+import type { ForecastMonitor } from "./forecast-monitor.js";
 import type { ObservationOverlay } from "./lens-view.js";
 import { floorToWindow, resolveAlign, type LensResult } from "./lens.js";
 import type { BrainDecision } from "./brain-adapter.js";
@@ -310,6 +311,8 @@ export class DashboardServer {
     private readonly brainDiagnostics?: () => unknown,
     /** Makes the `$F` rows GET /forecast serves (ROADMAP_BRIEF.md 2026-10-22 (8)); absent = the route says so. */
     private readonly forecaster?: Forecaster,
+    /** Reads whether the `$F` intervals keep their promise (ROADMAP C5); GET /forecast carries its report as `calibration`. */
+    private readonly forecastMonitor?: ForecastMonitor,
   ) {}
 
   /**
@@ -793,7 +796,10 @@ export class DashboardServer {
       // what was realized (`against: "forecast"`). Empty for an `at` still ahead.
       const scores = this.forecaster.score(lens, decl, at, Date.now());
       jsonHeaders(res);
-      res.end(JSON.stringify({ scope: `forecast:test_result:v1#${view}`, lens, declaration: decl, at, rows, scores }));
+      // `calibration`: not about `at` — whether this view's forecasts, as their targets became
+      // whole, landed where their intervals said (forecast-monitor.ts). Absent without a monitor.
+      const calibration = this.forecastMonitor?.report(view, Date.now());
+      res.end(JSON.stringify({ scope: `forecast:test_result:v1#${view}`, lens, declaration: decl, at, rows, scores, ...(calibration !== undefined ? { calibration } : {}) }));
       return;
     }
 

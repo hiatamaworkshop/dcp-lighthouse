@@ -145,6 +145,7 @@ dcp-lighthouse/
       q-retention-binding.ts     ← $Q[pipeline] → retention 窓
       comparison.ts              ← $Q[compare] (参照・帰無) を解決して採点する唯一の場所。package が comparison を名乗る
       window-history.ts          ← 窓要約の常設履歴 (疎化前に要約・1 時間)。variogram の帰無と予見が読む
+      forecast-monitor.ts        ← `$F` の較正の常時監視 (C5。ForecastMonitor が 1 分に 1 起点を採点して蓄積、1 h / 24 h × 地平の状態を `GET /forecast` の `calibration` で名乗る)
       forecast.ts                ← F2 `$F` の行: γ̂ に有効な型を当てて kriging (virtual: true)。Forecaster は窓要約から作る
     ── 実データ較正期間 (2026-09-27 事前登録。実データ用・灯台側のみ) ──
       wikimedia-collector.ts     ← EventStreams 収集器 (v1 レコード・欠落=盲目・日別 gzip・
@@ -650,6 +651,9 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     (`CurationContext.span`)。既定の出力は HEAD と 360 package・`run-volume-report` 1 日分でバイト一致。**実データの較正は 1 s 窓だけ合う** (var z 0.97)、
     10 s・60 s 窓は 1.4〜1.8 (第 4 段階の週は 1.6〜4.2) で package の 14〜44% が発火 = 量の帰無は時間依存を持たない。構成の変化の捕捉は 60 s で
     73〜91%・10-19 は 3/7。ライブの粗窓は参照 3 窓で盲目。次は台帳 C7
+  - **C5 完了 (2026-11-02 (5))**: `$F` の最初の読み手。`ForecastMonitor` (`forecast-monitor.ts`) が view ごとに予見を採点して蓄積 (窓要約は 1 時間しか残らず 24 時間は再計算できない)、
+    1 時間・24 時間 × 地平で z の分散・被覆率を出し、**通常の量の窓だけ**で blind (30 窓未満) / overconfident (var z − 2SE > 1) / conservative (var z + 2SE < 0.7) / healthy を名乗る
+    (`GET /forecast` の `calibration`・dashboard の Forecast パネル)。実サーバで見たのは blind まで、遷移は合成の試験のみ。テスト616件。次は F3
 - **予定: 実データ較正期間 (2026-09-27 事前登録・第0段階: Wikimedia 収集器・再生ハーネス/指標 (φ・ラグ1・シャッフル帰無・注入) は実装・合成検算済 2026-09-29、ログオン時起動のタスク登録済。H4 用の OTLP 受け口・真値ログ・p 別の間引き再生も実装済 2026-09-29、OTel Demo の実走は第1段階の1日分)** — 統計層の前提、特に「窓内の事象は独立」
   が実データで成り立つかを、事前に固定した仮説で検証する (実データで調整する期間ではない)。
   データ源は Wikimedia EventStreams (無料・認証不要の SSE、value = bot 編集か否か) と

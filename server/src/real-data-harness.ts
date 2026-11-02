@@ -32,7 +32,7 @@ import type { QObserveParams } from "./q-registry.js";
 import { SnapshotCurator, familyWiseAlpha, isScorable, studentUpperTail, type SnapshotPackage, type SnapshotTile } from "./snapshot-curator.js";
 import { mulberry32 } from "./calibration.js";
 import {
-  forecastModel, forecastMse, forecastPoint, krigingWeights, persistenceWeights, pooledEventVariance, variogramAt,
+  ORDINARY_VOLUME_BAND, forecastModel, forecastMse, forecastPoint, krigingWeights, persistenceWeights, pooledEventVariance, variogramAt,
 } from "./forecast.js";
 
 // ── Loading ─────────────────────────────────────────────────────────────────
@@ -1438,7 +1438,7 @@ export function runPositionProfile(
  * Only meaningful where the band is several Poisson SDs wide (10 s and 60 s
  * windows on this stream, not 1 s ones); reports print the width.
  */
-export const ORDINARY_VOLUME: readonly [number, number] = [0.8, 1.25];
+export const ORDINARY_VOLUME: readonly [number, number] = ORDINARY_VOLUME_BAND;
 
 /** A curator like the reports' (curatorForNullModel / newCurator) that also records every window's score. */
 export function scoringCurator(

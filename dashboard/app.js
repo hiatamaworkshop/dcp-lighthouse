@@ -311,10 +311,27 @@ function forecastScoreHtml(s, axis) {
   </div>`;
 }
 
-function renderForecast(elId, rows, scores) {
+// Calibration (forecast-monitor.ts, ROADMAP C5): whether the realized windows landed where the
+// intervals said, read on windows of ordinary volume. "blind" is not "healthy": too few windows yet.
+function calibrationHtml(cal) {
+  if (!cal || !cal.spans) return "";
+  const span = (ms) => (ms >= 86400000 ? `${ms / 86400000} d` : `${ms / 3600000} h`);
+  const parts = cal.spans.map((sp) => {
+    // The reading behind the span's state: the first horizon in that state (blind: the one with most windows).
+    const pool = sp.readings.filter((r) => r.state === sp.state);
+    const r = pool.sort((a, b) => b.targets - a.targets)[0];
+    const detail = r === undefined ? "" : sp.state === "blind"
+      ? ` (${r.targets} ordinary windows so far)`
+      : ` (var z ${r.varZ.toFixed(2)}, ${r.targets} windows, +${r.horizon})`;
+    return `<span class="fc-cal ${esc(sp.state)}">${span(sp.span_ms)}: ${esc(sp.state)}${detail}</span>`;
+  });
+  return `<div class="fc-note">calibration — ${parts.join(" · ")}</div>`;
+}
+
+function renderForecast(elId, rows, scores, calibration) {
   const el = document.getElementById(elId);
   if (rows.length === 0 && scores.length === 0) {
-    el.innerHTML = '<span style="color:var(--muted);font-size:11px">No forecast yet (history still filling).</span>';
+    el.innerHTML = `<span style="color:var(--muted);font-size:11px">No forecast yet (history still filling).</span>${calibrationHtml(calibration)}`;
     return;
   }
   const axis = forecastAxis(rows, scores);
@@ -323,7 +340,7 @@ function renderForecast(elId, rows, scores) {
     `${grouped && r.group !== undefined ? `${r.group} ` : ""}+${r.horizon} · ${clock(r.targetStart)}`)).join("");
   const back = scores.length === 0 ? "" :
     `<div class="fc-sub">earlier forecast vs realized</div>${scores.map((s) => forecastScoreHtml(s, axis)).join("")}`;
-  el.innerHTML = `${next}${back}<div class="fc-note">axis ${pctOf(axis.lo)}–${pctOf(axis.hi)} · interval = ${Math.round((rows[0] ?? scores[0].forecast).interval.level * 100)}% · ${esc((rows[0] ?? scores[0].forecast).method)}</div>`;
+  el.innerHTML = `${next}${back}<div class="fc-note">axis ${pctOf(axis.lo)}–${pctOf(axis.hi)} · interval = ${Math.round((rows[0] ?? scores[0].forecast).interval.level * 100)}% · ${esc((rows[0] ?? scores[0].forecast).method)}</div>${calibrationHtml(calibration)}`;
 }
 
 async function pollForecast(v) {
@@ -337,7 +354,7 @@ async function pollForecast(v) {
     // The realized side: a forecast made two windows ago has its next window whole by now.
     const w = (head.lens.window_ms ?? 1000) * (head.lens.downsample_factor ?? 1);
     const earlier = await (await fetch(`${API}/forecast?view=${v.view}&at=${Date.now() - 2 * w}`)).json();
-    renderForecast(v.el, head.rows ?? [], earlier.scores ?? []);
+    renderForecast(v.el, head.rows ?? [], earlier.scores ?? [], head.calibration);
   } catch (_) {
     el.innerHTML = '<span style="color:var(--muted);font-size:11px">forecast unavailable</span>';
   } finally {
