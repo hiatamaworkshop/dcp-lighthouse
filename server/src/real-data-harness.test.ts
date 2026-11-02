@@ -52,6 +52,9 @@ import {
   runSensitivityCheck,
   runHistoryMixCalibration,
   historyMixReading,
+  stage5HoldoutRefusal,
+  stage5Verdict,
+  STAGE5_RULE,
   trailingVolumeRatios,
   centeredVolumeRatios,
   type DiurnalResult,
@@ -610,6 +613,60 @@ describe("stage 5's holdout (2026-11-09…11-15, sealed 2026-11-02 before its da
       assert.match(explorationRangeRefusal(from, to) ?? "", /stage 5's holdout .* sealed/, `${from}…${to}`);
     }
     assert.equal(explorationRangeRefusal("2026-11-16", "2026-11-20"), undefined, "open again after the week (it is spent only by its single look)");
+  });
+});
+
+describe("stage 5's single look (claim H-clean, 2026-11-02 (11))", () => {
+  const DAY = 86_400_000;
+  const after = Date.parse("2026-11-16T00:00:00Z");
+
+  it("takes the look only on the sealed week, only once it is over, and only once", () => {
+    assert.equal(stage5HoldoutRefusal("2026-11-09", "2026-11-15", after), undefined);
+    assert.equal(stage5HoldoutRefusal("2026-11-09", "2026-11-15", after + 30 * DAY), undefined, "any time after the week");
+    assert.match(stage5HoldoutRefusal("2026-11-09", "2026-11-15", after - 1) ?? "", /still being collected/);
+    assert.match(stage5HoldoutRefusal("2026-11-09", "2026-11-14", after) ?? "", /reads exactly 2026-11-09…2026-11-15/);
+    assert.match(stage5HoldoutRefusal("2026-11-02", "2026-11-08", after) ?? "", /reads exactly/);
+    const spent = HOLDOUTS.map((h) => (h.name === "stage 5's holdout" ? { ...h, spentOn: "2026-11-16" } : h));
+    assert.match(stage5HoldoutRefusal("2026-11-09", "2026-11-15", after, spent) ?? "", /was spent on 2026-11-16 — it had one look/);
+  });
+
+  // Ordinary-volume gate z sums with a given variance (mean 0), n windows.
+  const sums = (v: number, n = 5000) => ({ n, s: 0, ss: v * (n - 1), o1: 0, o2: 0, o3: 0, og: 0, alpha: 0 });
+  const arm = (name: string, cleaned: number, full: number, inj = { trials: 400, detectedFull: 20, detectedCleaned: 40 }, blindByGap = 0) =>
+    ({ name, cleaned: sums(cleaned), full: sums(full), trials: 900, blindByGap, injection: inj });
+
+  it("supports when both arms are calibrated and detect no less, saying whether cleaning is what did it", () => {
+    const heavy = stage5Verdict([arm("V-a", 1.01, 0.53), arm("10 s", 1.04, 0.65)]);
+    assert.match(heavy, /^SUPPORTED/);
+    assert.match(heavy, /cleaning is what brought it in/);
+    const light = stage5Verdict([arm("V-a", 0.97, 0.85), arm("10 s", 0.99, 0.81)]);
+    assert.match(light, /^SUPPORTED/);
+    assert.match(light, /no advantage over it is claimed/);
+  });
+
+  it("rejects when either arm lands past a reject line, whatever the other says", () => {
+    assert.match(stage5Verdict([arm("V-a", 1.0, 0.6), arm("10 s", STAGE5_RULE.reject.varLo - 0.01, 0.6)]), /^REJECTED.*10 s past a reject line/);
+    assert.match(stage5Verdict([arm("V-a", STAGE5_RULE.reject.varHi + 0.05, 0.6), arm("10 s", 1.0, 0.6)]), /^REJECTED.*V-a past a reject line/);
+  });
+
+  it("holds between the lines, or when cleaning detects less", () => {
+    assert.match(stage5Verdict([arm("V-a", 0.75, 0.5), arm("10 s", 1.0, 0.6)]), /^HELD.*V-a variance between the support and reject lines/);
+    assert.match(stage5Verdict([arm("V-a", 1.3, 0.5), arm("10 s", 1.0, 0.6)]), /^HELD/);
+    const worse = { trials: 400, detectedFull: 40, detectedCleaned: 39 };
+    assert.match(stage5Verdict([arm("V-a", 1.0, 0.5, worse), arm("10 s", 1.0, 0.6)]), /^HELD.*V-a detects less when cleaned/);
+  });
+
+  it("judges on variance alone: a heavy |z|≥3 tail does not change the verdict", () => {
+    const tail = { ...sums(1.0), o3: 500 }; // 10% past 3σ
+    const v = stage5Verdict([{ ...arm("V-a", 1.0, 0.6), cleaned: tail }, arm("10 s", 1.0, 0.6)]);
+    assert.match(v, /^SUPPORTED/);
+    assert.match(v, /\|z\|≥3 10\.00%/, "reported beside the verdict");
+  });
+
+  it("gives no verdict when an arm scored nothing, planted nothing, or is blind by gaps", () => {
+    assert.match(stage5Verdict([{ ...arm("V-a", 1, 1), trials: 0 }, arm("10 s", 1, 1)]), /^NO VERDICT: V-a scored no trials/);
+    assert.match(stage5Verdict([arm("V-a", 1, 1, { trials: 0, detectedFull: 0, detectedCleaned: 0 }), arm("10 s", 1, 1)]), /^NO VERDICT: V-a planted no shift/);
+    assert.match(stage5Verdict([arm("V-a", 1, 1), arm("10 s", 1, 1, undefined, 300)]), /^NO VERDICT: 10 s is blind by collection gaps for 25\.0%/);
   });
 });
 

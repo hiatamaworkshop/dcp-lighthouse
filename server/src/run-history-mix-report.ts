@@ -39,6 +39,8 @@ import {
   runHistoryMixCalibration,
   spentHoldoutNote,
   stage1RangeRefusal,
+  stage5HoldoutRefusal,
+  stage5Verdict,
   type GateZSums,
   type VolumeBandStats,
 } from "./real-data-harness.js";
@@ -52,7 +54,18 @@ const DAY = 86_400_000;
 const dayOf = (ms: number) => new Date(ms).toISOString().slice(0, 10);
 const fromDay = arg("from");
 const toDay = arg("to");
-const cleanArg = arg("clean") ?? "both";
+// Stage 5's single look (ROADMAP C8): the sealed week 2026-11-09…11-15, the pre-registered rule only.
+// --rehearse: the same rule, options and verdict on EXPLORATION days (a range that touches the sealed week is
+// refused as always) — to run the look's code path before the look.
+const holdout = process.argv.includes("--holdout");
+const rehearse = process.argv.includes("--rehearse");
+if (holdout && rehearse) {
+  console.error("refusing: --rehearse is for exploration days, not the holdout");
+  process.exit(2);
+}
+const preregistered = holdout || rehearse;
+const cleanArg = preregistered ? "history" : arg("clean") ?? "both";
+const maxRemoved = preregistered ? "0.5" : arg("max-removed");
 const CLEANS = ["reference", "trailing", "history", "centered"] as const;
 type Clean = (typeof CLEANS)[number];
 const cleans = (cleanArg === "both" ? ["reference", "trailing"] : cleanArg.split(",")) as Clean[];
@@ -60,12 +73,15 @@ if (fromDay === undefined || toDay === undefined || cleans.some((c) => !CLEANS.i
   console.error("usage: run-history-mix-report --from YYYY-MM-DD --to YYYY-MM-DD [--clean reference|trailing|history|centered|both (comma list ok)]");
   process.exit(2);
 }
-if (process.argv.includes("--holdout")) {
-  console.error("refusing: every holdout is spent (exploration only); this report has no single look");
-  process.exit(2);
-}
 const loadFirst = dayOf(Date.parse(`${fromDay}T00:00:00Z`) - 2 * DAY);
-const refusal = stage1RangeRefusal(loadFirst, toDay, false);
+const refusal = holdout
+  ? stage5HoldoutRefusal(fromDay, toDay, Date.now()) ??
+    (arg("clean") !== undefined || arg("max-removed") !== undefined || process.argv.includes("--fine-bins")
+      ? "refusing: stage 5's holdout runs the pre-registered rule (clean history, max removed 0.5) with no other options"
+      : undefined)
+  : rehearse && (arg("clean") !== undefined || arg("max-removed") !== undefined || process.argv.includes("--fine-bins"))
+    ? "refusing: --rehearse runs the pre-registered rule (clean history, max removed 0.5) with no other options"
+    : stage1RangeRefusal(loadFirst, toDay, false);
 if (refusal !== undefined) {
   console.error(refusal);
   process.exit(2);
@@ -85,11 +101,13 @@ interface Acc {
   removed: number;
   bands: Map<VolumeBandStats["band"], { full: GateZSums; cleaned: GateZSums }>;
   bins: Map<string, { trials: number; full: GateZSums; cleaned: GateZSums }>;
+  blindByGap: number;
   days: Array<{ day: string; trials: number; meanContamination: number; full: VolumeBandStats; cleaned: VolumeBandStats }>;
   inj: { trials: number; detectedFull: number; detectedCleaned: number; controlFull: number; controlCleaned: number };
 }
 const acc = new Map<string, Acc>();
 
+if (holdout) console.log(`STAGE 5 HOLDOUT ${fromDay}…${toDay} — the single look (ROADMAP_BRIEF.md 2026-11-02 (11))`);
 console.log(`step 1b (H-mix): ordinary-volume gate z under the variogram null with the history as recorded vs cleaned of ` +
   `off-ordinary-volume windows, observation days ${fromDay}…${toDay} (loaded from ${loadFirst}); history 24 spans; clean ${cleans.join(", ")}`);
 const spentNote = spentHoldoutNote(loadFirst, toDay);
@@ -103,16 +121,17 @@ for (let c = Date.parse(`${fromDay}T00:00:00Z`); c <= Date.parse(`${toDay}T00:00
     for (const clean of cleans) {
       const r = runHistoryMixCalibration(stream, {
         lens: { window_ms: arm.window }, spanMs: arm.span, strideMs: arm.stride, obsFromTs: c, historyMs: 24 * arm.span, clean,
-        ...(arg("max-removed") !== undefined ? { maxRemovedShare: Number(arg("max-removed")) } : {}),
+        ...(maxRemoved !== undefined ? { maxRemovedShare: Number(maxRemoved) } : {}),
         ...(process.argv.includes("--fine-bins") ? { contaminationBins: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, Infinity] } : {}),
         inject: { shift: SHIFT, windows: 1, every: arm.injectEvery },
       });
       const key = `${arm.key}|${clean}`;
       const a: Acc = acc.get(key) ?? {
-        trials: 0, contamination: 0, historyWindows: 0, removed: 0, bands: new Map(), bins: new Map(), days: [],
+        trials: 0, contamination: 0, historyWindows: 0, removed: 0, bands: new Map(), bins: new Map(), blindByGap: 0, days: [],
         inj: { trials: 0, detectedFull: 0, detectedCleaned: 0, controlFull: 0, controlCleaned: 0 },
       };
       a.trials += r.trials;
+      a.blindByGap += r.blindByGap;
       a.contamination += r.meanContamination * r.trials;
       a.historyWindows += r.historyWindows;
       a.removed += r.removedHistoryWindows;
@@ -195,4 +214,13 @@ for (const arm of ARMS) {
   const r = historyMixReading({ bands, bins: bins.map((b) => ({ ...b, to: 0, trials: 0, cleaned: b.full })) });
   console.log(`   ${arm.key}: ${r.verdict} (widening ${r.widening >= 0 ? "+" : ""}${r.widening.toFixed(3)}, gradient ${r.gradient ? "yes" : "no"}` +
     `${r.overshoot ? ", cleaned null overshoots" : ""})`);
+}
+
+if (preregistered) {
+  const armOf = (key: string, name: string) => {
+    const a = acc.get(`${key}|history`)!;
+    const o = a.bands.get("ordinary");
+    return { name, full: o?.full ?? emptyGateZSums(), cleaned: o?.cleaned ?? emptyGateZSums(), trials: a.trials, blindByGap: a.blindByGap, injection: a.inj };
+  };
+  console.log(`\nSTAGE 5 VERDICT${rehearse ? " — REHEARSAL on exploration days, not the look" : ""} (claim H-clean, ordinary volume, variogram null with history_clean median): ${stage5Verdict([armOf("V-a", "V-a"), armOf("H1-10s", "10 s arm")])}`);
 }

@@ -2481,6 +2481,80 @@ export const STAGE4_RULE = {
   reject: { over2: 0.091, over3: 0.0135, varHi: 1.5 },
 } as const;
 
+/**
+ * Stage 5's pre-registered rule (ROADMAP_BRIEF.md 2026-11-02 (11), claim H-clean): the
+ * variogram null with history_clean "median" (cap 0.5) is calibrated at ordinary volume.
+ * Judged on the cleaned gate z's variance alone, per arm; |z|≥2 / |z|≥3 are reported,
+ * not judged (a rare-event rate that falls by chance ~11% of weeks on exploration).
+ */
+export const STAGE5_RULE = {
+  support: { varLo: 0.8, varHi: 1.25 },
+  reject: { varLo: 0.7, varHi: 1.4 },
+} as const;
+
+/** The sealed week ends 2026-11-15; its single look is taken on or after this day (UTC). */
+export const STAGE5_FIRST_LOOK_DAY = "2026-11-16";
+
+/**
+ * The gate for stage 5's `--holdout`: exactly the sealed week, not before the week is over,
+ * and never twice. Returns the refusal message, or undefined when the look may be taken.
+ */
+export function stage5HoldoutRefusal(fromDay: string, toDay: string, nowMs: number, holdouts: readonly Holdout[] = HOLDOUTS): string | undefined {
+  const h = holdouts.find((x) => x.name === "stage 5's holdout");
+  if (h === undefined) return "refusing: no stage 5 holdout is registered";
+  if (h.spentOn !== undefined) return `refusing: stage 5's holdout (${h.from}…${h.to}) was spent on ${h.spentOn} — it had one look`;
+  if (fromDay !== h.from || toDay !== h.to) return `refusing: stage 5's --holdout reads exactly ${h.from}…${h.to}`;
+  if (nowMs < Date.parse(`${STAGE5_FIRST_LOOK_DAY}T00:00:00Z`)) {
+    return `refusing: stage 5's week is still being collected; its single look is on or after ${STAGE5_FIRST_LOOK_DAY}`;
+  }
+  return undefined;
+}
+
+export interface Stage5Arm {
+  name: string;
+  /** Ordinary-volume gate z with the history as recorded, and cleaned (history_clean "median", cap 0.5). */
+  full: GateZSums;
+  cleaned: GateZSums;
+  trials: number;
+  blindByGap: number;
+  /** The planted −0.1 one-window shift: caught with the history as recorded / cleaned, out of `trials`. */
+  injection: { trials: number; detectedFull: number; detectedCleaned: number };
+}
+
+/** Stage 5's verdict from its two arms (V-a, 10 s): SUPPORTED / REJECTED / HELD / NO VERDICT, with the figures behind it. */
+export function stage5Verdict(arms: readonly Stage5Arm[]): string {
+  for (const a of arms) {
+    if (a.trials === 0 || a.cleaned.n === 0) return `NO VERDICT: ${a.name} scored no trials`;
+    if (a.injection.trials === 0) return `NO VERDICT: ${a.name} planted no shift, so detection cannot be compared`;
+    const share = a.blindByGap / (a.trials + a.blindByGap);
+    if (share > STAGE3_MAX_BLIND_SHARE) {
+      return `NO VERDICT: ${a.name} is blind by collection gaps for ${(100 * share).toFixed(1)}% of its trials (> ${100 * STAGE3_MAX_BLIND_SHARE}%)`;
+    }
+  }
+  const figs = arms.map((a) => ({ a, c: bandFigures("ordinary", a.cleaned), f: bandFigures("ordinary", a.full) }));
+  const pct = (x: number) => `${(100 * x).toFixed(2)}%`;
+  const said = figs
+    .map(({ a, c, f }) =>
+      `${a.name}: var ${c.varGateZ.toFixed(3)} cleaned (${f.varGateZ.toFixed(3)} as recorded), |z|≥3 ${pct(c.over3)}, detection ${a.injection.detectedCleaned}/${a.injection.trials} cleaned vs ${a.injection.detectedFull} as recorded`)
+    .join("; ");
+  const r = STAGE5_RULE.reject;
+  const out = figs.filter(({ c }) => c.varGateZ < r.varLo || c.varGateZ > r.varHi);
+  if (out.length > 0) return `REJECTED (${said}; ${out.map((x) => x.a.name).join(", ")} past a reject line)`;
+  const s = STAGE5_RULE.support;
+  const inBand = (v: number) => v >= s.varLo && v <= s.varHi;
+  const off = figs.filter(({ c, a }) => !inBand(c.varGateZ) || a.injection.detectedCleaned < a.injection.detectedFull);
+  if (off.length > 0) {
+    const why = off
+      .map(({ c, a }) => (inBand(c.varGateZ) ? `${a.name} detects less when cleaned` : `${a.name} variance between the support and reject lines`))
+      .join(", ");
+    return `HELD: ${said} — ${why}`;
+  }
+  const note = figs.every(({ f }) => inBand(f.varGateZ))
+    ? "the history as recorded was already in the band: no advantage over it is claimed, only that the cleaned null is calibrated and detects no less"
+    : "the history as recorded fell outside the band, so cleaning is what brought it in";
+  return `SUPPORTED (${said}; ${note})`;
+}
+
 export function stage4Verdict(arms: ReadonlyArray<{ name: string; ordinary: GateZSums; trials: number; blindByGap: number }>): string {
   for (const a of arms) {
     if (a.trials === 0 || a.ordinary.n === 0) return `NO VERDICT: ${a.name} scored no trials`;
