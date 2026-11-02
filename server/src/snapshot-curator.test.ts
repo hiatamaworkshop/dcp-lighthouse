@@ -1624,3 +1624,87 @@ describe("studentUpperTail", () => {
     }
   });
 });
+
+// ── sensitivity: what the gate could have seen (2026-11-02 (2)) ───────────────
+
+describe("SnapshotCurator — sensitivity (the smallest shift the gate would catch)", () => {
+  const strip = (pkg: SnapshotPackage) => {
+    const { generatedAt: _g, sensitivity: _s, windowScores, ...rest } = pkg;
+    return { ...rest, windowScores: windowScores?.map(({ mde: _m, ...w }) => w) };
+  };
+  const nulls = ["independent", "overdispersed", "variogram"] as const;
+
+  it("is off by default, and turning it on changes no score, threshold or tile", () => {
+    for (const nullModel of nulls) {
+      const t = latentTrial(7, { H: 60, K: 10, per: 100, rho: 0.9, sd: 0.04, drop: { at: 3, to: 0.05 } });
+      const plain = new SnapshotCurator({ nullModel, recordWindowScores: true }).curate(t.observation, t.reference, { history: t.history });
+      const seen = new SnapshotCurator({ nullModel, recordWindowScores: true, sensitivityPower: 0.8 }).curate(t.observation, t.reference, { history: t.history });
+      assert.equal(plain.sensitivity, undefined);
+      assert.ok(plain.windowScores!.every((s) => s.mde === undefined));
+      assert.ok(seen.sensitivity !== undefined && seen.windowScores!.every((s) => s.mde !== undefined));
+      assert.deepEqual(strip(seen), strip(plain), nullModel);
+      assert.ok(plain.tiles.some((x) => x.shapeTag === "dip"), `the planted drop is still found (${nullModel})`);
+    }
+  });
+
+  it("refuses a power that is not a probability", () => {
+    for (const p of [0, 1, 1.2, -0.1, Number.NaN]) assert.throws(() => new SnapshotCurator({ sensitivityPower: p }), RangeError);
+  });
+
+  it("quotes larger shifts for thinner windows and for a higher power, on the exact tail for two-valued data", () => {
+    const thin = bernoulliResult(3, 0.6, 0, 10_000, 300);
+    const thick = bernoulliResult(4, 0.6, 0, 10_000, 3000);
+    const ref = bernoulliResult(5, 0.6, -10_000, 10_000, 3000);
+    const at = (obs: LensResult, power: number) => new SnapshotCurator({ sensitivityPower: power }).curate(obs, ref).sensitivity!.units[0];
+    const a = at(thin, 0.8);
+    const b = at(thick, 0.8);
+    assert.equal(a.exactWindows, a.windows, "binary windows under 2000 events are read on the exact tail");
+    assert.ok(a.typicalCount < 50 && b.typicalCount > 250);
+    assert.ok(a.dip!.median > 2 * b.dip!.median, `${a.dip!.median} vs ${b.dip!.median}`);
+    assert.ok(at(thick, 0.95).dip!.median > b.dip!.median);
+    assert.ok(at(thick, 0.5).dip!.median < b.dip!.median);
+    assert.ok(b.dip!.min <= b.dip!.median && b.dip!.median <= b.dip!.max);
+  });
+
+  it("says when the data's range ends before the shift: a 0.98 rate cannot rise far enough", () => {
+    const obs = bernoulliResult(6, 0.98, 0, 10_000, 200);
+    const ref = bernoulliResult(7, 0.98, -10_000, 10_000, 2000);
+    const u = new SnapshotCurator({ sensitivityPower: 0.8, recordWindowScores: true }).curate(obs, ref);
+    const unit = u.sensitivity!.units[0];
+    assert.equal(unit.spike, null, "no window can rise enough above 0.98 to clear the gate");
+    assert.ok(unit.dip !== null && unit.dip.median > 0.1);
+    assert.ok(u.windowScores!.every((s) => s.mde!.spike === null));
+  });
+
+  it("uses the normal approximation on continuous data and quotes both directions", () => {
+    const rand = rng32(9);
+    const events: LensEvent[] = [];
+    for (let i = 0; i < 4000; i++) events.push({ ts: -10_000 + Math.floor(rand() * 20_000), value: rand() });
+    const all = applyLens(events, { window_ms: 1000, align: "epoch" });
+    const ref = { ...all, windows: all.windows.filter((w) => w.windowStart < 0) };
+    const obs = { ...all, windows: all.windows.filter((w) => w.windowStart >= 0) };
+    const unit = new SnapshotCurator({ sensitivityPower: 0.8 }).curate(obs, ref).sensitivity!.units[0];
+    assert.equal(unit.exactWindows, 0);
+    // σ of U(0,1) is 0.289; ~200 events per window, 10 windows: (2.81 + 0.84)·0.289·√(1/200 + 1/2000) ≈ 0.078.
+    assert.ok(unit.dip!.median > 0.06 && unit.dip!.median < 0.1, `${unit.dip!.median}`);
+    assert.ok(Math.abs(unit.spike!.median - unit.dip!.median) < 1e-9, "symmetric where nothing bounds the shift");
+  });
+
+  it("names every scored group, and only those", () => {
+    const rand = rng32(12);
+    const events: LensEvent[] = [];
+    for (let i = 0; i < 6000; i++) {
+      const agent = ["a", "b", "c"][Math.floor(rand() * 3)];
+      events.push({ ts: -10_000 + Math.floor(rand() * 20_000), value: rand() < 0.7 ? 1 : 0, keys: { agentId: agent } });
+    }
+    const all = applyLens(events, { window_ms: 1000, align: "epoch", group_by: ["agentId"] });
+    const part = (keep: (w: { windowStart: number }) => boolean): LensResult => ({
+      ...all,
+      windows: all.windows.filter(keep),
+      groups: all.groups!.map((g) => ({ ...g, windows: g.windows.filter(keep) })),
+    });
+    const pkg = new SnapshotCurator({ sensitivityPower: 0.8 }).curate(part((w) => w.windowStart >= 0), part((w) => w.windowStart < 0));
+    assert.deepEqual(pkg.sensitivity!.units.map((u) => u.group).sort(), all.groups!.map((g) => g.label).sort());
+    assert.ok(pkg.sensitivity!.units.every((u) => u.windows === 10 && u.dip !== null));
+  });
+});

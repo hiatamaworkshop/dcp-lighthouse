@@ -1441,10 +1441,11 @@ export function runPositionProfile(
 export const ORDINARY_VOLUME: readonly [number, number] = [0.8, 1.25];
 
 /** A curator like the reports' (curatorForNullModel / newCurator) that also records every window's score. */
-export function scoringCurator(nullModel: "independent" | "overdispersed" | "variogram", baseZ = 2.0): SnapshotCurator {
+export function scoringCurator(nullModel: "independent" | "overdispersed" | "variogram", baseZ = 2.0, sensitivityPower?: number): SnapshotCurator {
   return new SnapshotCurator({
     spikeZThreshold: baseZ, includeBaseline: true, maxTiles: HARNESS_MAX_TILES, recordWindowScores: true,
     ...(nullModel === "independent" ? {} : { nullModel }),
+    ...(sensitivityPower !== undefined ? { sensitivityPower } : {}),
   });
 }
 
@@ -1747,6 +1748,396 @@ export function runShiftInjection(
   out.controlRate = out.trials > 0 ? out.controlDetected / out.trials : 0;
   out.meanShiftTruth = out.trials > 0 ? truth / out.trials : 0;
   return out;
+}
+
+// ── Step 1 (2026-11-02 (2)): what the gate can see, and what the history does to it ──
+
+export interface SensitivityCheckResult {
+  direction: "dip" | "spike";
+  /** The detection probability the package quoted its shifts at. */
+  power: number;
+  /** Trials planted with the package's own predicted shift and scored. */
+  trials: number;
+  detected: number;
+  /** Should sit near `power` when the package's sensitivity is right. */
+  detectionRate: number;
+  /** The same trials unplanted: tiles on the target window in that direction. */
+  controlDetected: number;
+  controlRate: number;
+  /** Mean predicted shift (the target window's MDE) and the mean shift actually planted (random flips), over scored trials. */
+  meanMde: number;
+  meanPlanted: number;
+  /** Detection split by the realized shift relative to its MDE (random flips scatter it): [lo, hi) → trials, detected. */
+  byPlantedRatio: Array<{ lo: number; hi: number; trials: number; detected: number }>;
+  /** The target window's MDE was null in this direction (the data's range ends first). */
+  unreachable: number;
+  /** Target window missing, unscorable, or short of events to flip. */
+  skipped: number;
+  unusableReference: number;
+  blindByGap: number;
+}
+
+/**
+ * A latent-rate shift planted into a binary, unweighted window at steady
+ * volume: each event at 1 turns to 0 with probability δ / `rate` (a dip), or
+ * each event at 0 turns to 1 with probability δ / (1 − `rate`) (a spike), so
+ * every event's chance of sitting at 1 moves by about δ — the alternative a
+ * package's sensitivity is quoted for (CurationOptions.sensitivityPower) —
+ * rather than shiftBinaryWindow's fixed number of flipped events. `rate` is
+ * the reference's share; undefined when the window is not 0/1 data or the
+ * shift does not fit.
+ */
+export function flipBinaryWindow(w: WindowStat, shift: number, rate: number, rng: () => number): { window: WindowStat; shift: number } | undefined {
+  if (w.weights !== undefined || w.aggFunc !== undefined || !(w.count > 0)) return undefined;
+  const ones = Math.round(w.mean * w.count);
+  if (Math.abs(ones - w.mean * w.count) > 1e-6 || Math.abs(w.sumSq - ones) > 1e-6) return undefined;
+  const q = shift < 0 ? -shift / rate : shift / (1 - rate);
+  if (!(q >= 0 && q <= 1)) return undefined;
+  let flipped = 0;
+  const pool = shift < 0 ? ones : w.count - ones;
+  for (let i = 0; i < pool; i++) if (rng() < q) flipped++;
+  const after = shift < 0 ? ones - flipped : ones + flipped;
+  return {
+    window: {
+      ...w, mean: after / w.count, sumSq: after,
+      ...(w.range !== undefined ? { range: { min: after < w.count ? 0 : 1, max: after > 0 ? 1 : 0 } } : {}),
+    },
+    shift: (after - ones) / w.count,
+  };
+}
+
+const PLANTED_RATIO_BINS: ReadonlyArray<readonly [number, number]> = [[0, 0.9], [0.9, 0.97], [0.97, 1.03], [1.03, 1.1], [1.1, Infinity]];
+
+/**
+ * Measure the package's own sensitivity claim (CurationOptions.sensitivityPower)
+ * against planted shifts: in each "preceding span" trial, take one observation
+ * window (rotating through the positions, so a variogram null's growth with
+ * distance is sampled), read the MDE the package quotes for it, plant exactly
+ * that shift at steady volume (flipBinaryWindow: each event flipped at random
+ * so the window's latent rate moves by the MDE, count kept) and see whether
+ * the gate catches it. If the quoted shifts are right the
+ * detection rate sits at the quoted power; the unplanted trials are the
+ * control. The reference and history are untouched, so the plant never widens
+ * its own yardstick. Mixed (ungrouped) lens on 0/1 data only.
+ */
+export function runSensitivityCheck(
+  stream: LoadedStream,
+  opts: HarnessOptions & {
+    direction: "dip" | "spike";
+    nullModel?: "independent" | "overdispersed" | "variogram";
+    power?: number;
+    historyMs?: number;
+    obsFromTs?: number;
+    every?: number;
+  },
+): SensitivityCheckResult {
+  const spanMs = opts.spanMs ?? 10_000;
+  const strideMs = opts.strideMs ?? 2 * spanMs;
+  const power = opts.power ?? 0.8;
+  const nullModel = opts.nullModel ?? "independent";
+  if (nullModel === "variogram" && !((opts.historyMs ?? 0) > 0)) throw new RangeError("runSensitivityCheck: the variogram null needs historyMs");
+  const curator = scoringCurator(nullModel, opts.baseZThreshold ?? 2.0, power);
+  // The planted copy needs only its tiles, which sensitivity never changes.
+  const plain = scoringCurator(nullModel, opts.baseZThreshold ?? 2.0);
+  const lens: QObserveParams = opts.lens ?? { window_ms: 1_000 };
+  if ((lens.group_by ?? []).length > 0) throw new RangeError("runSensitivityCheck plants into the mixed stream; a grouped lens is not supported");
+  const every = Math.max(1, Math.floor(opts.every ?? 1));
+  const grid = gridFor(stream, lens, spanMs, strideMs);
+  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs, strideMs, obsFromTs: opts.obsFromTs });
+  const out: SensitivityCheckResult = {
+    direction: opts.direction, power, trials: 0, detected: 0, detectionRate: 0, controlDetected: 0, controlRate: 0,
+    meanMde: 0, meanPlanted: 0, byPlantedRatio: PLANTED_RATIO_BINS.map(([lo, hi]) => ({ lo, hi, trials: 0, detected: 0 })),
+    unreachable: 0, skipped: 0, unusableReference: 0, blindByGap: blind,
+  };
+  const dir = opts.direction === "dip" ? -1 : 1;
+  const tags = dir < 0 ? new Set(["dip", "step_down"]) : new Set(["spike", "step_up"]);
+  const rng = mulberry32(opts.seed ?? 1);
+  let mdeSum = 0;
+  let plantedSum = 0;
+  let position = 0;
+  for (let k = 0; k < trials.length; k += every) {
+    const t = trials[k];
+    const obs = grid.slice(t.obsFrom, t.obsTo);
+    const ref = grid.slice(t.refFrom, t.obsFrom);
+    const context = (opts.historyMs ?? 0) > 0 ? { history: grid.slice(t.refFrom - (opts.historyMs ?? 0), t.obsFrom) } : {};
+    if (obs.windows.length === 0) {
+      out.skipped++;
+      continue;
+    }
+    const target = obs.windows[position++ % obs.windows.length];
+    const control = curator.curate(obs, ref, context);
+    if (!control.referenceUsable) {
+      out.unusableReference++;
+      continue;
+    }
+    const score = control.windowScores?.find((s) => s.windowStart === target.windowStart);
+    if (score === undefined || score.mde === undefined) {
+      out.skipped++;
+      continue;
+    }
+    const mde = dir < 0 ? score.mde.dip : score.mde.spike;
+    if (mde === null) {
+      out.unreachable++;
+      continue;
+    }
+    const planted = flipBinaryWindow(target, dir * mde, control.globalStats.mean, rng);
+    if (planted === undefined) {
+      out.skipped++;
+      continue;
+    }
+    const pkg = plain.curate({ ...obs, windows: obs.windows.map((w) => (w === target ? planted.window : w)) }, ref, context);
+    const hit = (p: SnapshotPackage) =>
+      statisticalTiles(p).some((x) => tags.has(x.shapeTag) && x.regionStart < target.windowEnd && x.regionEnd > target.windowStart);
+    const found = hit(pkg);
+    out.trials++;
+    mdeSum += mde;
+    plantedSum += Math.abs(planted.shift);
+    if (found) out.detected++;
+    if (hit(control)) out.controlDetected++;
+    const ratio = Math.abs(planted.shift) / mde;
+    const bin = out.byPlantedRatio.find((b) => ratio >= b.lo && ratio < b.hi)!;
+    bin.trials++;
+    if (found) bin.detected++;
+  }
+  out.detectionRate = out.trials > 0 ? out.detected / out.trials : 0;
+  out.controlRate = out.trials > 0 ? out.controlDetected / out.trials : 0;
+  out.meanMde = out.trials > 0 ? mdeSum / out.trials : 0;
+  out.meanPlanted = out.trials > 0 ? plantedSum / out.trials : 0;
+  return out;
+}
+
+/** Each window's count over the median count of the `k` windows before it on the grid (NaN with fewer than k before it). */
+export function trailingVolumeRatios(windows: readonly WindowStat[], k: number): Map<number, number> {
+  const out = new Map<number, number>();
+  for (let i = 0; i < windows.length; i++) {
+    if (i < k) {
+      out.set(windows[i].windowStart, NaN);
+      continue;
+    }
+    const counts = windows.slice(i - k, i).map((w) => w.count).sort((a, b) => a - b);
+    const median = counts[counts.length >> 1];
+    out.set(windows[i].windowStart, median > 0 ? windows[i].count / median : NaN);
+  }
+  return out;
+}
+
+export interface HistoryMixBand {
+  band: VolumeBandStats["band"];
+  /** Gate z with the history as recorded. */
+  full: VolumeBandStats;
+  /** The same (trial, window) pairs with the history's off-ordinary-volume windows left out of γ̂. */
+  cleaned: VolumeBandStats;
+}
+
+export interface HistoryMixBin {
+  /** Share of the trial's history windows off ordinary volume: [from, to). */
+  from: number;
+  to: number;
+  trials: number;
+  /** Ordinary-volume observation windows only. */
+  full: VolumeBandStats;
+  cleaned: VolumeBandStats;
+}
+
+export interface HistoryMixResult {
+  trials: number;
+  unusableReference: number;
+  blindByGap: number;
+  /** Mean share of a trial's history windows off ordinary volume. */
+  meanContamination: number;
+  historyWindows: number;
+  removedHistoryWindows: number;
+  /** Every trial pooled, by the observation window's volume band. */
+  bands: HistoryMixBand[];
+  /** Ordinary-volume windows by how much of the trial's history was off ordinary volume. */
+  bins: HistoryMixBin[];
+  /** Ordinary-volume windows per observation day (UTC), so one day's make-up changes can be told from a week's. */
+  byDay: Array<{ day: string; trials: number; meanContamination: number; full: VolumeBandStats; cleaned: VolumeBandStats }>;
+  /** The steady-volume shift planted over the first `windows` observation windows, caught with either history. */
+  injection?: { shift: number; windows: number; trials: number; detectedFull: number; detectedCleaned: number; controlFull: number; controlCleaned: number; skipped: number };
+}
+
+const CONTAMINATION_BINS: readonly number[] = [0, 0.02, 0.05, 0.1, 0.2, Infinity];
+
+/**
+ * Hypothesis H-mix (ROADMAP_BRIEF.md 2026-11-02 (2)): the variogram null is
+ * conservative at ordinary volume (stage 4: var z 0.533) because γ̂ is read
+ * with the classical estimator from a history that holds the stream's make-up
+ * changing — windows whose volume moved with their rate — which inflates γ̂,
+ * and so every ordinary window's yardstick.
+ *
+ * The test leaves the curator alone and changes only what it is handed: each
+ * trial is scored twice, with the history as recorded and with the history's
+ * windows off ordinary volume removed. "Off ordinary" has two readings
+ * (`clean`):
+ *   - "reference" (default): the window's count against the median count of
+ *     THIS trial's reference windows — the yardstick an observation window's
+ *     own band (WindowScore.volumeRatio) is read with, so γ̂ comes from windows
+ *     whose make-up resembles the stream now. Also drops windows that differ
+ *     only by the time of day, which is part of what is being asked;
+ *   - "trailing": against the median of the `spanMs / window_ms` windows just
+ *     before it on the grid. Catches only the edges of a make-up change: a
+ *     batch longer than half a span looks ordinary to its own past (measured
+ *     on synthetic batches, 2026-11-02 (2)).
+ * If H-mix
+ * holds, the ordinary-volume gate z is narrower than N(0, 1) when the history
+ * is contaminated, and widens toward it when cleaned; if contamination makes
+ * no difference, the conservatism is elsewhere. Removing windows from γ̂ is a
+ * DIAGNOSTIC, not a proposed null: the heavy-tailed moves were kept in the
+ * null on purpose (2026-10-14 (4)), and what cleaning costs shows up in the
+ * off-ordinary bands. Mixed (ungrouped) lens only; the variogram null.
+ */
+export function runHistoryMixCalibration(
+  stream: LoadedStream,
+  opts: HarnessOptions & {
+    historyMs: number;
+    obsFromTs?: number;
+    band?: readonly [number, number];
+    clean?: "reference" | "trailing";
+    inject?: { shift: number; windows: number; every?: number };
+  },
+): HistoryMixResult {
+  const spanMs = opts.spanMs ?? 10_000;
+  const strideMs = opts.strideMs ?? 2 * spanMs;
+  const lens: QObserveParams = opts.lens ?? { window_ms: 1_000 };
+  if ((lens.group_by ?? []).length > 0) throw new RangeError("runHistoryMixCalibration reads the mixed stream; a grouped lens is not supported");
+  if (!(opts.historyMs > 0)) throw new RangeError("runHistoryMixCalibration needs historyMs (the variogram null reads a history)");
+  const windowMs = lens.window_ms ?? 1_000;
+  const [lo, hi] = opts.band ?? ORDINARY_VOLUME;
+  const curator = scoringCurator("variogram", opts.baseZThreshold ?? 2.0);
+  const grid = gridFor(stream, lens, spanMs, strideMs);
+  const clean = opts.clean ?? "reference";
+  const ratios = clean === "trailing" ? trailingVolumeRatios(grid.slice(-Infinity, Infinity).windows, Math.max(1, Math.round(spanMs / windowMs))) : undefined;
+  const offBand = (r: number | undefined): boolean => r !== undefined && Number.isFinite(r) && (r < lo || r > hi);
+  const bandOf = (r: number): VolumeBandStats["band"] => (r < lo ? "low" : r > hi ? "high" : "ordinary");
+  const { trials, blind } = planTrials(stream.events, stream.gaps, { spanMs, strideMs, obsFromTs: opts.obsFromTs });
+  const pooled = new Map<VolumeBandStats["band"], { full: GateZSums; cleaned: GateZSums }>();
+  for (const b of ["ordinary", "low", "high"] as const) pooled.set(b, { full: emptyGateZSums(), cleaned: emptyGateZSums() });
+  const bins = CONTAMINATION_BINS.slice(0, -1).map((from, i) => ({ from, to: CONTAMINATION_BINS[i + 1], trials: 0, full: emptyGateZSums(), cleaned: emptyGateZSums() }));
+  const out: HistoryMixResult = {
+    trials: 0, unusableReference: 0, blindByGap: blind, meanContamination: 0, historyWindows: 0, removedHistoryWindows: 0, bands: [], bins: [], byDay: [],
+  };
+  const days = new Map<string, { trials: number; contamination: number; full: GateZSums; cleaned: GateZSums }>();
+  const inj = opts.inject;
+  const injection = inj === undefined ? undefined : { shift: inj.shift, windows: inj.windows, trials: 0, detectedFull: 0, detectedCleaned: 0, controlFull: 0, controlCleaned: 0, skipped: 0 };
+  const add = (a: GateZSums, z: number, gateAt: number, alpha: number) => {
+    const g = Math.abs(z);
+    a.n++;
+    a.s += z;
+    a.ss += z * z;
+    if (g >= 1) a.o1++;
+    if (g >= 2) a.o2++;
+    if (g >= 3) a.o3++;
+    if (g >= gateAt) a.og++;
+    a.alpha += alpha;
+  };
+  let contaminationSum = 0;
+  for (let k = 0; k < trials.length; k++) {
+    const t = trials[k];
+    const obs = grid.slice(t.obsFrom, t.obsTo);
+    const ref = grid.slice(t.refFrom, t.obsFrom);
+    const history = grid.slice(t.refFrom - opts.historyMs, t.obsFrom);
+    const refCounts = ref.windows.map((w) => w.count).sort((a, b) => a - b);
+    const refMedian = refCounts.length > 0 ? refCounts[refCounts.length >> 1] : 0;
+    const kept = history.windows.filter((w) =>
+      !offBand(ratios !== undefined ? ratios.get(w.windowStart) : refMedian > 0 ? w.count / refMedian : undefined));
+    const cleanedHistory: LensResult = { ...history, windows: kept };
+    const full = curator.curate(obs, ref, { history });
+    if (!full.referenceUsable) {
+      out.unusableReference++;
+      continue;
+    }
+    const cleaned = curator.curate(obs, ref, { history: cleanedHistory });
+    const contamination = history.windows.length > 0 ? (history.windows.length - kept.length) / history.windows.length : 0;
+    out.trials++;
+    contaminationSum += contamination;
+    out.historyWindows += history.windows.length;
+    out.removedHistoryWindows += history.windows.length - kept.length;
+    const bin = bins.find((b) => contamination >= b.from && contamination < b.to)!;
+    bin.trials++;
+    const dayKey = new Date(t.obsFrom).toISOString().slice(0, 10);
+    let day = days.get(dayKey);
+    if (day === undefined) days.set(dayKey, (day = { trials: 0, contamination: 0, full: emptyGateZSums(), cleaned: emptyGateZSums() }));
+    day.trials++;
+    day.contamination += contamination;
+    const cleanedBy = new Map((cleaned.windowScores ?? []).map((s) => [s.windowStart, s]));
+    const gateFull = full.selection.effectiveZThreshold;
+    const gateCleaned = cleaned.selection.effectiveZThreshold;
+    for (const s of full.windowScores ?? []) {
+      const c = cleanedBy.get(s.windowStart);
+      if (c === undefined || !Number.isFinite(s.volumeRatio)) continue;
+      const band = bandOf(s.volumeRatio);
+      const p = pooled.get(band)!;
+      add(p.full, s.gateZ, gateFull, familyWiseAlpha(gateFull));
+      add(p.cleaned, c.gateZ, gateCleaned, familyWiseAlpha(gateCleaned));
+      if (band === "ordinary") {
+        add(bin.full, s.gateZ, gateFull, familyWiseAlpha(gateFull));
+        add(bin.cleaned, c.gateZ, gateCleaned, familyWiseAlpha(gateCleaned));
+        add(day.full, s.gateZ, gateFull, familyWiseAlpha(gateFull));
+        add(day.cleaned, c.gateZ, gateCleaned, familyWiseAlpha(gateCleaned));
+      }
+    }
+    if (injection !== undefined && inj !== undefined && k % Math.max(1, Math.floor(inj.every ?? 1)) === 0) {
+      const from = t.obsFrom;
+      const to = t.obsFrom + inj.windows * windowMs;
+      const target = obs.windows.filter((w) => w.windowStart >= from && w.windowStart < to);
+      const planted = target.map((w) => shiftBinaryWindow(w, inj.shift));
+      if (target.length < inj.windows || !target.every(isScorable) || planted.some((p) => p === undefined)) {
+        injection.skipped++;
+        continue;
+      }
+      const swap = new Map(target.map((w, i) => [w, planted[i]!.window]));
+      const shifted = { ...obs, windows: obs.windows.map((w) => swap.get(w) ?? w) };
+      const tags = inj.shift < 0 ? new Set(["dip", "step_down"]) : new Set(["spike", "step_up"]);
+      const hit = (p: SnapshotPackage) => statisticalTiles(p).some((x) => tags.has(x.shapeTag) && x.regionStart < to && x.regionEnd > from);
+      injection.trials++;
+      if (hit(curator.curate(shifted, ref, { history }))) injection.detectedFull++;
+      if (hit(curator.curate(shifted, ref, { history: cleanedHistory }))) injection.detectedCleaned++;
+      if (hit(full)) injection.controlFull++;
+      if (hit(cleaned)) injection.controlCleaned++;
+    }
+  }
+  out.meanContamination = out.trials > 0 ? contaminationSum / out.trials : 0;
+  out.bands = [...pooled.entries()].map(([band, p]) => ({ band, full: bandFigures(band, p.full), cleaned: bandFigures(band, p.cleaned) }));
+  out.bins = bins.map((b) => ({ from: b.from, to: b.to, trials: b.trials, full: bandFigures("ordinary", b.full), cleaned: bandFigures("ordinary", b.cleaned) }));
+  out.byDay = [...days.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([day, d]) => ({ day, trials: d.trials, meanContamination: d.contamination / d.trials, full: bandFigures("ordinary", d.full), cleaned: bandFigures("ordinary", d.cleaned) }));
+  if (injection !== undefined) out.injection = injection;
+  return out;
+}
+
+/**
+ * The reading of step 1b fixed before any recorded day was run through it
+ * (ROADMAP_BRIEF.md 2026-11-02 (2)), on the "reference" cleaning of one arm:
+ *   - "supported": cleaning widens the ordinary-volume var z by ≥ 0.15, and
+ *     with the history as recorded the most contaminated populated bin
+ *     (share ≥ 0.1) is narrower than the least contaminated one;
+ *   - "not supported": cleaning widens it by < 0.05 — the conservatism lies
+ *     elsewhere;
+ *   - "unclear" otherwise.
+ * `overshoot` marks a cleaned null that went past N(0, 1) on the liberal side
+ * (var z > 1.25 or |z|≥3 > 0.8%, stage 4's support lines): the mechanism can
+ * still be right, but removing the windows is then too blunt to be a null —
+ * on synthetic days a reference sitting inside a batch makes the rest of the
+ * history look "low" and γ̂ comes from the batch alone.
+ */
+export function historyMixReading(r: Pick<HistoryMixResult, "bands" | "bins">): {
+  verdict: "supported" | "not supported" | "unclear";
+  widening: number;
+  gradient: boolean;
+  overshoot: boolean;
+} {
+  const o = r.bands.find((b) => b.band === "ordinary");
+  if (o === undefined || o.full.windows === 0) return { verdict: "unclear", widening: 0, gradient: false, overshoot: false };
+  const widening = o.cleaned.varGateZ - o.full.varGateZ;
+  const populated = r.bins.filter((b) => b.full.windows >= 200);
+  const least = populated[0];
+  const most = populated.filter((b) => b.from >= 0.1).at(-1);
+  const gradient = least !== undefined && most !== undefined && most !== least && most.full.varGateZ < least.full.varGateZ;
+  const overshoot = o.cleaned.varGateZ > 1.25 || o.cleaned.over3 > 0.008;
+  const verdict = widening >= 0.15 && gradient ? "supported" : widening < 0.05 ? "not supported" : "unclear";
+  return { verdict, widening, gradient, overshoot };
 }
 
 // ── F2: forecast calibration (2026-10-22 (8)) ──────────────────────────────

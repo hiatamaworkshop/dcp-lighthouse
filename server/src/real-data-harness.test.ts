@@ -47,6 +47,11 @@ import {
   runShiftInjection,
   scoringCurator,
   shiftBinaryWindow,
+  flipBinaryWindow,
+  runSensitivityCheck,
+  runHistoryMixCalibration,
+  historyMixReading,
+  trailingVolumeRatios,
   type DiurnalResult,
   type TracedEvent,
 } from "./real-data-harness.js";
@@ -749,5 +754,97 @@ describe("periodic references as contrasts (F1, 2026-10-14 (11))", () => {
     const shifted = by(runContrastDiurnal(s, { ...base, injectDelta: 0.08 }));
     assert.ok(rate(shifted["previous-day"]) > 0.6, `previous-day ${shifted["previous-day"].flagged}/${shifted["previous-day"].trials}`);
     assert.ok(rate(shifted.preceding) < 0.2, `preceding ${shifted.preceding.flagged}/${shifted.preceding.trials}`);
+  });
+});
+
+describe("step 1 (2026-11-02 (2)): what the gate can see, and what the history does to it", () => {
+  it("flipBinaryWindow moves the latent rate at steady volume and refuses what it cannot shift", () => {
+    const w = { windowStart: 0, windowEnd: 1_000, count: 1000, mean: 0.5, sumSq: 500, valid: true, range: { min: 0, max: 1 } };
+    const rng = mulberry32(3);
+    let sum = 0;
+    for (let i = 0; i < 200; i++) {
+      const f = flipBinaryWindow(w, -0.1, 0.5, rng)!;
+      assert.equal(f.window.count, 1000);
+      assert.equal(f.window.sumSq, f.window.mean * 1000);
+      sum += f.shift;
+    }
+    assert.ok(Math.abs(sum / 200 + 0.1) < 0.005, `${sum / 200}`);
+    assert.equal(flipBinaryWindow({ ...w, sumSq: 420 }, -0.1, 0.5, rng), undefined, "not 0/1 data");
+    assert.equal(flipBinaryWindow(w, 0.6, 0.5, rng), undefined, "past the ceiling");
+  });
+
+  it("the quoted shift is caught at about the quoted power, on the exact tail of thin windows near a bound too", () => {
+    // 1 s windows of ~20 events at p 0.9 are where the normal approximation was optimistic (66% for a quoted 80%).
+    const thin = synthesizeStream({ durationMs: 2 * HOUR, rate: 20, p: 0.9, seed: 7 });
+    const dip = runSensitivityCheck(thin, { lens: { window_ms: 1_000 }, spanMs: 10_000, strideMs: 10_000, direction: "dip" });
+    assert.ok(dip.trials > 600, `${dip.trials}`);
+    assert.ok(dip.detectionRate > 0.74 && dip.detectionRate < 0.88, `dip ${dip.detectionRate}`);
+    assert.ok(dip.controlRate < 0.02);
+    const spike = runSensitivityCheck(thin, { lens: { window_ms: 1_000 }, spanMs: 10_000, strideMs: 10_000, direction: "spike" });
+    assert.equal(spike.trials, 0, "a 0.9 rate in 20-event windows cannot rise far enough to clear the gate");
+    assert.ok(spike.unreachable > 600);
+    const vg = runSensitivityCheck(thin, {
+      lens: { window_ms: 1_000 }, spanMs: 10_000, strideMs: 10_000, direction: "dip", nullModel: "variogram", historyMs: 240_000, every: 2,
+    });
+    assert.ok(vg.trials > 300 && vg.detectionRate > 0.72 && vg.detectionRate < 0.9, `variogram ${vg.detectionRate} over ${vg.trials}`);
+  });
+
+  it("past the exact path (windows over 2000 events) the normal approximation holds", () => {
+    const thick = synthesizeStream({ durationMs: 6 * HOUR, rate: 40, p: 0.5, seed: 9 });
+    const r = runSensitivityCheck(thick, { lens: { window_ms: 60_000 }, spanMs: 600_000, strideMs: 600_000, direction: "dip", nullModel: "overdispersed" });
+    assert.ok(r.trials >= 30, `${r.trials}`);
+    assert.ok(r.detectionRate > 0.6 && r.detectionRate < 0.97, `${r.detectionRate}`);
+    assert.ok(r.meanMde > 0.02 && r.meanMde < 0.06, `${r.meanMde}`);
+  });
+
+  it("trailingVolumeRatios reads each window against the windows just before it", () => {
+    const ws = [10, 10, 10, 20, 10].map((count, i) => ({ windowStart: i, windowEnd: i + 1, count, mean: 0, sumSq: 0, valid: true }));
+    const r = trailingVolumeRatios(ws, 3);
+    assert.ok(Number.isNaN(r.get(0)!) && Number.isNaN(r.get(2)!));
+    assert.equal(r.get(3), 2);
+    assert.equal(r.get(4), 1);
+  });
+
+  // 10 h of iid 0/1 at 20 events/s, plus four 15-minute "bot batches" of extra
+  // value-1 events at another 20/s — volume and rate move together.
+  const base = synthesizeStream({ durationMs: 10 * HOUR, rate: 20, p: 0.5, seed: 11 });
+  const t0 = base.events[0].ts;
+  const batch: LensEvent[] = [];
+  for (const h of [1.5, 3.5, 5.5, 7.5]) {
+    for (let t = t0 + h * HOUR; t < t0 + h * HOUR + 900_000; t += 50) batch.push({ ts: t, value: 1, keys: { wiki: "wikidatawiki", type: "edit", namespace: "0" } });
+  }
+  const withBatches = { events: [...base.events, ...batch].sort((a, b) => a.ts - b.ts), gaps: [] };
+  const arm = { lens: { window_ms: 10_000 }, spanMs: 300_000, strideMs: 300_000, historyMs: 24 * 300_000, inject: { shift: -0.1, windows: 1 } };
+  const ordinary = (r: ReturnType<typeof runHistoryMixCalibration>) => r.bands.find((b) => b.band === "ordinary")!;
+
+  it("H-mix's control: on an iid stream cleaning the history changes nothing", () => {
+    const r = runHistoryMixCalibration(base, arm);
+    assert.ok(r.trials > 100);
+    assert.ok(r.meanContamination < 0.01);
+    assert.ok(ordinary(r).full.varGateZ > 0.8 && ordinary(r).full.varGateZ < 1.2);
+    // A few windows (0.3%) leave the band by counting noise alone; removing them moves nothing that matters.
+    assert.ok(r.removedHistoryWindows / r.historyWindows < 0.01);
+    assert.ok(Math.abs(ordinary(r).cleaned.varGateZ - ordinary(r).full.varGateZ) < 0.03);
+  });
+
+  it("H-mix's mechanism: make-up changes in the history make the null conservative at ordinary volume, and removing them restores it", () => {
+    // Measured: var z 0.32 → 0.94 and a −0.1 shift caught 10 → 43 of 118 (iid: 40 of 118).
+    const r = runHistoryMixCalibration(withBatches, arm);
+    const o = ordinary(r);
+    assert.ok(o.full.varGateZ < 0.5, `full ${o.full.varGateZ}`);
+    assert.ok(o.cleaned.varGateZ > 0.75 && o.cleaned.varGateZ < 1.2, `cleaned ${o.cleaned.varGateZ}`);
+    assert.ok(o.cleaned.over3 < 0.01);
+    const inj = r.injection!;
+    assert.ok(inj.detectedCleaned > 2 * inj.detectedFull, JSON.stringify(inj));
+    assert.ok(inj.controlCleaned / inj.trials < 0.08, JSON.stringify(inj));
+    const contaminated = r.bins.filter((b) => b.from >= 0.1 && b.trials > 0);
+    assert.ok(contaminated.length > 0 && contaminated.every((b) => b.full.varGateZ < 0.5));
+    // Read against its own past, a batch longer than half a span looks ordinary: the trailing reading removes far less.
+    assert.equal(historyMixReading(r).verdict, "supported");
+    assert.equal(historyMixReading(r).overshoot, false);
+    assert.equal(historyMixReading(runHistoryMixCalibration(base, arm)).verdict, "not supported");
+    const trailing = runHistoryMixCalibration(withBatches, { ...arm, clean: "trailing" });
+    assert.ok(trailing.removedHistoryWindows < r.removedHistoryWindows / 2);
+    assert.ok(ordinary(trailing).cleaned.varGateZ < 0.5);
   });
 });

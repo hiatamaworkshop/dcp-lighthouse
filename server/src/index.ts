@@ -152,7 +152,10 @@ const overlay    = new ObservationOverlay(registry);
 // tracked from the first time it is compared under that null.
 const windowHistory = new WindowHistory(buffer, { maxHistoryMs: HISTORY_WINDOW_MS });
 for (const view of ["coarse", "fine"]) windowHistory.track(registry.getObserve("test_result:v1", view) ?? {});
-const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true }, windowHistory);
+// sensitivityPower: every package Brain and the dashboard read also states its
+// reach — the one-window shift its gate would catch 80% of the time
+// (ROADMAP_BRIEF.md 2026-11-02 (2)). A description: no score or tile moves.
+const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true, sensitivityPower: 0.8 }, windowHistory);
 // The §A gate asks "did the curator flag this agent", which must not depend on
 // how many tiles a reader is shown: maxTiles drops the smallest first, so with
 // several agents alarming at once a real flag could be cut and the claim

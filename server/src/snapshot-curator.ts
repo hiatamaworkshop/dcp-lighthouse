@@ -286,8 +286,54 @@ export interface SnapshotPackage {
    * well as those it fired on. For calibration measurements only.
    */
   windowScores?: WindowScore[];
+  /**
+   * Present only with `CurationOptions.sensitivityPower`: how large a change
+   * this package could have reported (see that option). Read it beside an
+   * empty tile list — "no dip" from a unit whose median dip MDE is 0.35 says
+   * far less than from one whose MDE is 0.03.
+   */
+  sensitivity?: SensitivityReport;
   /** The curated tiles, sorted by regionStart ascending. */
   tiles: SnapshotTile[];
+}
+
+/** SnapshotPackage.sensitivity: the smallest one-window shift the gate would catch, per scoring unit. */
+export interface SensitivityReport {
+  /** The detection probability the shifts are quoted at (CurationOptions.sensitivityPower). */
+  power: number;
+  units: SensitivityUnit[];
+}
+
+export interface SensitivityUnit {
+  /** LensGroup.label, when the lens was grouped. */
+  group?: string;
+  /** Scorable windows the shifts were computed over. */
+  windows: number;
+  /** Median event count of those windows. */
+  typicalCount: number;
+  /**
+   * Windows whose shifts came from the exact tail (two-valued data on the
+   * gate's exact path); the rest are the normal approximation, least accurate
+   * on thin windows of three-level data near a bound.
+   */
+  exactWindows: number;
+  /** Shift DOWN of one window's mean (value units, positive); null when no window could reach it. */
+  dip: MdeSummary | null;
+  /** Shift UP of one window's mean; null when no window could reach it. */
+  spike: MdeSummary | null;
+}
+
+/** One direction's minimum detectable shift over a unit's scorable windows. */
+export interface MdeSummary {
+  median: number;
+  min: number;
+  max: number;
+  /**
+   * Scorable windows in which no shift in this direction could clear the gate
+   * at the quoted power: the data's range ends first (a 0.98 pass rate cannot
+   * rise by 0.05). The per-window form of `unreachableTails`.
+   */
+  unreachable: number;
 }
 
 /**
@@ -307,6 +353,8 @@ export interface WindowScore {
   z: number;
   /** The signed z the gate compares with the Šidák threshold (continuity-corrected / exact tail / studentized). */
   gateZ: number;
+  /** With `CurationOptions.sensitivityPower`: this window's minimum detectable shift by direction (null = unreachable). */
+  mde?: { dip: number | null; spike: number | null };
 }
 
 /** One direction the gate could not fire in, and the arithmetic that says so. */
@@ -437,6 +485,37 @@ export interface CurationOptions {
    * distribution itself is right. Off by default; nothing else changes with it.
    */
   recordWindowScores?: boolean;
+  /**
+   * Also say what the gate could have SEEN: per scoring unit, the smallest
+   * shift of one window's mean that this package's gate would catch with this
+   * probability (e.g. 0.8), by direction (`SnapshotPackage.sensitivity`, and
+   * `WindowScore.mde` when window scores are recorded). Off when absent; set,
+   * it changes no score, no threshold and no tile — a description, like
+   * `volumeRatio`.
+   *
+   * Why (ROADMAP_BRIEF.md 2026-11-02 (2)): a package states its false-alarm
+   * budget (`selection`) but not its reach, and every loss of detection so far
+   * was found afterwards, by diagnosis — H4's 10 s payment windows held ~10
+   * spans (2026-10-22 (5)), and stage 4's conservative null left a 0.1 shift
+   * at 4% over one 60 s window (2026-11-02). "Silent" can mean the world was
+   * quiet, the observer was blind (`referenceUsable`), or the lens was too
+   * coarse-grained to see a change this size; this names the third.
+   *
+   * Computed from the gate's own yardstick: the window's comparison SE (with
+   * the null's latent variance), the Šidák threshold carried back through the
+   * Student-t widening, the continuity correction where the normal path is
+   * the gate, and — on two-valued data — the window's own sampling variance
+   * at the shifted mean. The alternative is "this window's latent rate moved
+   * by Δ beyond what the null predicts". Where the gate reads the exact tail
+   * on two-valued data the shift is computed from that tail too (the normal
+   * approximation was measurably optimistic there); elsewhere it is the normal
+   * approximation, least accurate on thin three-level windows near a bound
+   * (`SensitivityUnit.exactWindows` says which). Either way it is measured
+   * against planted shifts in the harness (runSensitivityCheck), not assumed.
+   * Shifts sustained over k windows are caught at least as often (any one
+   * window firing is a tile).
+   */
+  sensitivityPower?: number;
 }
 
 /** CurationOptions.nullModel's values — also what $Q[compare]'s `null_model` names. */
@@ -472,7 +551,12 @@ export class SnapshotCurator {
       divergenceZThreshold: opts.divergenceZThreshold ?? 1.5,
       nullModel: opts.nullModel ?? "independent",
       recordWindowScores: opts.recordWindowScores ?? false,
+      sensitivityPower: opts.sensitivityPower ?? 0,
     };
+    const p = opts.sensitivityPower;
+    if (p !== undefined && !(p > 0 && p < 1)) {
+      throw new RangeError(`sensitivityPower must lie strictly between 0 and 1 (a detection probability), got ${p}`);
+    }
   }
 
   /**
@@ -637,6 +721,8 @@ export class SnapshotCurator {
     const effectiveZThreshold = sidakCorrectedThreshold(this.opts.spikeZThreshold, scorableCount);
     const unreachableTails: UnreachableTail[] = [];
     const windowScores: WindowScore[] | undefined = this.opts.recordWindowScores ? [] : undefined;
+    const power = this.opts.sensitivityPower;
+    const sensitivityUnits: SensitivityUnit[] | undefined = power > 0 ? [] : undefined;
 
     for (const unit of units) {
       const tag = unit.group !== undefined ? `[${unit.group}] ` : "";
@@ -665,6 +751,7 @@ export class SnapshotCurator {
       // under "variogram".
       const gatedDir = new Map<WindowStat, 1 | -1>();
       const scoreCount = windowScores !== undefined ? medianCount(unit.refWindows) : 0;
+      const mdes = { dip: [] as number[], spike: [] as number[], dipOut: 0, spikeOut: 0, exact: 0, counts: [] as number[] };
       for (const w of unit.windows) {
         if (!isScorable(w)) continue;
         const wref = refFor(unit, w);
@@ -672,6 +759,17 @@ export class SnapshotCurator {
         if (!(se > 0)) continue;
         const z = (w.mean - unit.ref.mean) / se;
         const gated = gate(w, wref, se, lattice, model);
+        let mde: WindowScore["mde"];
+        if (sensitivityUnits !== undefined) {
+          const m = windowMde(w, wref, se, effectiveZThreshold, lattice, model, power);
+          mde = { dip: m.dip, spike: m.spike };
+          if (m.exact) mdes.exact++;
+          if (mde.dip === null) mdes.dipOut++;
+          else mdes.dip.push(mde.dip);
+          if (mde.spike === null) mdes.spikeOut++;
+          else mdes.spike.push(mde.spike);
+          mdes.counts.push(w.count);
+        }
         windowScores?.push({
           windowStart: w.windowStart,
           ...(unit.group !== undefined ? { group: unit.group } : {}),
@@ -679,6 +777,7 @@ export class SnapshotCurator {
           volumeRatio: scoreCount > 0 ? w.count / scoreCount : NaN,
           z,
           gateZ: gated,
+          ...(mde !== undefined ? { mde } : {}),
         });
         if (gated >= effectiveZThreshold) {
           gatedDir.set(w, 1);
@@ -709,6 +808,17 @@ export class SnapshotCurator {
             ...(v.volumeRatio !== undefined ? { volumeRatio: v.volumeRatio } : {}),
           });
         }
+      }
+      if (sensitivityUnits !== undefined && mdes.counts.length > 0) {
+        mdes.counts.sort((a, b) => a - b);
+        sensitivityUnits.push({
+          ...(unit.group !== undefined ? { group: unit.group } : {}),
+          windows: mdes.counts.length,
+          typicalCount: mdes.counts[mdes.counts.length >> 1],
+          exactWindows: mdes.exact,
+          dip: summarizeMde(mdes.dip, mdes.dipOut),
+          spike: summarizeMde(mdes.spike, mdes.spikeOut),
+        });
       }
 
       // ── 2. Sustained step changes ──────────────────────────────
@@ -831,9 +941,228 @@ export class SnapshotCurator {
           }
         : {}),
       ...(windowScores !== undefined ? { windowScores } : {}),
+      ...(sensitivityUnits !== undefined ? { sensitivity: { power, units: sensitivityUnits } } : {}),
       tiles: capped,
     };
   }
+}
+
+// ── Sensitivity (CurationOptions.sensitivityPower) ───────────────────────────
+
+/**
+ * The raw |z| (deviation over comparison SE) whose studentized value is `zGate`
+ * — the Šidák threshold carried back through studentizeZ, which widens the
+ * tail when the null's latent variance is estimated (overdispersed: τ̂²'s
+ * Satterthwaite df; variogram: the block df). studentizeZ is odd and
+ * increasing, so a bisection finds it; where it is the identity (independent,
+ * or a df past 10⁶) the threshold comes back unchanged.
+ */
+function rawGateZ(zGate: number, w: WindowStat, ref: RefStats): number {
+  if (!(zGate > 0) || !Number.isFinite(zGate)) return zGate;
+  if (Math.abs(studentizeZ(zGate, w, ref) - zGate) < 1e-12) return zGate;
+  let lo = zGate;
+  let hi = 2 * zGate;
+  while (studentizeZ(hi, w, ref) < zGate && hi < 1e4) {
+    lo = hi;
+    hi *= 2;
+  }
+  for (let k = 0; k < 60; k++) {
+    const mid = 0.5 * (lo + hi);
+    if (studentizeZ(mid, w, ref) < zGate) lo = mid;
+    else hi = mid;
+  }
+  return hi;
+}
+
+/**
+ * Window `w`'s minimum detectable shift in both directions
+ * (CurationOptions.sensitivityPower), and whether it came from the exact tail.
+ *
+ * The alternative is the same for both paths: the window's LATENT rate moved by
+ * Δ — every event's chance of sitting at the upper level shifted — on top of
+ * whatever the null already predicts for it (its latent spread, the
+ * reference's own uncertainty). Where the gate reads the exact tail on
+ * two-valued data, so does this (exactWindowMde): on thin windows near a bound
+ * the normal approximation is optimistic for moves away from the bound — a
+ * 0.9 rate in 20-event windows caught a quoted 80%-power dip 66% of the time,
+ * because Binomial(20, 0.9)'s long left tail makes the exact gate harder to
+ * clear (2026-11-02 (2)). Elsewhere the normal approximation
+ * (normalWindowMde), including three-level data on the exact path.
+ */
+function windowMde(
+  w: WindowStat,
+  ref: RefStats,
+  se: number,
+  zGate: number,
+  lattice: Lattice | null,
+  model: CategoricalModel | null,
+  power: number,
+): { dip: number | null; spike: number | null; exact: boolean } {
+  // exactZ's own conditions for reading the exact tail, without its O(n²) work on three levels.
+  const exactPath = model !== null && w.count > 0 && w.count <= EXACT_MAX_COUNT && levelCounts(w, model.min, model.step, model.levels) !== null;
+  if (exactPath && model!.levels === 2) {
+    return { dip: exactWindowMde(w, ref, zGate, model!, power, -1), spike: exactWindowMde(w, ref, zGate, model!, power, 1), exact: true };
+  }
+  return {
+    dip: normalWindowMde(w, ref, se, zGate, lattice, model, exactPath, power, -1),
+    spike: normalWindowMde(w, ref, se, zGate, lattice, model, exactPath, power, 1),
+    exact: false,
+  };
+}
+
+/**
+ * The normal approximation to the gate's power. The gate fires in direction
+ * `dir` when the deviation exceeds D* = z_raw·se + cc (cc = the continuity
+ * correction, applied only where the normal path IS the gate: the exact path's
+ * mid-p tail is closer to the uncorrected normal). Under the shift the
+ * deviation is ~ N(Δ, se₁²), where se₁ swaps the window's own sampling
+ * variance for the one at the shifted mean on two-valued data (the latent and
+ * reference parts are unchanged), so Δ = D* + z_power·se₁(Δ), solved by
+ * fixed-point iteration. Null when the data's range ends first.
+ */
+function normalWindowMde(
+  w: WindowStat,
+  ref: RefStats,
+  se: number,
+  zGate: number,
+  lattice: Lattice | null,
+  model: CategoricalModel | null,
+  exactPath: boolean,
+  power: number,
+  dir: 1 | -1,
+): number | null {
+  const n = effectiveN(w);
+  if (!(n > 0) || !(se > 0)) return null;
+  const cc = lattice !== null && !exactPath ? (0.5 * lattice.step) / n : 0;
+  const threshold = rawGateZ(zGate, w, ref) * se + cc;
+  if (!Number.isFinite(threshold)) return null;
+  const zp = normalQuantile(power);
+  const bounds: [number, number] | undefined =
+    lattice !== null ? [lattice.min, lattice.min + lattice.step]
+    : model !== null ? [model.min, model.min + (model.levels - 1) * model.step]
+    : undefined;
+  let delta = threshold + zp * se;
+  if (lattice !== null) {
+    for (let k = 0; k < 50; k++) {
+      const m1 = Math.min(lattice.min + lattice.step, Math.max(lattice.min, ref.mean + dir * delta));
+      const v1 = (m1 - lattice.min) * (lattice.min + lattice.step - m1);
+      const se1 = Math.sqrt(Math.max(0, se * se + (v1 - ref.variance) / n));
+      const next = threshold + zp * se1;
+      const done = Math.abs(next - delta) < 1e-12;
+      delta = next;
+      if (done) break;
+    }
+  }
+  if (!(delta > 0) || !Number.isFinite(delta)) return null;
+  if (bounds !== undefined) {
+    const target = ref.mean + dir * delta;
+    if (target < bounds[0] - 1e-12 || target > bounds[1] + 1e-12) return null;
+  }
+  return delta;
+}
+
+/**
+ * The exact counterpart on two-valued data, where the gate itself reads
+ * exactZ. Two steps, both on the gate's own terms:
+ *
+ *   1. the critical count: the largest upper-level count c* the gate fires a
+ *      dip on (the smallest, for a spike) — exactZ, studentized, against the
+ *      Šidák threshold, by bisection (the gate is monotone in the count);
+ *   2. the shift: the window's count under the alternative is beta-binomial
+ *      with the null predictive's total concentration (concentration(): the
+ *      reference's uncertainty and the null's latent spread) and its upper-
+ *      level share moved by δ; δ is solved by bisection so that
+ *      P(count ≤ c*) (dip) or P(count ≥ c*) (spike) equals `power`.
+ *
+ * Returned in value units (δ·step). Null when the gate cannot fire in that
+ * direction at this window's size, or cannot reach `power` before the share
+ * runs into 0 or 1.
+ */
+function exactWindowMde(w: WindowStat, ref: RefStats, zGate: number, model: CategoricalModel, power: number, dir: 1 | -1): number | null {
+  const n = w.count;
+  const { min, step } = model;
+  const atCount = (c: number): WindowStat => ({
+    ...w,
+    mean: min + (step * c) / n,
+    sumSq: (n - c) * min * min + c * (min + step) * (min + step),
+    weights: undefined,
+  });
+  const gated = (c: number): number => {
+    const x = atCount(c);
+    const e = exactZ(x, model, ref.latentVar);
+    return e === null ? NaN : studentizeZ(e, x, ref);
+  };
+  // 1. Critical count.
+  let crit: number;
+  if (dir < 0) {
+    if (!(gated(0) <= -zGate)) return null;
+    let lo = 0;
+    let hi = n;
+    if (gated(n) <= -zGate) lo = n;
+    else {
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (gated(mid) <= -zGate) lo = mid;
+        else hi = mid;
+      }
+    }
+    crit = lo;
+  } else {
+    if (!(gated(n) >= zGate)) return null;
+    let lo = 0;
+    let hi = n;
+    if (gated(0) >= zGate) hi = 0;
+    else {
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (gated(mid) >= zGate) hi = mid;
+        else lo = mid;
+      }
+    }
+    crit = hi;
+  }
+  // 2. The share shift that reaches `power`.
+  const alpha = concentration(
+    model.refCounts.map((r) => r + 0.5),
+    model.overdispersion,
+    ref.latentVar === undefined ? undefined : ref.latentVar / (step * step),
+  );
+  const A = alpha[0] + alpha[1];
+  const p0 = alpha[1] / A;
+  const tail = (delta: number): number => {
+    const q = p0 + dir * delta;
+    const a1 = q * A;
+    const a0 = (1 - q) * A;
+    // P(count ≤ last) by the pmf's ratio recurrence from c = 0 (log P carried, so
+    // a far-off start cannot underflow the terms that matter); a spike's firing
+    // side c ≥ crit is its complement — fine at the powers asked for here.
+    const last = dir < 0 ? crit : crit - 1;
+    let lp = logGamma(n + a0) - logGamma(n + A) + logGamma(A) - logGamma(a0);
+    let below = 0;
+    for (let c = 0; c <= last; c++) {
+      if (c > 0) lp += Math.log(((n - c + 1) * (c - 1 + a1)) / (c * (n - c + a0)));
+      below += Math.exp(lp);
+    }
+    return dir < 0 ? below : 1 - below;
+  };
+  const room = dir < 0 ? p0 : 1 - p0;
+  const far = room * (1 - 1e-9);
+  if (!(tail(far) >= power)) return null;
+  let lo = 0;
+  let hi = far;
+  if (tail(lo) >= power) return 0;
+  for (let k = 0; k < 50; k++) {
+    const mid = 0.5 * (lo + hi);
+    if (tail(mid) >= power) hi = mid;
+    else lo = mid;
+  }
+  return hi * step;
+}
+
+function summarizeMde(values: number[], unreachable: number): MdeSummary | null {
+  if (values.length === 0) return null;
+  const s = values.slice().sort((a, b) => a - b);
+  return { median: s[s.length >> 1], min: s[0], max: s[s.length - 1], unreachable };
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────

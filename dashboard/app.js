@@ -131,7 +131,22 @@ function tileHtml(t) {
   </div>`;
 }
 
+// ── Reach (SnapshotPackage.sensitivity, ROADMAP_BRIEF.md 2026-11-02 (2)) ───
+//
+// How far one window's rate must move for the gate to catch it at the quoted
+// power, per group — read beside an empty tile list: "no dip" from a lens
+// that needs a 30-point drop says much less than from one that needs 3.
+
+function reachText(pkg) {
+  const s = pkg && pkg.sensitivity;
+  if (!s || !s.units || s.units.length === 0) return "";
+  const pt = (m) => (m === null ? "out of range" : `${(100 * m.median).toFixed(1)} pt`);
+  const units = s.units.map((u) => `${u.group ?? "all"} ↓${pt(u.dip)} ↑${pt(u.spike)}`);
+  return `reach at ${Math.round(100 * s.power)}% power, one window: ${units.join(" · ")}`;
+}
+
 function renderTiles(pkg) {
+  document.getElementById("tiles-reach").textContent = reachText(pkg);
   const el = document.getElementById("tiles");
   if (!pkg || !pkg.tiles || pkg.tiles.length === 0) {
     el.innerHTML = '<span style="color:var(--muted);font-size:11px">No characteristic moments yet.</span>';
@@ -143,6 +158,7 @@ function renderTiles(pkg) {
 // ── Replay tiles (fine-window re-observation, ROADMAP L2-3) ─────────────────
 
 function renderReplayTiles(pkg) {
+  document.getElementById("replay-reach").textContent = reachText(pkg);
   const el = document.getElementById("replay-tiles");
   if (!pkg || !pkg.tiles || pkg.tiles.length === 0) {
     el.innerHTML = '<span style="color:var(--muted);font-size:11px">Replay produced no tiles.</span>';

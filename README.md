@@ -279,9 +279,12 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       `GET /forecast?view=coarse|fine` (行はすべて `virtual: true`、窓要約の履歴から作る)。詳細は ROADMAP_BRIEF.md 2026-10-22 (8)
 - [x] **F2 の残り** (2026-10-24) — 実現した窓を予見と比べる `ForecastScore` (package が `against: "forecast"` と名乗り、`virtual: true`、
       `GET /forecast` の `scores`)・dashboard の Forecast パネル (破線・斜線で仮想と分かる形)。詳細は ROADMAP_BRIEF.md 2026-10-24〜(3)
-- [ ] **次**: 仮想ストリームの常設 (F3)。順序は ROADMAP_BRIEF.md 2026-10-22 (8)
+- [x] **1 手目: 検出の届く範囲と H-mix の診断** (2026-11-02 (2)) — package が「1 窓の率がどれだけ動けば 80% で拾えるか」(MDE) を
+      名乗る (`sensitivityPower`、score・tile は不変。厳密な裾の窓は MDE も厳密に、埋め込みで検算)。dashboard の snapshot 欄に reach 行。
+      第 4 段階の保守性 (分散 0.533) が履歴の構成の変化によるか (H-mix) を診断する器を用意 (読みは実データで手元、台帳 C2)
+- [ ] **次**: 1 手目の実データ読み → 2 手目 (量と率の分離 or レンズ、較正の常時監視) → 仮想ストリームの常設 (F3)。順序は ROADMAP_BRIEF.md 2026-11-02 (2)
 
-現在テスト計 581 件、全 green。
+現在テスト計 593 件、全 green。
 
 ## 実データ較正期間の運用
 
@@ -296,6 +299,8 @@ node dist/run-variogram-report.js --from 2026-10-06 --to 2026-10-10   # 3 つの
 node dist/run-volume-report.js --from 2026-10-01 --to 2026-10-21      # 平常の量での較正・構成の変化・量を変えない変化の検出 (全履歴)
 node dist/run-forecast-report.js --from 2026-10-01 --to 2026-10-21    # F2: kriging と持続の予見の較正・区間の幅・誤差 (horizon 別)
 node dist/run-f1-report.js --from 2026-10-06 --to 2026-10-10          # F1: 直前区間 / 前日の同時刻 / 差の差
+node dist/run-sensitivity-report.js --from 2026-10-26 --to 2026-11-01 # 1a: 名乗る MDE を埋め込みで検算 (腕ごと)
+node dist/run-history-mix-report.js --from 2026-10-26 --to 2026-11-01 # 1b: H-mix (履歴の構成の変化と平常の量の保守性) の診断
 node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
 node dist/run-otel-flag-schedule.js        # H4 の障害フラグ切替 (既定: paymentFailure 50%、休止 10%、≒ 24 h)。真値は data/otel/flags.jsonl
 node dist/run-otel-report.js --from <day> --to <day>   # H4。p=1 の配線確認が通らなければ判定を出さない (判定日 10-03 は使用済み)
