@@ -100,7 +100,7 @@ export const HOLDOUTS: readonly Holdout[] = [
   { name: "stage 1's holdout", from: HOLDOUT_FROM_DAY, to: HOLDOUT_TO_DAY, spentOn: "2026-10-06" },
   { name: "H3's holdout", from: H3_HOLDOUT_FROM_DAY, to: H3_HOLDOUT_TO_DAY, spentOn: "2026-10-14" },
   { name: "stage 3's holdout", from: STAGE3_HOLDOUT_FROM_DAY, to: STAGE3_HOLDOUT_TO_DAY, spentOn: "2026-10-22" },
-  { name: "stage 4's holdout", from: STAGE4_HOLDOUT_FROM_DAY, to: STAGE4_HOLDOUT_TO_DAY },
+  { name: "stage 4's holdout", from: STAGE4_HOLDOUT_FROM_DAY, to: STAGE4_HOLDOUT_TO_DAY, spentOn: "2026-11-02" },
 ];
 
 /**
@@ -1936,19 +1936,17 @@ export function stage3HoldoutRefusal(fromDay: string, toDay: string, _nowMs: num
 export const STAGE3_MAX_BLIND_SHARE = 0.2;
 
 /**
- * Stage 4's single look (ROADMAP_BRIEF.md 2026-10-22 (6)): `--holdout` is taken
- * only for exactly the holdout week and only once it is complete (the UTC day
- * after its Sunday has begun), so an early look at a partial week cannot spend
- * it. Returns the refusal message, or undefined.
+ * Stage 4's single look (ROADMAP_BRIEF.md 2026-10-22 (6)) was taken on
+ * 2026-11-02 and is spent (ROADMAP_BRIEF.md 2026-11-02): every `--holdout` is
+ * refused from now on, as stages 1 and 3 and H3 are. The verdict (HELD, V-a too
+ * conservative) stands as taken and was accepted as it is (user decision
+ * 2026-11-02). Returns the refusal.
  */
-export function stage4HoldoutRefusal(fromDay: string, toDay: string, nowMs: number): string | undefined {
+export function stage4HoldoutRefusal(fromDay: string, toDay: string, _nowMs: number): string | undefined {
   if (fromDay !== STAGE4_HOLDOUT_FROM_DAY || toDay !== STAGE4_HOLDOUT_TO_DAY) {
     return `refusing: stage 4's --holdout reads exactly ${STAGE4_HOLDOUT_FROM_DAY}…${STAGE4_HOLDOUT_TO_DAY}`;
   }
-  if (new Date(nowMs).toISOString().slice(0, 10) <= STAGE4_HOLDOUT_TO_DAY) {
-    return `refusing: stage 4's holdout is not complete until ${STAGE4_HOLDOUT_TO_DAY} has ended (UTC)`;
-  }
-  return undefined;
+  return `refusing: stage 4's holdout (${STAGE4_HOLDOUT_FROM_DAY}…${STAGE4_HOLDOUT_TO_DAY}) was spent on 2026-11-02 — it had one look`;
 }
 
 /**

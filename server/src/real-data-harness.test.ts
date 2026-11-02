@@ -581,11 +581,11 @@ describe("holdouts: sealed until their single look, exploration after it (revisi
     assert.match(spentHoldoutNote("2026-10-18", "2026-10-19") ?? "", /stage 3's holdout/);
     assert.equal(explorationRangeRefusal("2026-09-29", "2026-10-25"), undefined, "every holdout before stage 4 is spent");
   });
-  it("seals stage 4's week (2026-10-26…11-01) from every exploration report", () => {
-    assert.match(explorationRangeRefusal("2026-10-25", "2026-10-26") ?? "", /stage 4's holdout .* sealed/);
-    assert.match(stage1RangeRefusal("2026-10-30", "2026-11-05", false) ?? "", /stage 4's holdout/);
-    assert.match(h3RangeRefusal("2026-11-01", "2026-11-01", false) ?? "", /stage 4's holdout/);
+  it("stage 4's week (2026-10-26…11-01) was spent on 2026-11-02: exploration reads it, labelled", () => {
+    assert.equal(explorationRangeRefusal("2026-10-25", "2026-10-26"), undefined);
     assert.equal(explorationRangeRefusal("2026-11-02", "2026-11-05"), undefined);
+    assert.match(spentHoldoutNote("2026-10-30", "2026-11-05") ?? "", /stage 4's holdout/);
+    assert.match(spentHoldoutNote("2026-10-30", "2026-11-05") ?? "", /verdict of 2026-11-02/);
   });
 });
 
@@ -595,10 +595,10 @@ describe("stage 4's single look (claim C, 2026-10-22 (6))", () => {
   });
   const arm = (name: string, over2: number, over3: number, v: number, blind = 0) =>
     ({ name, ordinary: sums(100_000, over2, over3, v), trials: 1000, blindByGap: blind });
-  it("--holdout takes exactly the week, and only after its Sunday has ended (UTC)", () => {
+  it("--holdout was spent on 2026-11-02: refused for the week at any time, and for any other range", () => {
     const after = Date.parse("2026-11-02T00:00:01Z");
-    assert.equal(stage4HoldoutRefusal("2026-10-26", "2026-11-01", after), undefined);
-    assert.match(stage4HoldoutRefusal("2026-10-26", "2026-11-01", Date.parse("2026-11-01T23:59:59Z")) ?? "", /not complete/);
+    assert.match(stage4HoldoutRefusal("2026-10-26", "2026-11-01", after) ?? "", /spent/);
+    assert.match(stage4HoldoutRefusal("2026-10-26", "2026-11-01", Date.parse("2026-11-09T00:00:00Z")) ?? "", /spent/);
     assert.match(stage4HoldoutRefusal("2026-10-27", "2026-11-01", after) ?? "", /exactly/);
   });
   it("supports both arms inside the support lines, rejects a liberal arm, holds the rest with a reason", () => {
