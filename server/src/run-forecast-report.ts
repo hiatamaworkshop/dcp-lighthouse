@@ -10,7 +10,8 @@
  * windows from the last 30 (horizons 1…30), γ̂ from 24 spans of history ending
  * at the origin, one origin every 10 minutes. Every origin has its whole history:
  * the two days before each chunk of up to three observation days are loaded
- * with it. Exploration only; an unspent holdout is refused (stage 4's week).
+ * with it. Exploration only; an unspent holdout is refused (none now: stage 4's
+ * week was spent on 2026-11-02 and is labelled when read).
  */
 import { join } from "node:path";
 import {

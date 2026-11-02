@@ -16,20 +16,22 @@
  *
  * Every trial has its whole reference and history: the two days before each
  * chunk of up to three observation days are loaded with it. Exploration only;
- * spent holdout days are labelled, an unspent holdout is refused. Options:
+ * spent holdout days are labelled, an unspent holdout (none now) is refused. Options:
  * `--nulls` (independent,overdispersed,variogram), `--no-inject`.
  *
  * The day is the resampling unit for spread (alarms and window scores cluster
  * within a day): section 3 bootstraps whole days to give the sampling spread a
  * 7-day period's figures would have — what a holdout's tolerance is set from.
  *
- * Stage 4's single look (ROADMAP_BRIEF.md 2026-10-22 (6)), once its week is over:
+ * Stage 4's single look (ROADMAP_BRIEF.md 2026-10-22 (6)) was taken on
+ * 2026-11-02 (HELD, ROADMAP_BRIEF.md 2026-11-02) and is spent: `--holdout` is
+ * refused (stage4HoldoutRefusal). What it ran was
  *
  *   node dist/run-volume-report.js --from 2026-10-26 --to 2026-11-01 --holdout
  *
- * reads exactly the holdout week (stage4HoldoutRefusal) with the two days before
- * it for references and history, runs every section with the default nulls, and
- * prints stage4Verdict on V-a and the 10 s arm at the end.
+ * — exactly the holdout week with the two days before it for references and
+ * history, every section with the default nulls, and stage4Verdict on V-a and
+ * the 10 s arm at the end. The week is now exploration data.
  */
 import { join } from "node:path";
 import { mulberry32 } from "./calibration.js";

@@ -155,9 +155,9 @@ dcp-lighthouse/
                                    フラグ真値 (ON 区間の除外と検出)
       run-wikimedia-collector.ts / run-otlp-receiver.ts / run-otel-flag-log.ts / run-otel-flag-schedule.ts /
       run-real-data-report.ts / run-otel-report.ts / run-h3-report.ts / run-variogram-report.ts / run-f1-report.ts /
-      run-volume-report.ts (平常の量での較正・構成の変化・量を変えない変化の検出。第 4 段階の --holdout) /
+      run-volume-report.ts (平常の量での較正・構成の変化・量を変えない変化の検出。第 4 段階の --holdout は使用済み) /
       run-forecast-report.ts (F2: kriging と持続の予見の較正・区間の幅・誤差)
-                                 ← 起動口 (レポートは保留日を --holdout なしで拒否)
+                                 ← 起動口 (保留は全て使用済みで --holdout は拒否。未使用の保留が出来たらレポートは --holdout なしでの読みを拒否)
   server/otel/
       otelcol-config-lighthouse.yml ← OTel Demo のコレクタ extras (traces → 受け口へ OTLP/JSON)
       compose.lighthouse.yaml    ← OTel Demo の compose 上書き (checkout の GC 空回り回避・負荷 50 HTTP ユーザ)
@@ -618,14 +618,17 @@ E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以
     (60 s で gate 超え 40×) = 構成の変化。保留の 10-19 は出来事 8 のうち 7 が構成の変化。量を変えない変化は bot 比率 0.2 程度で 8 割検出
   - **H4 の検出消失はレンズ** (payment の 10 s 窓が約 10 スパン)。30 s 窓なら variogram で 17/22 (OFF 1.9%)
   - **帰無の改良は打ち切り**。第 4 段階 = 主張 C (平常の量での較正、V-a と 10 s 腕) を **10-26 (月)〜11-01 (日)** で確かめる
-    (封印済み、11-02 以降に `run-volume-report --from 2026-10-26 --to 2026-11-01 --holdout` を 1 回、`stage4Verdict`。
-    探索と同じ性質の週なら支持 99.6%)。user は 10-26 00:00Z まで変更可
+    (2026-11-02 に `run-volume-report --from 2026-10-26 --to 2026-11-01 --holdout` を 1 回実行、`stage4Verdict` = **保留**:
+    V-a |z|≥2 1.58%・|z|≥3 0.13%・分散 0.533 は保守的すぎる、10 s 腕 2.09%・0.21%・0.655。棄却線には触れず、判定は受け入れ・帰無は直さない。
+    10-31 (土) だけ V-a が崩れた。保留週は使用済み = 探索データ。詳細は ROADMAP_BRIEF.md 2026-11-02)
 - **F2 `$F` の行 (2026-10-22 (8)、user「do f2」)** — `semivariogramFromWindows` を curator から切り出し (出力はバイト一致を実データで確認)、
   `forecast.ts` で γ̂ に 2 族 (ナゲット + べき乗 / 指数) を当てて通常 kriging (生の γ̂ のままだと自信過剰)。21 日・平常の量で、
   60 s 窓の 1 窓先は z の分散 0.85・|z|≥2 3.56% のまま**区間 −23%・誤差 −23%** (持続 = 今の比較の参照の平均 に対し)。遠い先ほど差は縮む。
   気になる点: 同じ所の |z|≥3 が 0.63% (持続 0.36%)。本番: `$Q[forecast:<schema>#<view>]` (5 層目、書込ゲートで履歴 ≤ 1 時間)・
   `Forecaster` (窓要約から、origin 以降は読まない)・`GET /forecast?view=`・`GET /control/forecast`。行はすべて `virtual: true`。
-  **次**: 実現した窓を予見と比べる (package が「比べた相手は予見」と名乗る) → dashboard 表示 → F3
+  - **残り 2 件も完了 (2026-10-24)**: `ForecastScore` (`scoreForecast`、実現した窓を予見と比べる。package が `against: "forecast"` と名乗る・`virtual: true`、
+    `GET /forecast` の `scores`。60 s・1 窓先の裾は探索日で |z|≥3 0.36% = 判定に使える) と dashboard の Forecast パネル (破線・斜線で仮想と分かる形、テスト581件)
+  **次**: F3 (仮想ストリームの常設)
 - **予定: 実データ較正期間 (2026-09-27 事前登録・第0段階: Wikimedia 収集器・再生ハーネス/指標 (φ・ラグ1・シャッフル帰無・注入) は実装・合成検算済 2026-09-29、ログオン時起動のタスク登録済。H4 用の OTLP 受け口・真値ログ・p 別の間引き再生も実装済 2026-09-29、OTel Demo の実走は第1段階の1日分)** — 統計層の前提、特に「窓内の事象は独立」
   が実データで成り立つかを、事前に固定した仮説で検証する (実データで調整する期間ではない)。
   データ源は Wikimedia EventStreams (無料・認証不要の SSE、value = bot 編集か否か) と
