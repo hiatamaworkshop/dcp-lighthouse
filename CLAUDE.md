@@ -159,7 +159,8 @@ dcp-lighthouse/
       run-volume-report.ts (平常の量での較正・構成の変化・量を変えない変化の検出。第 4 段階の --holdout は使用済み) /
       run-forecast-report.ts (F2: kriging と持続の予見の較正・区間の幅・誤差) /
       run-sensitivity-report.ts (1a: 名乗る MDE を埋め込みで検算) / run-history-mix-report.ts (1b: H-mix の診断、履歴の除外は診断専用) /
-      run-volume-channel-report.ts (C3: 量チャネルの z・構成の変化の捕捉)
+      run-volume-channel-report.ts (C3: 量チャネルの z・構成の変化の捕捉) /
+      run-wiki-retention.ts (C6: 空き 100 GiB 未満で古い日別 gz を消す。既定は dry run・消した日は pruned.jsonl に記録され、その日に触れる範囲はハーネスが拒否)
                                  ← 起動口 (第 1〜4 段階の保留は使用済みで --holdout は拒否。未使用の保留 = 第 5 段階 2026-11-09〜11-15 は封印で、範囲に触れる読みはレポートが拒否)
   server/otel/
       otelcol-config-lighthouse.yml ← OTel Demo のコレクタ extras (traces → 受け口へ OTLP/JSON)

@@ -31,6 +31,7 @@ import {
 import type { QObserveParams } from "./q-registry.js";
 import { SnapshotCurator, familyWiseAlpha, isScorable, studentUpperTail, type SnapshotPackage, type SnapshotTile } from "./snapshot-curator.js";
 import { mulberry32 } from "./calibration.js";
+import { prunedRangeRefusal, readPrunedDays } from "./wiki-retention.js";
 import { cleanHistoryByMedian } from "./comparison.js";
 import {
   ORDINARY_VOLUME_BAND, forecastModel, forecastMse, forecastPoint, krigingWeights, persistenceWeights, pooledEventVariance, variogramAt,
@@ -285,6 +286,9 @@ async function loadDayFiles(
   // `toDay` are read too, keeping only their events whose `ts` is inside the range;
   // the in-range files are read whole, as they always were. Nothing arrives before
   // its `ts`, so no file before `fromDay` can hold a range event.
+  // A day the retention rule deleted would read as a quiet day (no events, no gap): refuse the range instead.
+  const prunedRefusal = prunedRangeRefusal(readPrunedDays(dir), range);
+  if (prunedRefusal !== undefined) throw new Error(prunedRefusal);
   const lateLimit = range.toDay === undefined ? undefined : utcDayOf(Date.parse(`${range.toDay}T00:00:00Z`) + LATE_ARRIVAL_DAYS * DAY_MS);
   const isLate = (day: string) => range.toDay !== undefined && lateLimit !== undefined && day > range.toDay && day <= lateLimit;
   const files = readdirSync(dir)

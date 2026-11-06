@@ -14,6 +14,11 @@ description: Check, restart, or troubleshoot the real-data calibration period's 
 時刻の穴だけにし、値 (bot 比率など) の集計はしない。判定を記録した後の保留期間は探索データとして読める
 (事前登録の改訂 2026-10-22)。
 
+## 0. 日別 gz の保持 (C6)
+
+空きが 100 GiB を切ったときだけ、古い日から消す。点検のついでに `cd server && node dist/run-wiki-retention.js` (dry run) で見て、必要なら `--apply`。
+直近 14 日と全ての保留の週は消さない。**消した日は `data/wikimedia/pruned.jsonl` に載り、その日に触れる範囲はレポートが拒否する** (欠けた日は静穏と読まれるため)。手で日別ファイルを消すときも同じ行を足すこと。
+
 ## 1. 点検 (再起動・スリープの後は必ず)
 
 ```powershell
