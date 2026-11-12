@@ -35,6 +35,7 @@ import {
   bandFigures,
   emptyGateZSums,
   historyMixReading,
+  historyMsForTotal,
   loadWikiDir,
   runHistoryMixCalibration,
   spentHoldoutNote,
@@ -77,10 +78,10 @@ if (fromDay === undefined || toDay === undefined || cleans.some((c) => !CLEANS.i
 const loadFirst = dayOf(Date.parse(`${fromDay}T00:00:00Z`) - 2 * DAY);
 const refusal = holdout
   ? stage5HoldoutRefusal(fromDay, toDay, Date.now()) ??
-    (arg("clean") !== undefined || arg("max-removed") !== undefined || process.argv.includes("--fine-bins")
+    (arg("clean") !== undefined || arg("max-removed") !== undefined || arg("history-total-ms") !== undefined || process.argv.includes("--declined") || process.argv.includes("--fine-bins")
       ? "refusing: stage 5's holdout runs the pre-registered rule (clean history, max removed 0.5) with no other options"
       : undefined)
-  : rehearse && (arg("clean") !== undefined || arg("max-removed") !== undefined || process.argv.includes("--fine-bins"))
+  : rehearse && (arg("clean") !== undefined || arg("max-removed") !== undefined || arg("history-total-ms") !== undefined || process.argv.includes("--declined") || process.argv.includes("--fine-bins"))
     ? "refusing: --rehearse runs the pre-registered rule (clean history, max removed 0.5) with no other options"
     : stage1RangeRefusal(loadFirst, toDay, false);
 if (refusal !== undefined) {
@@ -94,6 +95,17 @@ const ARMS = [
   { key: "H1-10s", label: "10 s windows, 300 s span", window: 10_000, span: 300_000, stride: 600_000, injectEvery: 1 },
 ] as const;
 const SHIFT = -0.1;
+// ROADMAP C10 (exploration only; --holdout and --rehearse refuse it): `--history-total-ms N` counts the history back from
+// the observation's start with the reference INSIDE it, as production's window summaries do (HISTORY_WINDOW_MS = 1 h).
+// An arm whose reference alone fills N has no history before it, and is not run. Default: 24 spans before the reference.
+const historyTotal = arg("history-total-ms") === undefined ? undefined : Number(arg("history-total-ms"));
+if (historyTotal !== undefined && !(historyTotal > 0)) {
+  console.error("usage: --history-total-ms N (a positive number of ms)");
+  process.exit(2);
+}
+const historyMsOf = (arm: (typeof ARMS)[number]): number | undefined =>
+  historyTotal === undefined ? 24 * arm.span : historyMsForTotal(historyTotal, arm.span, arm.window);
+const RUN_ARMS = ARMS.filter((a) => historyMsOf(a) !== undefined);
 
 interface Acc {
   trials: number;
@@ -103,6 +115,7 @@ interface Acc {
   bands: Map<VolumeBandStats["band"], { full: GateZSums; cleaned: GateZSums }>;
   bins: Map<string, { trials: number; full: GateZSums; cleaned: GateZSums }>;
   blindByGap: number;
+  declined: number;
   days: Array<{ day: string; trials: number; meanContamination: number; full: VolumeBandStats; cleaned: VolumeBandStats }>;
   inj: { trials: number; detectedFull: number; detectedCleaned: number; controlFull: number; controlCleaned: number };
 }
@@ -120,7 +133,13 @@ if (coverage !== undefined && coverageRefusal !== undefined) {
 if (holdout) console.log(`STAGE 5 HOLDOUT ${fromDay}…${toDay} — the single look (ROADMAP_BRIEF.md 2026-11-02 (11))`);
 if (coverage !== undefined) console.log(describeCoverage(coverage, fromDay, toDay).join("\n"));
 console.log(`step 1b (H-mix): ordinary-volume gate z under the variogram null with the history as recorded vs cleaned of ` +
-  `off-ordinary-volume windows, observation days ${fromDay}…${toDay} (loaded from ${loadFirst}); history 24 spans; clean ${cleans.join(", ")}`);
+  `off-ordinary-volume windows, observation days ${fromDay}…${toDay} (loaded from ${loadFirst}); ` +
+  `${historyTotal === undefined ? "history 24 spans" : `history ${historyTotal} ms in total back from the observation start, reference included`}; clean ${cleans.join(", ")}`);
+for (const arm of ARMS) {
+  if (historyMsOf(arm) === undefined) {
+    console.log(`arm ${arm.key} NOT RUN: ${historyTotal} ms in total leaves no whole-window history before its ${arm.span} ms reference (the reference alone fills it)`);
+  }
+}
 const spentNote = spentHoldoutNote(loadFirst, toDay);
 if (spentNote !== undefined) console.log(spentNote);
 
@@ -128,17 +147,17 @@ for (let c = Date.parse(`${fromDay}T00:00:00Z`); c <= Date.parse(`${toDay}T00:00
   const chunkTo = dayOf(Math.min(c + 2 * DAY, Date.parse(`${toDay}T00:00:00Z`)));
   const stream = await loadWikiDir(dir, { fromDay: dayOf(c - 2 * DAY), toDay: chunkTo });
   console.error(`[history-mix-report] ${dayOf(c)}…${chunkTo}: ${stream.events.length} events, ${stream.gaps.length} gaps`);
-  for (const arm of ARMS) {
+  for (const arm of RUN_ARMS) {
     for (const clean of cleans) {
       const r = runHistoryMixCalibration(stream, {
-        lens: { window_ms: arm.window }, spanMs: arm.span, strideMs: arm.stride, obsFromTs: c, historyMs: 24 * arm.span, clean,
+        lens: { window_ms: arm.window }, spanMs: arm.span, strideMs: arm.stride, obsFromTs: c, historyMs: historyMsOf(arm)!, clean,
         ...(maxRemoved !== undefined ? { maxRemovedShare: Number(maxRemoved) } : {}),
         ...(process.argv.includes("--fine-bins") ? { contaminationBins: [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, Infinity] } : {}),
         inject: { shift: SHIFT, windows: 1, every: arm.injectEvery },
       });
       const key = `${arm.key}|${clean}`;
       const a: Acc = acc.get(key) ?? {
-        trials: 0, contamination: 0, historyWindows: 0, removed: 0, bands: new Map(), bins: new Map(), blindByGap: 0, days: [],
+        trials: 0, contamination: 0, historyWindows: 0, removed: 0, bands: new Map(), bins: new Map(), blindByGap: 0, declined: 0, days: [],
         inj: { trials: 0, detectedFull: 0, detectedCleaned: 0, controlFull: 0, controlCleaned: 0 },
       };
       a.trials += r.trials;
@@ -146,6 +165,7 @@ for (let c = Date.parse(`${fromDay}T00:00:00Z`); c <= Date.parse(`${toDay}T00:00
       a.contamination += r.meanContamination * r.trials;
       a.historyWindows += r.historyWindows;
       a.removed += r.removedHistoryWindows;
+      a.declined += r.declinedTrials;
       for (const b of r.bands) {
         const x = a.bands.get(b.band) ?? { full: emptyGateZSums(), cleaned: emptyGateZSums() };
         addGateZSums(x.full, b.full.sums);
@@ -177,7 +197,7 @@ const pct = (x: number, d = 2) => `${(100 * x).toFixed(d)}%`;
 const fig = (f: VolumeBandStats) => `${String(f.windows).padStart(7)}  ${f.varGateZ.toFixed(3).padStart(6)}  ${pct(f.over2).padStart(6)}  ${pct(f.over3).padStart(6)}`;
 const weekday = (d: string) => ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(`${d}T00:00:00Z`).getUTCDay()];
 
-for (const arm of ARMS) {
+for (const arm of RUN_ARMS) {
   for (const clean of cleans) {
     const a = acc.get(`${arm.key}|${clean}`)!;
     console.log(`\n=== ${arm.key} (${arm.label}), clean = ${clean}: ${a.trials} trials, history windows removed ` +
@@ -210,12 +230,16 @@ for (const arm of ARMS) {
     console.log(`4. a steady-volume shift of ${SHIFT} over one window: caught ${i.detectedFull}/${i.trials} (${pct(i.detectedFull / Math.max(1, i.trials), 1)}) ` +
       `with the history as recorded, ${i.detectedCleaned}/${i.trials} (${pct(i.detectedCleaned / Math.max(1, i.trials), 1)}) cleaned; ` +
       `unplanted control ${pct(i.controlFull / Math.max(1, i.trials), 1)} / ${pct(i.controlCleaned / Math.max(1, i.trials), 1)}`);
+    // ROADMAP C10: how often the cap leaves the history whole (clean history only; printed on request so the default output is unchanged).
+    if ((historyTotal !== undefined || process.argv.includes("--declined")) && clean === "history") {
+      console.log(`5. history used whole (the rule would have removed more than the cap): ${a.declined}/${a.trials} trials (${pct(a.declined / Math.max(1, a.trials), 1)})`);
+    }
   }
 }
 console.log("\nReading, fixed before any recorded day was run (2026-11-02 (2), historyMixReading on the reference cleaning): supported = the " +
   "ordinary var z widens by ≥ 0.15 when cleaned AND the most contaminated bin (≥ 0.1) is narrower than the least; not supported = widens by < 0.05; " +
   "overshoot = the cleaned null went liberal (var > 1.25 or |z|≥3 > 0.8%)");
-for (const arm of ARMS) {
+for (const arm of RUN_ARMS) {
   const a = acc.get(`${arm.key}|reference`);
   if (a === undefined) continue;
   const bands = [...a.bands.entries()].map(([band, x]) => ({ band, full: bandFigures(band, x.full), cleaned: bandFigures(band, x.cleaned) }));

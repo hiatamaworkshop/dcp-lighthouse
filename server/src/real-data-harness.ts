@@ -2075,6 +2075,8 @@ export interface HistoryMixResult {
   meanContamination: number;
   historyWindows: number;
   removedHistoryWindows: number;
+  /** clean "history" only: trials whose history was used whole because removing the band's outsiders would have taken more than maxRemovedShare. */
+  declinedTrials: number;
   /** Every trial pooled, by the observation window's volume band. */
   bands: HistoryMixBand[];
   /** Ordinary-volume windows by how much of the trial's history was off ordinary volume. */
@@ -2152,7 +2154,7 @@ export function runHistoryMixCalibration(
   const edges = opts.contaminationBins ?? CONTAMINATION_BINS;
   const bins = edges.slice(0, -1).map((from, i) => ({ from, to: edges[i + 1], trials: 0, full: emptyGateZSums(), cleaned: emptyGateZSums() }));
   const out: HistoryMixResult = {
-    trials: 0, unusableReference: 0, blindByGap: blind, meanContamination: 0, historyWindows: 0, removedHistoryWindows: 0, bands: [], bins: [], byDay: [],
+    trials: 0, unusableReference: 0, blindByGap: blind, meanContamination: 0, historyWindows: 0, removedHistoryWindows: 0, declinedTrials: 0, bands: [], bins: [], byDay: [],
   };
   const days = new Map<string, { trials: number; contamination: number; full: GateZSums; cleaned: GateZSums }>();
   const inj = opts.inject;
@@ -2177,8 +2179,9 @@ export function runHistoryMixCalibration(
     const refCounts = ref.windows.map((w) => w.count).sort((a, b) => a - b);
     const refMedian = refCounts.length > 0 ? refCounts[refCounts.length >> 1] : 0;
     // "history": the shipped rule (comparison.ts), against the median of the whole history, not of this trial's reference.
-    const kept = clean === "history"
-      ? cleanHistoryByMedian(history, { band: [lo, hi], maxRemovedShare: opts.maxRemovedShare ?? Infinity }).history.windows
+    const byMedian = clean === "history" ? cleanHistoryByMedian(history, { band: [lo, hi], maxRemovedShare: opts.maxRemovedShare ?? Infinity }) : undefined;
+    const kept = byMedian !== undefined
+      ? byMedian.history.windows
       : history.windows.filter((w) => !offBand(ratios !== undefined ? ratios.get(w.windowStart) : refMedian > 0 ? w.count / refMedian : undefined));
     const cleanedHistory: LensResult = { ...history, windows: kept };
     const full = curator.curate(obs, ref, { history });
@@ -2189,6 +2192,7 @@ export function runHistoryMixCalibration(
     const cleaned = curator.curate(obs, ref, { history: cleanedHistory });
     const contamination = history.windows.length > 0 ? (history.windows.length - kept.length) / history.windows.length : 0;
     out.trials++;
+    if (byMedian?.cleaning.declined === true) out.declinedTrials++;
     contaminationSum += contamination;
     out.historyWindows += history.windows.length;
     out.removedHistoryWindows += history.windows.length - kept.length;
@@ -2780,4 +2784,15 @@ export function synthesizeStream(o: SyntheticOptions): LoadedStream {
     events.push({ ts: t, value, keys: { wiki, type: "edit", namespace: "0" } });
   }
   return { events, gaps: [] };
+}
+
+/**
+ * The `historyMs` of runHistoryMixCalibration (windows BEFORE the reference) for a history of `totalMs`
+ * counted back from the observation's start with the reference INSIDE it — the shape production's window
+ * summaries have (`HISTORY_WINDOW_MS` = 1 h from the newest window, ROADMAP C10). undefined when nothing is
+ * left before the reference (the reference alone fills the history, df 1) or the rest is not a whole number of windows.
+ */
+export function historyMsForTotal(totalMs: number, spanMs: number, windowMs: number): number | undefined {
+  const before = totalMs - spanMs;
+  return before > 0 && before % windowMs === 0 ? before : undefined;
 }

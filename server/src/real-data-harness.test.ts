@@ -51,6 +51,7 @@ import {
   flipBinaryWindow,
   runSensitivityCheck,
   runHistoryMixCalibration,
+  historyMsForTotal,
   historyMixReading,
   stage5HoldoutRefusal,
   stage5Verdict,
@@ -934,5 +935,31 @@ describe("step 1 (2026-11-02 (2)): what the gate can see, and what the history d
     const trailing = runHistoryMixCalibration(withBatches, { ...arm, clean: "trailing" });
     assert.ok(trailing.removedHistoryWindows < r.removedHistoryWindows / 2);
     assert.ok(ordinary(trailing).cleaned.varGateZ < 0.5);
+  });
+
+  it("C10: a history counted back from the observation with the reference inside it, as production keeps it", () => {
+    const W = 10_000;
+    const SPAN = 300_000;
+    // 1 h in total, 300 s of it the reference: 3300 s = 330 windows before the reference; V-a's 60 min reference fills all of 1 h.
+    assert.equal(historyMsForTotal(3_600_000, SPAN, W), 3_300_000);
+    assert.equal(historyMsForTotal(3_600_000, 3_600_000, 60_000), undefined, "the reference alone fills the history");
+    assert.equal(historyMsForTotal(7_200_000, 3_600_000, 60_000), 3_600_000, "V-a needs more than 1 h: 60 windows before its reference at 2 h");
+    assert.equal(historyMsForTotal(3_600_000, SPAN, 70_000), undefined, "not a whole number of windows");
+    // The length reaches the scoring: a trial's history holds (historyMs + span) / window windows.
+    const run = (historyMs: number) => runHistoryMixCalibration(base, { ...arm, historyMs });
+    const long = run(24 * SPAN);
+    const short = run(historyMsForTotal(3_600_000, SPAN, W)!);
+    assert.ok(short.trials > 100 && long.trials > 100);
+    // (the first trials of the stream have less history than that, so the mean sits a little under the cap)
+    const perShort = short.historyWindows / short.trials;
+    const perLong = long.historyWindows / long.trials;
+    assert.ok(perShort <= 3_600_000 / W && perShort > 0.9 * (3_600_000 / W) - 20, `short ${perShort}`);
+    assert.ok(perLong <= (24 * SPAN + SPAN) / W && perLong > 1.8 * perShort, `long ${perLong}, short ${perShort}`);
+    // The share of trials whose history the cap left whole is counted (history clean only; none without a cap).
+    const uncapped = runHistoryMixCalibration(withBatches, { ...arm, clean: "history" });
+    const tight = runHistoryMixCalibration(withBatches, { ...arm, clean: "history", maxRemovedShare: 0.05 });
+    assert.equal(uncapped.declinedTrials, 0);
+    assert.ok(tight.declinedTrials > 0 && tight.declinedTrials < tight.trials, `${tight.declinedTrials}/${tight.trials}`);
+    assert.equal(runHistoryMixCalibration(withBatches, arm).declinedTrials, 0, "other readings never decline");
   });
 });
