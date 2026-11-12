@@ -275,11 +275,12 @@ const LATE_ARRIVAL_DAYS = 2;
 
 const utcDayOf = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
-async function loadDayFiles(
-  dir: string,
-  range: { fromDay?: string; toDay?: string },
-  toEvent: (raw: Record<string, unknown>) => LensEvent,
-): Promise<LoadedStream> {
+/**
+ * The day files a range reads, in order: the in-range days, then the late-arrival days after `toDay`
+ * (`late`: keep only events whose `ts` is inside the range). The one place that decides which files stand
+ * for a range — the loaders and the stage 5 coverage check (range-coverage.ts) share it.
+ */
+export function listDayFiles(dir: string, range: { fromDay?: string; toDay?: string }): Array<{ name: string; late: boolean }> {
   // The collector files an event under the UTC day it ARRIVED, not the day of its
   // `ts`: after an outage across midnight the backfill lands in the next day's file
   // (2026-10-21's second half sat in 2026-10-22.jsonl). So the files just after
@@ -308,10 +309,18 @@ async function loadDayFiles(
     if (shadowed) console.warn(`[real-data-harness] ${f} skipped: the raw day file exists (interrupted rollover)`);
     return !shadowed;
   });
+  return readable.map((f) => ({ name: f, late: isLate(f.slice(0, 10)) }));
+}
+
+async function loadDayFiles(
+  dir: string,
+  range: { fromDay?: string; toDay?: string },
+  toEvent: (raw: Record<string, unknown>) => LensEvent,
+): Promise<LoadedStream> {
+  const readable = listDayFiles(dir, range);
   const events: LensEvent[] = [];
   const rangeHi = range.toDay === undefined ? Infinity : Date.parse(`${range.toDay}T00:00:00Z`) + DAY_MS;
-  for (const f of readable) {
-    const late = isLate(f.slice(0, 10));
+  for (const { name: f, late } of readable) {
     const raw = createReadStream(join(dir, f));
     const input = f.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
     for await (const line of createInterface({ input, crlfDelay: Infinity })) {

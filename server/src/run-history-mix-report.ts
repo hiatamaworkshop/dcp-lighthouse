@@ -44,6 +44,7 @@ import {
   type GateZSums,
   type VolumeBandStats,
 } from "./real-data-harness.js";
+import { checkRangeCoverage, describeCoverage, rangeCoverageRefusal } from "./range-coverage.js";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -107,7 +108,17 @@ interface Acc {
 }
 const acc = new Map<string, Acc>();
 
+// ROADMAP C9: the look (and its rehearsal) first checks, from event times only, that the whole range is there;
+// a collector that was down or is still catching up would otherwise leave an unrecorded hole at the range's ends.
+const coverage = preregistered ? await checkRangeCoverage(dir, fromDay, toDay) : undefined;
+const coverageRefusal = coverage === undefined ? undefined : rangeCoverageRefusal(coverage, fromDay, toDay);
+if (coverage !== undefined && coverageRefusal !== undefined) {
+  console.error(describeCoverage(coverage, fromDay, toDay).join("\n"));
+  console.error(coverageRefusal);
+  process.exit(2);
+}
 if (holdout) console.log(`STAGE 5 HOLDOUT ${fromDay}…${toDay} — the single look (ROADMAP_BRIEF.md 2026-11-02 (11))`);
+if (coverage !== undefined) console.log(describeCoverage(coverage, fromDay, toDay).join("\n"));
 console.log(`step 1b (H-mix): ordinary-volume gate z under the variogram null with the history as recorded vs cleaned of ` +
   `off-ordinary-volume windows, observation days ${fromDay}…${toDay} (loaded from ${loadFirst}); history 24 spans; clean ${cleans.join(", ")}`);
 const spentNote = spentHoldoutNote(loadFirst, toDay);
