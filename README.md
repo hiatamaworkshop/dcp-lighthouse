@@ -297,9 +297,12 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **試験結果の実流に移る** (2026-11-17) — Wikimedia の保留週の繰り返しは第 5 段階で終わり、次の実データを公開 CI の試験結果 (Kubernetes の Prow、過去 90 日・試験単位の junit) にした。
       取り込み (`prow-import.ts`)・`test_result:v1` への変換 (`prow-events.ts`)・形の調査 (`prow-shape.ts`)。3 ジョブ・21 日で 8.4 万事象/日、**失敗は 1 万 3 千件に 1 件・日周なし**。
       **本番の 10 s 窓と 1 s 窓は失敗のある窓をほぼ採点できない** (0/77・0〜2/113)。事象の少なさではなく、参照が全部 pass で分散 0 になり使えないため。1 時間窓 × 参照 30 窓なら 122/123。詳細は ROADMAP_BRIEF.md 2026-11-17 (2)〜(4)
-- [ ] **次** (判断待ち、台帳 C12・C13・C18): 採点できる構成 (1 時間窓) を本番の配線に通す・既知の回帰を真値にして検出を数える・全 pass の参照でも採点できる帰無。仮想ストリームの常設 (F3) は未着手
+- [x] **試験結果を本番の配線に通す** (2026-11-17、C12) — 記録済みの事象を `RetentionBuffer` → `WindowHistory` → `Comparator` に index.ts と同じクラス・オプションで流す (`prow-replay.ts`、差し替えるのは時計だけ)。
+      **出荷時の構成 (10 s・1 s 窓) は問うた package の 99.8〜100% が盲目**。同じ部品のまま 1 時間窓 × 参照 30 窓・34 時間級の保持にすると盲目 1.2%・失敗の無い区間の警報 0/213 で、
+      単発の失敗には反応せず 1 時間に 2 件以上で反応する (7/11・2/2)。それが回帰か flaky かは真値が無く、まだ言えない。詳細は ROADMAP_BRIEF.md 2026-11-17 (5)
+- [ ] **次** (判断待ち、台帳 C13・C19・C18): 同じ commit での合否の割れ・commit をまたぐ失敗から真値を導出して検出を数える・試験の流れ向けの本番の定数・全 pass の参照でも採点できる帰無。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 671 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 675 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 
@@ -319,6 +322,7 @@ node dist/run-history-mix-report.js --from 2026-10-26 --to 2026-11-01 # 1b: H-mi
 node dist/run-wiki-retention.js            # 日別 gz の保持 (既定は dry run、--apply で削除)
 node dist/run-prow-import.js --from 2026-10-26 --to 2026-11-15        # Kubernetes の Prow の試験結果を日別に取り込む (data/prow/、取り込み済みの日は飛ばす)
 node dist/run-prow-shape-report.js --from 2026-10-26 --to 2026-11-15  # 試験結果の実流の形の調査 (判定なし)
+node dist/run-prow-replay-report.js --from 2026-10-26 --to 2026-11-15 # 試験結果を本番と同じ部品の並びに流す (出荷時の構成と、窓・保持を伸ばした構成。判定なし)
 node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
 node dist/run-otel-flag-schedule.js        # H4 の障害フラグ切替 (既定: paymentFailure 50%、休止 10%、≒ 24 h)。真値は data/otel/flags.jsonl
 node dist/run-otel-report.js --from <day> --to <day>   # H4。p=1 の配線確認が通らなければ判定を出さない (判定日 10-03 は使用済み)
