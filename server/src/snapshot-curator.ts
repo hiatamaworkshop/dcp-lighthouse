@@ -1381,7 +1381,7 @@ interface Lattice {
   step: number;
 }
 
-interface RefStats {
+export interface RefStats {
   mean: number;
   /** Bessel-corrected pooled variance over every retained event, weighted by
    * each window's own count — NaN when fewer than 2 events are pooled (spread
@@ -1809,7 +1809,7 @@ function logGamma(x: number): number {
  *     occurrence, and using the frequency form `ΣW - 1` there would understate
  *     the variance of a heavily decayed pool.
  */
-function poolStats(windows: WindowStat[]): RefStats {
+export function poolStats(windows: WindowStat[]): RefStats {
   const count = windows.reduce((s, w) => s + w.count, 0);
   if (count === 0) return { mean: 0, variance: 0, count: 0, effectiveN: 0 };
 
@@ -1859,7 +1859,7 @@ function poolStats(windows: WindowStat[]): RefStats {
  * worst case, reached this time on the reference side instead of the
  * observation side.
  */
-function isReferenceUsable(ref: RefStats): boolean {
+export function isReferenceUsable(ref: RefStats): boolean {
   return ref.effectiveN >= MIN_VALID_COUNT && Number.isFinite(ref.variance) && ref.variance > 0;
 }
 

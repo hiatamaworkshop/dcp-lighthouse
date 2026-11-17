@@ -294,10 +294,12 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **第 5 段階** (2026-11-02 事前登録、2026-11-17 集計) — 主張 H-clean を封印週 **11-09〜11-15** で 1 回だけ読んだ。**判定は SUPPORTED**: 平常の量の var z は
       V-a 1.044 (履歴そのまま 0.882)・10 s 腕 1.005 (同 0.769)、|z|≥3 は 0.71%・0.45%、盲目の試行 0。**除いたから帯に入ったと言えるのは 10 s 腕だけ** (V-a は履歴そのままも帯の内)。
       ハーネスの 24 区間の構成での回帰確認で、本番 (履歴 1 時間) で効く証拠ではない。本番は変えず `history_clean` は opt-in のまま。封印週は使用済み。詳細は ROADMAP_BRIEF.md 2026-11-17
-- [ ] **次**: 本来の対象である試験結果の実流に移る (2026-11-17 決定)。公開 CI の試験結果を実地で確かめてデータ源を決め (台帳 C16)、取り込んで `test_result:v1` に変換し形を調べる (C17)。
-      その後に本番の配線への再生 (C12)・既知の回帰での検出 (C13)。Wikimedia の保留週の繰り返しは第 5 段階で終わり。仮想ストリームの常設 (F3) は未着手
+- [x] **試験結果の実流に移る** (2026-11-17) — Wikimedia の保留週の繰り返しは第 5 段階で終わり、次の実データを公開 CI の試験結果 (Kubernetes の Prow、過去 90 日・試験単位の junit) にした。
+      取り込み (`prow-import.ts`)・`test_result:v1` への変換 (`prow-events.ts`)・形の調査 (`prow-shape.ts`)。3 ジョブ・21 日で 8.4 万事象/日、**失敗は 1 万 3 千件に 1 件・日周なし**。
+      **本番の 10 s 窓と 1 s 窓は失敗のある窓をほぼ採点できない** (0/77・0〜2/113)。事象の少なさではなく、参照が全部 pass で分散 0 になり使えないため。1 時間窓 × 参照 30 窓なら 122/123。詳細は ROADMAP_BRIEF.md 2026-11-17 (2)〜(4)
+- [ ] **次** (判断待ち、台帳 C12・C13・C18): 採点できる構成 (1 時間窓) を本番の配線に通す・既知の回帰を真値にして検出を数える・全 pass の参照でも採点できる帰無。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 647 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 671 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 
@@ -315,6 +317,8 @@ node dist/run-f1-report.js --from 2026-10-06 --to 2026-10-10          # F1: 直�
 node dist/run-sensitivity-report.js --from 2026-10-26 --to 2026-11-01 # 1a: 名乗る MDE を埋め込みで検算 (腕ごと)
 node dist/run-history-mix-report.js --from 2026-10-26 --to 2026-11-01 # 1b: H-mix (履歴の構成の変化と平常の量の保守性) の診断。--history-total-ms で本番の履歴の長さを測る
 node dist/run-wiki-retention.js            # 日別 gz の保持 (既定は dry run、--apply で削除)
+node dist/run-prow-import.js --from 2026-10-26 --to 2026-11-15        # Kubernetes の Prow の試験結果を日別に取り込む (data/prow/、取り込み済みの日は飛ばす)
+node dist/run-prow-shape-report.js --from 2026-10-26 --to 2026-11-15  # 試験結果の実流の形の調査 (判定なし)
 node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
 node dist/run-otel-flag-schedule.js        # H4 の障害フラグ切替 (既定: paymentFailure 50%、休止 10%、≒ 24 h)。真値は data/otel/flags.jsonl
 node dist/run-otel-report.js --from <day> --to <day>   # H4。p=1 の配線確認が通らなければ判定を出さない (判定日 10-03 は使用済み)
