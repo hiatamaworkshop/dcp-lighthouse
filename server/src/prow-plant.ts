@@ -76,6 +76,36 @@ export function seededRandom(seed: number): () => number {
   };
 }
 
+/** FNV-1a of a string: stable seeds per job and per start build. */
+export const hashString = (s: string): number => {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
+  return h;
+};
+
+/** History fed before a plant's first build: more than the longest arm's freshness zone (1 h × 34). */
+export const PLANT_LEAD_MS = 36 * 3_600_000;
+/** Evaluated after the last planted build: every window holding a planted failure is observed liveWindows times. */
+export const PLANT_TAIL_MS = 5 * 3_600_000;
+
+/**
+ * The start builds of a job's plants (C20): `perJob` drawn at random, without
+ * replacement, from the builds that are the first on their commit, begin
+ * PLANT_LEAD_MS after `fromMs`, and leave room for `maxN` builds (and the rest
+ * of the last one's commit) plus PLANT_TAIL_MS before `toMs`. Time order.
+ */
+export function pickPlantStarts(ofJob: readonly ProwBuild[], job: string, fromMs: number, toMs: number, maxN: number, perJob: number, seed: number): ProwBuild[] {
+  const lastOf = (i: number): ProwBuild => plantExtent(ofJob, i, maxN).at(-1)!;
+  const candidates = ofJob.filter(
+    (b, i) => isCommitStart(ofJob, i) && b.scheduledMs >= fromMs + PLANT_LEAD_MS && i + maxN < ofJob.length && lastOf(i).scheduledMs + PLANT_TAIL_MS <= toMs,
+  );
+  const rand = seededRandom(seed ^ hashString(job));
+  const picks: ProwBuild[] = [];
+  const pool = [...candidates];
+  while (picks.length < perJob && pool.length > 0) picks.push(pool.splice(Math.floor(rand() * pool.length), 1)[0]!);
+  return picks.sort((a, b) => a.scheduledMs - b.scheduledMs);
+}
+
 /** `k` distinct items drawn without replacement (all of them when there are fewer). */
 function draw<T>(items: readonly T[], k: number, rand: () => number): T[] {
   const a = [...items];

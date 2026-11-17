@@ -306,9 +306,11 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **記録済みの流れに回帰を植えて検出を測る** (2026-11-17、C20) — 開始ビルドで pass した試験を 1・5・1 area 全部、commit の最初のビルドから 3 / 12 ビルド落とし (`prow-plant.ts`、規則は再生の前に固定)、植えない再生との差だけを数える。
       1 時間窓 × 参照 30 窓 (3 ジョブを 1 本) で **5 試験の回帰は 60/60 を中央値 0.4〜0.6 時間**で拾う。**1 試験だけの回帰は 1 時間ごとのジョブで 2〜3 割** (窓に失敗 1 件 = 平常の flaky と同じ大きさ)。ジョブ別・area 別に分けると悪くなる。
       C13 の規則は植えた回帰を 360/360 regression と呼ぶ。前提として `RetentionBuffer.evict` の先頭 `splice` を除いた (出力はビット一致)。詳細は ROADMAP_BRIEF.md 2026-11-17 (7)
-- [ ] **次** (判断待ち、台帳 C21・C19・C18): 1 つの試験が続けて落ちることを拾う経路 (C13 の規則を流れに沿って走らせる)・試験の流れ向けの本番の定数・全 pass の参照でも採点できる帰無。merge 前の検査の取り込みは C21 の後。仮想ストリームの常設 (F3) は未着手
+- [x] **1 つの試験が続けて落ちることを流れに沿って名乗る** (2026-11-17、C21) — C13 の規則から未来を除いた検出器 (`prow-persist.ts`、規則は計測の前に固定): 同じ試験が連続する 2 ビルドで落ち、どちらの commit でも pass が無ければ 2 ビルド目で名乗る。
+      植えた回帰は 180/180 (窓の統計で拾えなかった 1 試験の回帰も。ただし定義と同じ形なので自明に近い)、遅れは中央値 1.2〜1.6 時間 (2 ビルド分)。**記録 89 日では名乗り 2 件 (regression 1・誤 1)**。詳細は ROADMAP_BRIEF.md 2026-11-17 (8)
+- [ ] **次** (判断待ち、台帳 C22・C19): 持続の名乗りを灯台の出力にするか・置き場所 (C22)。試験の流れ向けの本番の構成と「同時多発」の名乗り (C19、決定済み・着手可)。全 pass の参照の帰無 (C18) は保留。merge 前の検査の取り込みは C22 の判断の後。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 694 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 703 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 
@@ -331,6 +333,7 @@ node dist/run-prow-shape-report.js --from 2026-10-26 --to 2026-11-15  # 試験�
 node dist/run-prow-replay-report.js --from 2026-10-26 --to 2026-11-15 # 試験結果を本番と同じ部品の並びに流す (出荷時の構成と、窓・保持を伸ばした構成。判定なし)
 node --max-old-space-size=6144 dist/run-prow-truth-report.js --from 2026-08-19 --to 2026-11-15 --arms 1h-fresh,1h-fresh-by-job  # 導出した真値 (flaky / regression / isolated) と、再生の結果との突き合わせ
 node --max-old-space-size=6144 dist/run-prow-plant-report.js --from 2026-10-26 --to 2026-11-15 --per-job 20  # 回帰を植えて検出を測る (C20、約 20 分)
+node --max-old-space-size=6144 dist/run-prow-persist-report.js --from 2026-08-19 --to 2026-11-15 --plant-from 2026-10-26 --plant-to 2026-11-15  # 試験ごとの持続の名乗り: 記録での件数と、C20 の植え込みでの検出 (C21、約 3 分)
 node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
 node dist/run-otel-flag-schedule.js        # H4 の障害フラグ切替 (既定: paymentFailure 50%、休止 10%、≒ 24 h)。真値は data/otel/flags.jsonl
 node dist/run-otel-report.js --from <day> --to <day>   # H4。p=1 の配線確認が通らなければ判定を出さない (判定日 10-03 は使用済み)

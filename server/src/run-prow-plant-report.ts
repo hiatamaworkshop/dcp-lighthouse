@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 import { DEFAULT_PROW_JOBS, loadProwRange, type ProwBuild } from "./prow-import.js";
 import { buildsToEvents, prowLensEvent, type ProwEvent } from "./prow-events.js";
 import { REPLAY_ARMS, replayThroughShippedWiring, type ReplayEvaluation, type ReplayWiring } from "./prow-replay.js";
-import { PLANT_SIZES, applyPlant, choosePlant, isCommitStart, plantClasses, plantExtent, plantedFailures, scorePlant, seededRandom, type PlantScore, type PlantSize } from "./prow-plant.js";
+import { PLANT_LEAD_MS, PLANT_SIZES, PLANT_TAIL_MS, applyPlant, choosePlant, hashString, pickPlantStarts, plantClasses, plantExtent, plantedFailures, scorePlant, seededRandom, type PlantScore, type PlantSize } from "./prow-plant.js";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -20,17 +20,10 @@ function arg(name: string): string | undefined {
 
 const HOUR = 3_600_000;
 const DURATIONS = [3, 12];
-/** History fed before the first planted build: more than the longest arm's freshness zone (1 h × 34). */
-const LEAD_MS = 36 * HOUR;
-/** Evaluated after the last planted build: every window holding a planted failure is observed liveWindows times. */
-const TAIL_MS = 5 * HOUR;
+const LEAD_MS = PLANT_LEAD_MS;
+const TAIL_MS = PLANT_TAIL_MS;
 const DEFAULT_ARMS = ["1h-fresh", "1h-fresh-by-job", "1h-fresh-by-area", "10min-fresh"];
 
-const hashString = (s: string): number => {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
-  return h;
-};
 const quant = (xs: number[], p: number): number => {
   const s = [...xs].sort((a, b) => a - b);
   return s[Math.min(s.length - 1, Math.floor(p * s.length))]!;
@@ -96,14 +89,7 @@ function main(): void {
   for (const job of jobs) {
     const ofJob = builds.filter((b) => b.job === job);
     const lastOf = (i: number): ProwBuild => plantExtent(ofJob, i, maxN).at(-1)!;
-    const candidates = ofJob.filter(
-      (b, i) => isCommitStart(ofJob, i) && b.scheduledMs >= fromMs + LEAD_MS && i + maxN < ofJob.length && lastOf(i).scheduledMs + TAIL_MS <= toMs,
-    );
-    const rand = seededRandom(seed ^ hashString(job));
-    const picks: ProwBuild[] = [];
-    const pool = [...candidates];
-    while (picks.length < perJob && pool.length > 0) picks.push(pool.splice(Math.floor(rand() * pool.length), 1)[0]!);
-    picks.sort((a, b) => a.scheduledMs - b.scheduledMs);
+    const picks = pickPlantStarts(ofJob, job, fromMs, toMs, maxN, perJob, seed);
 
     for (const start of picks) {
       const at = ofJob.indexOf(start);
