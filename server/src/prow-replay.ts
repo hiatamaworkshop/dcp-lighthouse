@@ -121,6 +121,15 @@ export interface ReplayTally {
   failingWindowDetail: Map<number, { scored: boolean; flagged: boolean }>;
 }
 
+/** One asked boundary, as an outside reader sees it (C20 reads which windows a downward tile covered). */
+export interface ReplayEvaluation {
+  /** The grid boundary: when the live view would show this package. */
+  t: number;
+  blind: boolean;
+  /** Downward tiles (dip, step_down) of a scored package; empty when blind. */
+  downs: Array<{ regionStart: number; regionEnd: number; group?: string }>;
+}
+
 function lowerBound(a: Float64Array, x: number): number {
   let lo = 0;
   let hi = a.length;
@@ -136,9 +145,16 @@ function lowerBound(a: Float64Array, x: number): number {
  * `events` in time order (pass 1, fail 0). Evaluates every grid boundary t
  * with fromMs + liveWindows·W ≤ t ≤ toMs, after feeding every event before t.
  * Events before fromMs are fed too — they are the stream's past, which a
- * running process would hold.
+ * running process would hold. `onEvaluation`, when given, sees every asked
+ * boundary (not the empty or failed ones); it does not change the tally.
  */
-export function replayThroughShippedWiring(events: readonly LensEvent[], fromMs: number, toMs: number, wiring: ReplayWiring): ReplayTally {
+export function replayThroughShippedWiring(
+  events: readonly LensEvent[],
+  fromMs: number,
+  toMs: number,
+  wiring: ReplayWiring,
+  onEvaluation?: (ev: ReplayEvaluation) => void,
+): ReplayTally {
   const W = wiring.windowMs;
   const N = wiring.liveWindows;
   const buffer = new RetentionBuffer<LensEvent>((raw) => raw, {
@@ -220,11 +236,17 @@ export function replayThroughShippedWiring(events: readonly LensEvent[], fromMs:
     if (!pkg.referenceUsable) {
       tally.blind++;
       if (failingHere.length > 0) tally.blindWithFailure++;
+      onEvaluation?.({ t, blind: true, downs: [] });
       continue;
     }
     tally.scored++;
     const alarms = pkg.tiles.filter((x) => ALARM_TAGS.has(x.shapeTag));
     const downs = alarms.filter((x) => DOWN_TAGS.has(x.shapeTag));
+    onEvaluation?.({
+      t,
+      blind: false,
+      downs: downs.map((d) => ({ regionStart: d.regionStart, regionEnd: d.regionEnd, ...(d.group !== undefined ? { group: d.group } : {}) })),
+    });
     if (failingHere.length > 0) {
       tally.withFailure.n++;
       if (alarms.length > 0) tally.withFailure.alarmed++;

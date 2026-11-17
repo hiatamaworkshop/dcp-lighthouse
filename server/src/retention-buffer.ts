@@ -63,9 +63,34 @@ export interface RetentionBufferOptions {
   now?: () => number;
 }
 
+/**
+ * Drop the first `drop` live entries of a head-indexed array: advance the head,
+ * and compact only once the dead prefix is both large and the majority — so a
+ * long retention (C19: ~120k events over 34 h) costs amortized O(1) per event
+ * instead of moving the whole array on every arrival (the old splice(0, n)).
+ * Returns the dropped entries.
+ */
+function dropHead(q: { arr: LensEvent[]; head: number }, drop: number): LensEvent[] {
+  const out = q.arr.slice(q.head, q.head + drop);
+  q.head += drop;
+  if (q.head >= 1024 && q.head * 2 >= q.arr.length) {
+    q.arr = q.arr.slice(q.head);
+    q.head = 0;
+  }
+  return out;
+}
+
 export class RetentionBuffer<T = unknown> {
-  private readonly events: LensEvent[] = [];
-  private readonly referenceEvents: LensEvent[] = [];
+  /** Freshness zone; live entries are arr[head..]. */
+  private readonly fresh: { arr: LensEvent[]; head: number } = { arr: [], head: 0 };
+  /** Reference zone; live entries are arr[head..]. */
+  private readonly ref: { arr: LensEvent[]; head: number } = { arr: [], head: 0 };
+  private get events(): LensEvent[] {
+    return this.fresh.head === 0 ? this.fresh.arr : this.fresh.arr.slice(this.fresh.head);
+  }
+  private get referenceEvents(): LensEvent[] {
+    return this.ref.head === 0 ? this.ref.arr : this.ref.arr.slice(this.ref.head);
+  }
   private readonly extract: EventExtractor<T>;
   private retentionWindowMs: number;
   private referenceWindowMs?: number;
@@ -100,7 +125,7 @@ export class RetentionBuffer<T = unknown> {
   readonly observe = (raw: T, schemaId: string): void => {
     const ev = this.extract(raw, schemaId);
     if (ev === null) return;
-    this.events.push(ev);
+    this.fresh.arr.push(ev);
     this.evict();
   };
 
@@ -109,12 +134,13 @@ export class RetentionBuffer<T = unknown> {
     // Anchor eviction to the newest event's ts, not wall-clock: replayed/late
     // events should not be evicted just because wall time moved on. The freshness
     // zone is "the last retentionWindowMs of stream time we have seen".
-    const newest = this.events.length > 0 ? this.events[this.events.length - 1].ts : this.now();
+    const { arr, head } = this.fresh;
+    const newest = arr.length > head ? arr[arr.length - 1].ts : this.now();
     const cutoff = newest - this.retentionWindowMs;
     let drop = 0;
-    while (drop < this.events.length && this.events[drop].ts < cutoff) drop++;
+    while (head + drop < arr.length && arr[head + drop].ts < cutoff) drop++;
     if (drop > 0) {
-      const aged = this.events.splice(0, drop);
+      const aged = dropHead(this.fresh, drop);
       for (const listener of this.evictListeners) listener(aged, cutoff);
       if (this.thinningRatio !== undefined) this.absorbIntoReference(aged);
     }
@@ -155,7 +181,7 @@ export class RetentionBuffer<T = unknown> {
     for (const e of aged) {
       this.thinCounter++;
       if (this.thinCounter % ratio === 0) {
-        this.referenceEvents.push({ ...e, weight: ratio });
+        this.ref.arr.push({ ...e, weight: ratio });
       }
     }
     this.evictReference();
@@ -163,22 +189,23 @@ export class RetentionBuffer<T = unknown> {
 
   /** Drop reference-zone events older than referenceWindowMs, same anchoring as evict(). */
   private evictReference(): void {
-    if (this.referenceWindowMs === undefined || this.referenceEvents.length === 0) return;
-    const newest = this.referenceEvents[this.referenceEvents.length - 1].ts;
+    const { arr, head } = this.ref;
+    if (this.referenceWindowMs === undefined || arr.length === head) return;
+    const newest = arr[arr.length - 1].ts;
     const cutoff = newest - this.referenceWindowMs;
     let drop = 0;
-    while (drop < this.referenceEvents.length && this.referenceEvents[drop].ts < cutoff) drop++;
-    if (drop > 0) this.referenceEvents.splice(0, drop);
+    while (head + drop < arr.length && arr[head + drop].ts < cutoff) drop++;
+    if (drop > 0) dropHead(this.ref, drop);
   }
 
   /** Number of retained events (freshness zone only — matches what isScorable's count reads). */
   size(): number {
-    return this.events.length;
+    return this.fresh.arr.length - this.fresh.head;
   }
 
   /** Number of retained events in the reference zone (0 if not configured). */
   referenceSize(): number {
-    return this.referenceEvents.length;
+    return this.ref.arr.length - this.ref.head;
   }
 
   /** Current freshness-zone width. */

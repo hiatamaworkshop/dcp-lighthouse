@@ -64,6 +64,27 @@ describe("RetentionBuffer — tap ingestion + eviction", () => {
     buf.observe({ ts: 0, v: 1, $schema: "s" }, "s");
     assert.equal(buf.size(), 0);
   });
+
+  it("keeps the same contents across head compaction in both zones (C19: long retention without per-event splice)", () => {
+    // 1 event per ms over 20k ms with a 1000 ms freshness zone and 3000 ms
+    // reference zone: both heads pass the compaction threshold many times.
+    const buf = new RetentionBuffer<RawRec>(extractor, { retentionWindowMs: 1000, referenceWindowMs: 3000, thinningRatio: 2 });
+    const aged: number[] = [];
+    buf.onEvict((evs) => aged.push(...evs.map((e) => e.ts)));
+    const N = 20_000;
+    for (let ts = 0; ts < N; ts++) buf.observe({ ts, v: ts % 7, $schema: "s" }, "s");
+    // Fresh zone: exactly [N-1-1000, N-1].
+    assert.equal(buf.size(), 1001);
+    assert.deepEqual(buf.freshSegment().map((e) => e.ts), Array.from({ length: 1001 }, (_, i) => N - 1001 + i));
+    // Every evicted event reached the listener once, in order.
+    assert.deepEqual(aged, Array.from({ length: N - 1001 }, (_, i) => i));
+    // Reference zone: every 2nd aged event, within 3000 ms of its own newest.
+    const ref = buf.segment(-Infinity, N - 1002);
+    const newestRef = ref[ref.length - 1]!.ts;
+    assert.ok(ref.every((e) => e.weight === 2 && e.ts >= newestRef - 3000 && e.ts % 2 === 1));
+    assert.equal(buf.referenceSize(), ref.length);
+    assert.equal(ref.length, 1501);
+  });
 });
 
 describe("RetentionBuffer — reference zone (ROADMAP L5 thinning, 2026-08-22)", () => {
