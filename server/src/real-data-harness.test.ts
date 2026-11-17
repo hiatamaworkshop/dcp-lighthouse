@@ -600,20 +600,19 @@ describe("holdouts: sealed until their single look, exploration after it (revisi
   });
 });
 
-describe("stage 5's holdout (2026-11-09…11-15, sealed 2026-11-02 before its data existed)", () => {
-  it("is one whole week, Monday to Sunday, and unspent", () => {
+describe("stage 5's holdout (2026-11-09…11-15, sealed 2026-11-02 before its data existed, spent 2026-11-17)", () => {
+  it("is one whole week, Monday to Sunday, and spent on its single look", () => {
     const h = HOLDOUTS.find((x) => x.name === "stage 5's holdout")!;
-    assert.equal(h.spentOn, undefined);
+    assert.equal(h.spentOn, "2026-11-17");
     assert.equal(new Date(`${h.from}T00:00:00Z`).getUTCDay(), 1, "starts on a Monday");
     assert.equal(new Date(`${h.to}T00:00:00Z`).getUTCDay(), 0, "ends on a Sunday");
     assert.equal((Date.parse(`${h.to}T00:00:00Z`) - Date.parse(`${h.from}T00:00:00Z`)) / 86_400_000, 6);
   });
-  it("shuts exploration out of any range touching it and leaves the days before it open", () => {
+  it("is exploration data after its look: read labelled, no longer shut", () => {
     assert.equal(explorationRangeRefusal("2026-11-02", "2026-11-08"), undefined);
-    for (const [from, to] of [["2026-11-08", "2026-11-09"], ["2026-11-10", "2026-11-12"], ["2026-11-15", "2026-11-20"], ["2026-11-01", "2026-11-30"]]) {
-      assert.match(explorationRangeRefusal(from, to) ?? "", /stage 5's holdout .* sealed/, `${from}…${to}`);
-    }
-    assert.equal(explorationRangeRefusal("2026-11-16", "2026-11-20"), undefined, "open again after the week (it is spent only by its single look)");
+    assert.equal(explorationRangeRefusal("2026-11-10", "2026-11-12"), undefined);
+    assert.match(spentHoldoutNote("2026-11-10", "2026-11-12") ?? "", /stage 5's holdout/);
+    assert.match(spentHoldoutNote("2026-11-10", "2026-11-12") ?? "", /verdict of 2026-11-17/);
   });
 });
 
@@ -622,11 +621,13 @@ describe("stage 5's single look (claim H-clean, 2026-11-02 (11))", () => {
   const after = Date.parse("2026-11-16T00:00:00Z");
 
   it("takes the look only on the sealed week, only once it is over, and only once", () => {
-    assert.equal(stage5HoldoutRefusal("2026-11-09", "2026-11-15", after), undefined);
-    assert.equal(stage5HoldoutRefusal("2026-11-09", "2026-11-15", after + 30 * DAY), undefined, "any time after the week");
-    assert.match(stage5HoldoutRefusal("2026-11-09", "2026-11-15", after - 1) ?? "", /still being collected/);
-    assert.match(stage5HoldoutRefusal("2026-11-09", "2026-11-14", after) ?? "", /reads exactly 2026-11-09…2026-11-15/);
-    assert.match(stage5HoldoutRefusal("2026-11-02", "2026-11-08", after) ?? "", /reads exactly/);
+    const sealed = HOLDOUTS.map((h) => (h.name === "stage 5's holdout" ? { ...h, spentOn: undefined } : h));
+    assert.equal(stage5HoldoutRefusal("2026-11-09", "2026-11-15", after, sealed), undefined);
+    assert.equal(stage5HoldoutRefusal("2026-11-09", "2026-11-15", after + 30 * DAY, sealed), undefined, "any time after the week");
+    assert.match(stage5HoldoutRefusal("2026-11-09", "2026-11-15", after) ?? "", /was spent on 2026-11-17/, "the real table: spent");
+    assert.match(stage5HoldoutRefusal("2026-11-09", "2026-11-15", after - 1, sealed) ?? "", /still being collected/);
+    assert.match(stage5HoldoutRefusal("2026-11-09", "2026-11-14", after, sealed) ?? "", /reads exactly 2026-11-09…2026-11-15/);
+    assert.match(stage5HoldoutRefusal("2026-11-02", "2026-11-08", after, sealed) ?? "", /reads exactly/);
     const spent = HOLDOUTS.map((h) => (h.name === "stage 5's holdout" ? { ...h, spentOn: "2026-11-16" } : h));
     assert.match(stage5HoldoutRefusal("2026-11-09", "2026-11-15", after, spent) ?? "", /was spent on 2026-11-16 — it had one look/);
   });

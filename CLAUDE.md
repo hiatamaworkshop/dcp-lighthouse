@@ -162,7 +162,7 @@ dcp-lighthouse/
       run-volume-channel-report.ts (C3: 量チャネルの z・構成の変化の捕捉) /
       range-coverage.ts (C9: 集計の前検査。範囲の端まで事象があるか・未確定の穴がないかを時刻だけで確かめ、足りなければ `--holdout` / `--rehearse` が拒否) /
       run-wiki-retention.ts (C6: 空き 100 GiB 未満で古い日別 gz を消す。既定は dry run・消した日は pruned.jsonl に記録され、その日に触れる範囲はハーネスが拒否)
-                                 ← 起動口 (第 1〜4 段階の保留は使用済みで --holdout は拒否。未使用の保留 = 第 5 段階 2026-11-09〜11-15 は封印で、範囲に触れる読みはレポートが拒否)
+                                 ← 起動口 (第 1〜4 段階の保留は使用済みで --holdout は拒否。第 5 段階 2026-11-09〜11-15 も 2026-11-17 に判定 (SUPPORTED) して使用済み。未使用の保留は無い)
   server/otel/
       otelcol-config-lighthouse.yml ← OTel Demo のコレクタ extras (traces → 受け口へ OTLP/JSON)
       compose.lighthouse.yaml    ← OTel Demo の compose 上書き (checkout の GC 空回り回避・負荷 50 HTTP ユーザ)

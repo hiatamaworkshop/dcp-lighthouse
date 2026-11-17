@@ -113,7 +113,7 @@ export const HOLDOUTS: readonly Holdout[] = [
   { name: "H3's holdout", from: H3_HOLDOUT_FROM_DAY, to: H3_HOLDOUT_TO_DAY, spentOn: "2026-10-14" },
   { name: "stage 3's holdout", from: STAGE3_HOLDOUT_FROM_DAY, to: STAGE3_HOLDOUT_TO_DAY, spentOn: "2026-10-22" },
   { name: "stage 4's holdout", from: STAGE4_HOLDOUT_FROM_DAY, to: STAGE4_HOLDOUT_TO_DAY, spentOn: "2026-11-02" },
-  { name: "stage 5's holdout", from: STAGE5_HOLDOUT_FROM_DAY, to: STAGE5_HOLDOUT_TO_DAY },
+  { name: "stage 5's holdout", from: STAGE5_HOLDOUT_FROM_DAY, to: STAGE5_HOLDOUT_TO_DAY, spentOn: "2026-11-17" },
 ];
 
 /**
