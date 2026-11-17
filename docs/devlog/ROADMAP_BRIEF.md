@@ -6787,3 +6787,31 @@ user 決定: 「A で必要な部分があれば B を取り込めば良い」�
 
 **Wikimedia の収集の停止**: 2026-11-17T01:44Z に収集器 (PID 14824) を止め、タスク `dcp-lighthouse-wiki-collector` を無効化した。止める直前の統計は gaps 0・未確定の穴 0、`gaps.jsonl` は 80 行のまま。
 データ (09-29〜11-17) は保持する。最後の `2026-11-17.jsonl` は 01:44Z までの途中の日で、未圧縮のまま残る。「収集器の不通に気づく手段」は不要になったので作らない。保持は C6 の `run-wiki-retention` のまま。
+
+## 2026-11-17 (3) — C16: 公開 CI の試験結果を実地で確かめた。データ源は Kubernetes の Prow
+
+user「コミットと push and continue」。2 候補を実際に取得して確かめた (User-Agent は一般名、認証なし)。標本は `data/ci-samples/` (gitignore 済み)。
+
+| | Kubernetes の Prow | Mozilla の Treeherder |
+|---|---|---|
+| 取得の口 | GCS の公開バケット `kubernetes-ci-logs` (一覧は JSON API、中身は静的ファイル)。旧バケット `kubernetes-jenkins` は匿名では 401 | REST API (`/api/project/autoland/...`)。User-Agent が要る |
+| 認証なし | 取れた | 取れた |
+| 過去分 | **90 日** (3 ジョブとも最古のビルドが 2026-08-18。日ごとに古い側が消えていく見込み) | ジョブは 10-15 の push では取れ、4-28 の push では空。境目は未測定 |
+| 粒度 | **試験単位** (junit の `testcase`) | **ジョブ単位** (1 ジョブ = 多数の試験の束)。試験単位は別の成果物 (ログ) が要り、未確認 |
+| 件数 | 定期ジョブは 5372 種。測った 3 つ: unit 24 ビルド/日 × 約 1544 件、integration-master 24 × 142、e2e-gci-gce 34 × 約 3355 (うち約 6 割は skipped) | 1 push で 241 ジョブ (標本 1 件) |
+| 失敗の密度 | 直近 24〜30 ビルドで testcase の失敗は 4/37043 (unit)・2/3266 (integration)・4/97162 (e2e)。失敗したビルドは 4/24・2/23・2/29 | 標本の push で testfailed 20/241 |
+| 真値に使える記録 | 人の付けた印は無い。`started.json` の `repo-commit` と失敗した試験名は取れるので、同じ commit での合否の割れ (flaky)・commit をまたいで続く失敗 (回帰) を**導出する**形になる。導出が成り立つかは未確認 | **人が付けた分類がある** (`failure_classification_id`: fixed by commit・intermittent・infra など。標本で 16・3 件) |
+| 注意 | testcase に時刻が無い (suite の `timestamp` と各件の `time` だけ)。取得頻度の上限は公式の記述を確かめていない | `who`・`author` にメールアドレスが入る (保存するなら落とすかハッシュにする) |
+
+**`test_result:v1` への写し (Prow)**: ts = suite の `timestamp` (Go の unit は package ごとに suite があり細かい。e2e は 1 ビルド 1 suite で全件が同じ時刻になる) / testId = `classname` + `name` / agentId = ジョブ名 / areas = 試験名の `[sig-…]` ラベル /
+result = passed・failure・skipped (flaky は導出) / duration = `time` / weight = 1 / commitHash = `started.json` の `repo-commit` (古いビルドは `started.json` が無いことがある。最古のビルドで確認)。
+Treeherder は ts = submit・start・end / testId = `job_type_name` / agentId = platform / areas = `job_group_name` / result = success・testfailed・busted・retry・exception / commitHash = push の revision。試験単位ではない。
+
+**選択: Prow**。理由: 試験単位の記録が静的ファイルでそのまま取れる・90 日分を待たずに取り込める・`[sig-…]` が area に写せる。弱点は真値で、導出を作る必要がある。
+Treeherder は人の分類という独立した真値を持つのが強みだが、粒度がジョブで、メールアドレスの扱いも要る。**C13 で Prow の導出が成り立たなかったときの代わり**として残す。
+
+**見えたこと (C17 への引き継ぎ)**
+- 予想どおり「ほぼ全部 pass・実行ごとに固まって届く」。失敗は testcase の 1 万件に 1 件程度で、1 時間に 1〜1.5 ビルド。今の 10 s 窓・1 s 窓ではビルドの来ない窓が大半になり、全 pass の参照は分散 0 で `isReferenceUsable` が偽になる
+- 時刻の置き方 (suite の時刻そのまま / ビルドの開始〜終了に広げる) は形の調査の中で決める。事象の単位を testcase にするかビルドにするかも同じ
+- 取り込む対象は unit・integration-master・e2e-gci-gce の 3 ジョブから始める (junit は 3 ジョブ・90 日で数 GB の見込み)。90 日の窓は毎日古い側が消えるので、取り込みは早い方がよい
+- C17 の完了条件はこの選択で成り立つ (2 週間以上の範囲・testId と agentId にあたる単位・採点できる窓の割合)。直す行は無い
