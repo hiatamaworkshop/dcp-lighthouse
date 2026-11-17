@@ -63,6 +63,28 @@ export interface ReplayWiring {
   nullModel?: NullModel;
 }
 
+const MIN = 60_000;
+const HOUR = 3_600_000;
+const S = SHIPPED_WIRING;
+
+/** A freshness zone long enough to hold the observation, the reference and one window of slack, unthinned. */
+const fresh = (windowMs: number, liveWindows: number, referenceWindows: number): number => windowMs * (liveWindows + referenceWindows + 1);
+
+/** The configurations the replay reports compare: two as shipped, the rest with the window and the zones lengthened. */
+export const REPLAY_ARMS: ReplayWiring[] = [
+  // As shipped: nothing changed.
+  { name: "shipped-10s", windowMs: 10_000, liveWindows: S.liveWindows, retentionMs: S.retentionMs, referenceZoneMs: S.referenceZoneMs, thinningRatio: S.thinningRatio, historyMs: S.historyMs },
+  { name: "shipped-1s", windowMs: 1_000, liveWindows: S.liveWindows, retentionMs: S.retentionMs, referenceZoneMs: S.referenceZoneMs, thinningRatio: S.thinningRatio, historyMs: S.historyMs },
+  // Stretched: the window and the zones are lengthened; the classes and their options are the shipped ones.
+  { name: "10min-fresh", windowMs: 10 * MIN, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(10 * MIN, 3, 30), historyMs: S.historyMs },
+  { name: "1h-equal", windowMs: HOUR, liveWindows: 3, retentionMs: fresh(HOUR, 3, 3), historyMs: S.historyMs },
+  { name: "1h-fresh", windowMs: HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(HOUR, 3, 30), historyMs: S.historyMs },
+  { name: "1h-thinned", windowMs: HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: 4 * HOUR, referenceZoneMs: 31 * HOUR, thinningRatio: S.thinningRatio, historyMs: S.historyMs },
+  { name: "1h-fresh-by-job", windowMs: HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(HOUR, 3, 30), historyMs: S.historyMs, groupBy: ["agentId"] },
+  { name: "1h-fresh-by-area", windowMs: HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(HOUR, 3, 30), historyMs: S.historyMs, groupBy: ["area"] },
+  { name: "6h-fresh", windowMs: 6 * HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(6 * HOUR, 3, 30), historyMs: S.historyMs },
+];
+
 /** Shape tags that claim something changed (a baseline tile and a gap do not). */
 const ALARM_TAGS: ReadonlySet<ShapeTag> = new Set<ShapeTag>(["spike", "dip", "step_up", "step_down", "divergence"]);
 const DOWN_TAGS: ReadonlySet<ShapeTag> = new Set<ShapeTag>(["dip", "step_down"]);
@@ -95,6 +117,8 @@ export interface ReplayTally {
   failingWindowsOnlyBlind: number;
   /** The failing windows by how many failures they hold (1, 2, 3 or more), and how many of each a downward tile covered. */
   failingByCount: Array<{ failures: "1" | "2" | "3+"; n: number; flagged: number }>;
+  /** Every failing window by its start: was it ever inside a scored package, did a downward tile ever cover it. */
+  failingWindowDetail: Map<number, { scored: boolean; flagged: boolean }>;
 }
 
 function lowerBound(a: Float64Array, x: number): number {
@@ -160,9 +184,10 @@ export function replayThroughShippedWiring(events: readonly LensEvent[], fromMs:
       { failures: "2", n: 0, flagged: 0 },
       { failures: "3+", n: 0, flagged: 0 },
     ],
+    failingWindowDetail: new Map(),
   };
   /** Per failing window (by start): was it ever in a scored package, ever covered by a downward tile. */
-  const failing = new Map<number, { scored: boolean; flagged: boolean }>();
+  const failing = tally.failingWindowDetail;
 
   let fed = 0;
   const first = Math.ceil(fromMs / W) * W + N * W;

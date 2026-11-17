@@ -10,7 +10,7 @@
 import { resolve } from "node:path";
 import { DEFAULT_PROW_JOBS, loadProwRange, type ProwBuild } from "./prow-import.js";
 import { buildsToEvents, prowLensEvent } from "./prow-events.js";
-import { SHIPPED_WIRING, replayThroughShippedWiring, type ReplayTally, type ReplayWiring } from "./prow-replay.js";
+import { REPLAY_ARMS, SHIPPED_WIRING, replayThroughShippedWiring, type ReplayTally, type ReplayWiring } from "./prow-replay.js";
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -20,23 +20,7 @@ function arg(name: string): string | undefined {
 const MIN = 60_000;
 const HOUR = 3_600_000;
 const S = SHIPPED_WIRING;
-
-/** A freshness zone long enough to hold the observation, the reference and one window of slack, unthinned. */
-const fresh = (windowMs: number, liveWindows: number, referenceWindows: number): number => windowMs * (liveWindows + referenceWindows + 1);
-
-const ARMS: ReplayWiring[] = [
-  // As shipped: nothing changed.
-  { name: "shipped-10s", windowMs: 10_000, liveWindows: S.liveWindows, retentionMs: S.retentionMs, referenceZoneMs: S.referenceZoneMs, thinningRatio: S.thinningRatio, historyMs: S.historyMs },
-  { name: "shipped-1s", windowMs: 1_000, liveWindows: S.liveWindows, retentionMs: S.retentionMs, referenceZoneMs: S.referenceZoneMs, thinningRatio: S.thinningRatio, historyMs: S.historyMs },
-  // Stretched: the window and the zones are lengthened; the classes and their options are the shipped ones.
-  { name: "10min-fresh", windowMs: 10 * MIN, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(10 * MIN, 3, 30), historyMs: S.historyMs },
-  { name: "1h-equal", windowMs: HOUR, liveWindows: 3, retentionMs: fresh(HOUR, 3, 3), historyMs: S.historyMs },
-  { name: "1h-fresh", windowMs: HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(HOUR, 3, 30), historyMs: S.historyMs },
-  { name: "1h-thinned", windowMs: HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: 4 * HOUR, referenceZoneMs: 31 * HOUR, thinningRatio: S.thinningRatio, historyMs: S.historyMs },
-  { name: "1h-fresh-by-job", windowMs: HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(HOUR, 3, 30), historyMs: S.historyMs, groupBy: ["agentId"] },
-  { name: "1h-fresh-by-area", windowMs: HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(HOUR, 3, 30), historyMs: S.historyMs, groupBy: ["area"] },
-  { name: "6h-fresh", windowMs: 6 * HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(6 * HOUR, 3, 30), historyMs: S.historyMs },
-];
+const ARMS = REPLAY_ARMS;
 
 const dur = (ms: number): string => (ms >= HOUR ? `${+(ms / HOUR).toFixed(1)} h` : ms >= MIN ? `${+(ms / MIN).toFixed(1)} min` : `${ms / 1000} s`);
 const pct = (a: number, b: number): string => (b === 0 ? "—" : `${((100 * a) / b).toFixed(1)}%`);
