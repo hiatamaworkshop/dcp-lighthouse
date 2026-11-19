@@ -87,3 +87,29 @@ describe("replayThroughShippedWiring", () => {
     assert.equal(t.failingWindowsOnlyBlind, 1);
   });
 });
+
+describe("failure counts through the replay (ROADMAP C19)", () => {
+  /** An hourly run of 200 tests; hour 20 drops 12 at once, hour 25 drops 3. */
+  const events = Array.from({ length: 36 }, (_, i) => run(i, 200, i === 20 ? 12 : i === 25 ? 3 : i % 3 === 0 ? 1 : 0)).flat();
+  const base = hourly({ referenceWindows: 10, retentionMs: 14 * HOUR });
+
+  it("names exactly the windows the events say hold at least burstAt failures", () => {
+    const t = replayThroughShippedWiring(events, T0, T0 + 36 * HOUR, { ...base, failureCount: 10 });
+    assert.equal(t.errors, 0, t.firstError);
+    const b = t.bursts!;
+    assert.deepEqual([...b.inEvents], [[T0 + 20 * HOUR, 12]]);
+    assert.deepEqual([...b.claimed], [[T0 + 20 * HOUR, 12]]);
+    assert.equal(b.missed, 0);
+    assert.equal(b.disagreed, 0);
+  });
+
+  it("counts and nothing else: every number of the replay is the one without the option", () => {
+    const off = replayThroughShippedWiring(events, T0, T0 + 36 * HOUR, base);
+    const on = replayThroughShippedWiring(events, T0, T0 + 36 * HOUR, { ...base, failureCount: 10 });
+    assert.equal(off.bursts, undefined);
+    const { bursts, wiring, ...restOn } = on;
+    const { wiring: _w, ...restOff } = off;
+    assert.ok(bursts !== undefined && wiring.failureCount === 10);
+    assert.deepEqual(restOn, restOff);
+  });
+});

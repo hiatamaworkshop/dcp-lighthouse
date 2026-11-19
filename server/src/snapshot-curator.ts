@@ -317,8 +317,55 @@ export interface SnapshotPackage {
    * it: no score, threshold or tile there reads this (ROADMAP C3).
    */
   volume?: VolumeChannel;
+  /**
+   * Present only with `CurationOptions.failureCount`: how many tests failed in
+   * each observed window, and which windows held at least `burstAt` of them.
+   * A count, not a judgement — nothing here is scored against the reference, and
+   * a `burst` names no cause (ROADMAP C19).
+   */
+  failures?: FailureCount;
   /** The curated tiles, sorted by regionStart ascending. */
   tiles: SnapshotTile[];
+}
+
+/** One observed window's failures (SnapshotPackage.failures). */
+export interface FailureWindow {
+  windowStart: number;
+  windowEnd: number;
+  /** Events with value 0 — failed tests. */
+  failed: number;
+  /** Events in the window. */
+  total: number;
+}
+
+/**
+ * SnapshotPackage.failures: the failed tests per observed window, and the
+ * windows where many tests failed at once.
+ *
+ * Why a count beside the rate tiles (ROADMAP_BRIEF.md 2026-11-17 (6)): on the
+ * Prow stream a failure is one in ~13,000 events, so the rate of a window moves
+ * on a single event and is not what a reader asks about. 31% of the failures
+ * came in ten builds that each dropped ten or more tests at once; that is the
+ * thing worth reporting, and it is a number of tests, not a z-score.
+ *
+ * A burst is named for what it is — many failures in one window. The cause is
+ * NOT named: the burst looked like an event of the run environment, which was
+ * not checked, so a reader must not take "concurrent" for "regression" or for
+ * "infrastructure".
+ */
+export interface FailureCount {
+  /** The threshold (CurationOptions.failureCount): a window with at least this many failures is a burst. */
+  burstAt: number;
+  /** Every observed window that held at least one failure, by windowStart. Whole-stream windows, not per group. */
+  windows: FailureWindow[];
+  /** The windows with `failed >= burstAt`. */
+  bursts: FailureWindow[];
+  /**
+   * Windows whose failures cannot be counted from the summary: a weighted
+   * window (a thinned reference zone), or one whose values are not all 0 or 1
+   * (a partial `flaky` result). They are not counted as quiet.
+   */
+  unjudgedWindows: number;
 }
 
 /** SnapshotPackage.sensitivity: the smallest one-window shift the gate would catch, per scoring unit. */
@@ -641,6 +688,19 @@ export interface CurationOptions {
    * windows): a partial window at a span's edge would read as "down".
    */
   volumeChannel?: boolean;
+  /**
+   * Opt-in (ROADMAP C19): report the failed tests per observed window as
+   * `SnapshotPackage.failures`, with the windows holding at least this many
+   * called a burst. A positive integer; absent = off, and the package is
+   * byte-identical to one built before the option existed.
+   *
+   * For streams of 0/1 results (pass/fail). The count is read from the window
+   * summary — count × (1 − mean) — which is exact only when every value is 0 or
+   * 1; a window that is not (a partial result, a weighted event) is counted in
+   * `unjudgedWindows` instead of guessed. It reads nothing the rate gate wrote
+   * and writes nothing it reads: no score, threshold or tile changes.
+   */
+  failureCount?: number;
 }
 
 /** CurationOptions.nullModel's values — also what $Q[compare]'s `null_model` names. */
@@ -686,7 +746,12 @@ export class SnapshotCurator {
       recordWindowScores: opts.recordWindowScores ?? false,
       sensitivityPower: opts.sensitivityPower ?? 0,
       volumeChannel: opts.volumeChannel ?? false,
+      failureCount: opts.failureCount ?? 0,
     };
+    const fc = opts.failureCount;
+    if (fc !== undefined && !(Number.isInteger(fc) && fc >= 1)) {
+      throw new RangeError(`failureCount must be a positive integer (the failures in one window that make a burst), got ${fc}`);
+    }
     const p = opts.sensitivityPower;
     if (p !== undefined && !(p > 0 && p < 1)) {
       throw new RangeError(`sensitivityPower must lie strictly between 0 and 1 (a detection probability), got ${p}`);
@@ -1003,6 +1068,7 @@ export class SnapshotCurator {
     const volume = this.opts.volumeChannel
       ? scoreVolume(units, this.opts.spikeZThreshold, this.opts.recordWindowScores, context.span)
       : undefined;
+    const failures = this.opts.failureCount > 0 ? countFailures(windows, this.opts.failureCount) : undefined;
 
     // ── 4. Divergence vs an explicit reference ─────────────────
     // Only meaningful when reference is a genuinely different lens output —
@@ -1082,9 +1148,36 @@ export class SnapshotCurator {
       ...(windowScores !== undefined ? { windowScores } : {}),
       ...(sensitivityUnits !== undefined ? { sensitivity: { power, units: sensitivityUnits } } : {}),
       ...(volume !== undefined ? { volume } : {}),
+      ...(failures !== undefined ? { failures } : {}),
       tiles: capped,
     };
   }
+}
+
+// ── Failure count (CurationOptions.failureCount) ─────────────────────────────
+
+/**
+ * Failed tests per observed window, from the window summaries alone.
+ *
+ * A value is 0 (fail), 1 (pass) or, in the mock stream, 0.5 (flaky): all in
+ * [0, 1]. For such values Σv² ≤ Σv with equality only when every value is 0 or
+ * 1 (v² ≤ v on [0, 1], with equality exactly at 0 and 1), so `sumSq === count ×
+ * mean` is a test that the count of zeros is exactly count × (1 − mean). A
+ * window that fails it, or that carries weights, is not counted from here.
+ */
+function countFailures(windows: readonly WindowStat[], burstAt: number): FailureCount {
+  const counted: FailureWindow[] = [];
+  let unjudged = 0;
+  for (const w of windows) {
+    const sum = w.count * w.mean;
+    if (w.weights !== undefined || Math.abs(w.sumSq - sum) > 1e-9 * Math.max(1, w.count)) {
+      unjudged++;
+      continue;
+    }
+    const failed = Math.round(w.count - sum);
+    if (failed > 0) counted.push({ windowStart: w.windowStart, windowEnd: w.windowEnd, failed, total: w.count });
+  }
+  return { burstAt, windows: counted, bursts: counted.filter((x) => x.failed >= burstAt), unjudgedWindows: unjudged };
 }
 
 // ── Sensitivity (CurationOptions.sensitivityPower) ───────────────────────────

@@ -310,7 +310,7 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       植えた回帰は 180/180 (窓の統計で拾えなかった 1 試験の回帰も。ただし定義と同じ形なので自明に近い)、遅れは中央値 1.2〜1.6 時間 (2 ビルド分)。**記録 89 日では名乗り 2 件 (regression 1・誤 1)**。詳細は ROADMAP_BRIEF.md 2026-11-17 (8)
 - [ ] **次** (判断待ち、台帳 C22・C19): 持続の名乗りを灯台の出力にするか・置き場所 (C22)。試験の流れ向けの本番の構成と「同時多発」の名乗り (C19、決定済み・着手可)。全 pass の参照の帰無 (C18) は保留。merge 前の検査の取り込みは C22 の判断の後。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 703 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 718 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 
@@ -330,7 +330,7 @@ node dist/run-history-mix-report.js --from 2026-10-26 --to 2026-11-01 # 1b: H-mi
 node dist/run-wiki-retention.js            # 日別 gz の保持 (既定は dry run、--apply で削除)
 node dist/run-prow-import.js --from 2026-10-26 --to 2026-11-15        # Kubernetes の Prow の試験結果を日別に取り込む (data/prow/、取り込み済みの日は飛ばす)
 node dist/run-prow-shape-report.js --from 2026-10-26 --to 2026-11-15  # 試験結果の実流の形の調査 (判定なし)
-node dist/run-prow-replay-report.js --from 2026-10-26 --to 2026-11-15 # 試験結果を本番と同じ部品の並びに流す (出荷時の構成と、窓・保持を伸ばした構成。判定なし)
+node dist/run-prow-replay-report.js --from 2026-10-26 --to 2026-11-15 # (89 日は --max-old-space-size=10240 が要る) 試験結果を本番と同じ部品の並びに流す (出荷時の構成と、窓・保持を伸ばした構成。判定なし)
 node --max-old-space-size=6144 dist/run-prow-truth-report.js --from 2026-08-19 --to 2026-11-15 --arms 1h-fresh,1h-fresh-by-job  # 導出した真値 (flaky / regression / isolated) と、再生の結果との突き合わせ
 node --max-old-space-size=6144 dist/run-prow-plant-report.js --from 2026-10-26 --to 2026-11-15 --per-job 20  # 回帰を植えて検出を測る (C20、約 20 分)
 node --max-old-space-size=6144 dist/run-prow-persist-report.js --from 2026-08-19 --to 2026-11-15 --plant-from 2026-10-26 --plant-to 2026-11-15  # 試験ごとの持続の名乗り: 記録での件数と、C20 の植え込みでの検出 (C21、約 3 分)
@@ -395,6 +395,7 @@ curl -s http://localhost:3001/brain
 | | 既定 | |
 |---|---|---|
 | `BRAIN_MODE` | `rule` | `rule` \| `claude` |
+| `LIGHTHOUSE_PROFILE` | `mock` | `mock` \| `test-stream`。`test-stream` は CI の試験結果向け (1 時間窓・参照 30 窓・鮮度ゾーン 34 時間・package に失敗数と同時多発)。モックの 50 件/秒を流すと 34 時間分を保持するのでメモリが要る。未知の名前は起動時に落ちる (`stream-profile.ts`) |
 | `CLAUDE_BRAIN_MODEL` | `claude-sonnet-5` | 実測済みは `claude-sonnet-5` / `claude-sonnet-4-6` |
 | `CLAUDE_BRAIN_INTERVAL_MS` | `15000` | 審議の下限間隔 (支出ガード) |
 

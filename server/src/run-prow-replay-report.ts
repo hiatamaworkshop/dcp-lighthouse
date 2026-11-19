@@ -44,6 +44,10 @@ function print(t: ReplayTally): void {
   console.log(`   scored, a failure in the observed span:  ${t.withFailure.n}, alarmed ${t.withFailure.alarmed} (${pct(t.withFailure.alarmed, t.withFailure.n)}), with a downward tile ${t.withFailure.down}`);
   console.log(`   blind with a failure in the observed span: ${t.blindWithFailure}`);
   console.log(`   by failures in the window (covered/windows): ${t.failingByCount.map((b) => `${b.failures}: ${b.flagged}/${b.n}`).join(" · ")}`);
+  if (t.bursts !== undefined) {
+    const b = t.bursts;
+    console.log(`   bursts (>= ${b.burstAt} failures in one window, named by the package even when blind): named ${b.claimed.size}, in the events ${b.inEvents.size}, in the events but never named ${b.missed}, named with another number ${b.disagreed}`);
+  }
   console.log(`   windows holding a failure: ${t.failingWindows} → a downward tile covered ${t.failingWindowsFlagged} (${pct(t.failingWindowsFlagged, t.failingWindows)}); only ever inside blind packages ${t.failingWindowsOnlyBlind} (${pct(t.failingWindowsOnlyBlind, t.failingWindows)})`);
 }
 

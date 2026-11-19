@@ -1708,3 +1708,56 @@ describe("SnapshotCurator — sensitivity (the smallest shift the gate would cat
     assert.ok(pkg.sensitivity!.units.every((u) => u.windows === 10 && u.dip !== null));
   });
 });
+
+describe("failureCount (ROADMAP C19)", () => {
+  const HOUR = 3_600_000;
+  /** `n` events in hour `i`, the first `fails` failing, the rest passing. */
+  const hour = (i: number, n: number, fails: number): LensEvent[] =>
+    Array.from({ length: n }, (_, k) => ev(i * HOUR + k * 1000, k < fails ? 0 : 1));
+  const lens = { window_ms: HOUR, align: "epoch" as const };
+  // 6 reference hours with 2 failures each, then 3 observed hours with 0, 3 and 12.
+  const referenceEvents = Array.from({ length: 6 }, (_, i) => hour(i, 200, 2)).flat();
+  const observedEvents = [...hour(6, 200, 0), ...hour(7, 200, 3), ...hour(8, 200, 12)];
+  const reference = applyLens(referenceEvents, lens);
+  const observation = applyLens(observedEvents, lens);
+
+  it("counts the failed tests of each observed window and names the windows holding at least burstAt", () => {
+    const pkg = new SnapshotCurator({ failureCount: 10 }).curate(observation, reference);
+    assert.deepEqual(pkg.failures!.windows.map((w) => [w.windowStart / HOUR, w.failed, w.total]), [[7, 3, 200], [8, 12, 200]]);
+    assert.deepEqual(pkg.failures!.bursts.map((w) => w.windowStart / HOUR), [8]);
+    assert.equal(pkg.failures!.burstAt, 10);
+    assert.equal(pkg.failures!.unjudgedWindows, 0);
+  });
+
+  it("states a count and no cause: nothing in the package calls a burst a regression", () => {
+    const pkg = new SnapshotCurator({ failureCount: 10 }).curate(observation, reference);
+    assert.deepEqual(Object.keys(pkg.failures!).sort(), ["burstAt", "bursts", "unjudgedWindows", "windows"]);
+  });
+
+  it("changes nothing else: the package is the one built without the option, plus `failures`", () => {
+    const off = new SnapshotCurator({}).curate(observation, reference);
+    const on = new SnapshotCurator({ failureCount: 10 }).curate(observation, reference);
+    const { failures, ...rest } = on;
+    assert.ok(failures !== undefined);
+    assert.deepEqual(rest, off);
+    assert.equal("failures" in off, false, "off = byte-identical to a package built before the option existed");
+  });
+
+  it("names a burst even when the reference is unusable (a count of the window itself)", () => {
+    const allPass = applyLens(Array.from({ length: 6 }, (_, i) => hour(i, 200, 0)).flat(), lens);
+    const pkg = new SnapshotCurator({ failureCount: 10 }).curate(observation, allPass);
+    assert.equal(pkg.referenceUsable, false);
+    assert.deepEqual(pkg.failures!.bursts.map((w) => w.failed), [12]);
+  });
+
+  it("does not count a window it cannot: a partial result (flaky 0.5) is unjudged, not quiet", () => {
+    const flaky = applyLens([...hour(6, 200, 0), ev(7 * HOUR, 0.5), ...hour(8, 200, 12)], lens);
+    const pkg = new SnapshotCurator({ failureCount: 10 }).curate(flaky, reference);
+    assert.equal(pkg.failures!.unjudgedWindows, 1);
+    assert.deepEqual(pkg.failures!.bursts.map((w) => w.windowStart / HOUR), [8]);
+  });
+
+  it("refuses a threshold that is not a positive integer", () => {
+    for (const bad of [0, -1, 2.5, NaN]) assert.throws(() => new SnapshotCurator({ failureCount: bad }), RangeError);
+  });
+});

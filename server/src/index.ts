@@ -23,6 +23,7 @@ import type { QObserveParams } from "./q-registry.js";
 import type { SnapshotPackage } from "./snapshot-curator.js";
 import { Comparator, assertComparable } from "./comparison.js";
 import { WindowHistory } from "./window-history.js";
+import { resolveStreamProfile } from "./stream-profile.js";
 import { Forecaster } from "./forecast.js";
 import { ForecastMonitor } from "./forecast-monitor.js";
 import { RuleBrain } from "./rule-brain.js";
@@ -38,11 +39,18 @@ import type { TestEvent } from "./mock-stream-generator.js";
 const registry = new QRegistry();
 
 /**
+ * The constants this process is wired with (stream-profile.ts, ROADMAP C19). Unset =
+ * "mock", the configuration this file shipped before profiles existed. LIGHTHOUSE_PROFILE=test-stream
+ * selects the one measured on CI test results; an unknown name throws here, at boot.
+ */
+const profile = resolveStreamProfile(process.env.LIGHTHOUSE_PROFILE);
+
+/**
  * Bootstrap retention width. The literal appears exactly once: the $Q row below
  * is the live authority (bindPipelineRetention keeps the buffer following it),
  * and this constant only seeds the buffer's constructor before the bind runs.
  */
-const RETENTION_WINDOW_MS = 120_000;
+const RETENTION_WINDOW_MS = profile.retentionMs;
 
 /**
  * Reference-zone width and thinning ratio (ROADMAP L5, 2026-08-22). Extends how
@@ -67,8 +75,8 @@ const RETENTION_WINDOW_MS = 120_000;
  * reference_window_ms/reference_thinning_ratio are the live authority, same
  * as retention_window_ms below (ROADMAP L5 dynamic config, 2026-08-23).
  */
-const REFERENCE_WINDOW_MS = RETENTION_WINDOW_MS * 10;
-const REFERENCE_THINNING_RATIO = 2;
+const REFERENCE_WINDOW_MS = profile.referenceZoneMs;
+const REFERENCE_THINNING_RATIO = profile.thinningRatio;
 
 /**
  * How far back the window-summary history reaches (window-history.ts,
@@ -76,7 +84,7 @@ const REFERENCE_THINNING_RATIO = 2;
  * arm the variogram null was first measured against. A round number, not a
  * tuned one; it bounds what $Q[compare].history_ms may ask for.
  */
-const HISTORY_WINDOW_MS = 3_600_000;
+const HISTORY_WINDOW_MS = profile.historyMs;
 
 // Default observe params: coarse live view + fine view for replay.
 //
@@ -86,8 +94,8 @@ const HISTORY_WINDOW_MS = 3_600_000;
 // anchor-slide that made an unchanging past burst flicker across ticks
 // (ROADMAP_BRIEF.md 2026-07-29). dashboard.ts's liveSpans snaps its requests
 // to this same grid via lens.ts's floorToWindow.
-registry.set("observe:test_result:v1#coarse", { window_ms: 10_000, align: "epoch" });
-registry.set("observe:test_result:v1#fine",   { window_ms: 1_000, align: "epoch" });
+registry.set("observe:test_result:v1#coarse", { ...profile.coarse });
+registry.set("observe:test_result:v1#fine",   { ...profile.fine });
 // reference_window_ms/reference_thinning_ratio (ROADMAP L5 dynamic config,
 // 2026-08-23): declared here too, not just passed to the buffer's
 // constructor, so the $Q row is the live authority the same way
@@ -95,8 +103,9 @@ registry.set("observe:test_result:v1#fine",   { window_ms: 1_000, align: "epoch"
 // buffer's reference zone in sync with whatever this scope says at runtime.
 registry.set("pipeline:*", {
   retention_window_ms: RETENTION_WINDOW_MS,
-  reference_window_ms: REFERENCE_WINDOW_MS,
-  reference_thinning_ratio: REFERENCE_THINNING_RATIO,
+  // A profile without a thinned reference zone declares none (the buffer cannot opt in later).
+  ...(REFERENCE_WINDOW_MS !== undefined ? { reference_window_ms: REFERENCE_WINDOW_MS } : {}),
+  ...(REFERENCE_THINNING_RATIO !== undefined ? { reference_thinning_ratio: REFERENCE_THINNING_RATIO } : {}),
 });
 // AR/RC regression threshold delta (ROADMAP L2-1, "Brain write surface" demo,
 // PILOT_DATA.md §11). RuleBrain reads this live via QRegistry.getSchema — a
@@ -125,6 +134,9 @@ registry.addWriteGate("compare", (p) => {
   }
 });
 registry.set("compare:test_result:v1", { reference: "preceding", null_model: "independent" });
+// A profile whose live view reads a longer reference (test-stream: 30 windows) declares it for that view only.
+// The mock profile writes no such row: its coarse view uses the row above, as it always has.
+if (profile.name !== "mock") registry.set("compare:test_result:v1#coarse", { ...profile.coarseCompare });
 // The `$F` rows each view publishes (ROADMAP_BRIEF.md 2026-10-22 (8), forecast.ts):
 // kriging from the last windows, γ̂ from the window summaries. The history a row
 // may ask for is bounded by what this process keeps, like $Q[compare]'s.
@@ -134,8 +146,11 @@ registry.addWriteGate("forecast", (p) => {
     throw new RangeError(`forecast: history_ms ${f.history_ms} exceeds the ${HISTORY_WINDOW_MS} ms of window summaries this process keeps`);
   }
 });
-registry.set("forecast:test_result:v1#coarse", { recent_windows: 30, horizons: [1, 6, 30], history_ms: HISTORY_WINDOW_MS, level: 0.95, method: "kriging" });
-registry.set("forecast:test_result:v1#fine", { recent_windows: 10, horizons: [1, 5, 10], history_ms: 600_000, level: 0.95, method: "kriging" });
+// Only where the profile measured them: no forecast was measured at 1-hour windows (GET /forecast then says so).
+if (profile.forecast) {
+  registry.set("forecast:test_result:v1#coarse", { recent_windows: 30, horizons: [1, 6, 30], history_ms: HISTORY_WINDOW_MS, level: 0.95, method: "kriging" });
+  registry.set("forecast:test_result:v1#fine", { recent_windows: 10, horizons: [1, 5, 10], history_ms: 600_000, level: 0.95, method: "kriging" });
+}
 
 // ── Build layers ──────────────────────────────────────────────────────────────
 
@@ -143,8 +158,8 @@ const generator  = new MockStreamGenerator();
 const adapter    = new TestorAdapter({ windowMs: 5_000 });
 const buffer     = new RetentionBuffer<TestEvent>(testEventExtractor, {
   retentionWindowMs: RETENTION_WINDOW_MS,
-  referenceWindowMs: REFERENCE_WINDOW_MS,
-  thinningRatio: REFERENCE_THINNING_RATIO,
+  ...(REFERENCE_WINDOW_MS !== undefined ? { referenceWindowMs: REFERENCE_WINDOW_MS } : {}),
+  ...(REFERENCE_THINNING_RATIO !== undefined ? { thinningRatio: REFERENCE_THINNING_RATIO } : {}),
 });
 const overlay    = new ObservationOverlay(registry);
 // Summaries are cut where events leave the freshness zone, before thinning.
@@ -160,7 +175,12 @@ for (const view of ["coarse", "fine"]) windowHistory.track(registry.getObserve("
 // in a channel of its own beside the rate tiles (ROADMAP C3). Opt-in and read
 // by nothing that decides: gateComparator, which the §A claim check uses, has
 // no volume channel, and no Brain reads it.
-const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true, sensitivityPower: 0.8, volumeChannel: true }, windowHistory);
+// failureCount (ROADMAP C19): only the test-stream profile counts failed tests per window and calls a
+// burst; the mock stream's packages are unchanged.
+const comparator = new Comparator({
+  spikeZThreshold: 2.0, includeBaseline: true, sensitivityPower: 0.8, volumeChannel: true,
+  ...(profile.failureBurstAt !== undefined ? { failureCount: profile.failureBurstAt } : {}),
+}, windowHistory);
 // The §A gate asks "did the curator flag this agent", which must not depend on
 // how many tiles a reader is shown: maxTiles drops the smallest first, so with
 // several agents alarming at once a real flag could be cut and the claim
@@ -553,5 +573,5 @@ setInterval(() => {
 generator.start({ rate: 50 });
 dashboard.start({ port: 3001 });
 
-console.log("[lighthouse] Phase 1 pilot running. Generator: 50 evt/s");
+console.log(`[lighthouse] Phase 1 pilot running. Generator: 50 evt/s, profile: ${profile.name}`);
 console.log("[lighthouse] POST /demo/start?scenario=AR|CG|RC to run a scenario");

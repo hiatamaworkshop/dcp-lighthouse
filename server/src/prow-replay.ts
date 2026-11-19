@@ -35,6 +35,7 @@ import type { QCompareParams, QObserveParams } from "./q-registry.js";
 import { RetentionBuffer } from "./retention-buffer.js";
 import type { NullModel, ShapeTag } from "./snapshot-curator.js";
 import { WindowHistory } from "./window-history.js";
+import { TEST_STREAM_PROFILE, type StreamProfile } from "./stream-profile.js";
 
 /** The constants index.ts ships (2026-11-17): what "as shipped" means below. */
 export const SHIPPED_WIRING = {
@@ -61,7 +62,32 @@ export interface ReplayWiring {
   historyMs: number;
   groupBy?: string[];
   nullModel?: NullModel;
+  /** `CurationOptions.failureCount`: failures in one window that make a burst. Counts only; no score moves. */
+  failureCount?: number;
 }
+
+/**
+ * A stream profile as a replay arm (ROADMAP C19). The arm the profile names and the process it configures
+ * are built from the same numbers, so a replay of a recorded stream is a replay of what the process runs.
+ */
+export function wiringFromProfile(p: StreamProfile, name: string = p.name): ReplayWiring {
+  const windowMs = p.coarse.window_ms;
+  if (windowMs === undefined) throw new RangeError(`profile ${p.name}: the coarse view declares no window_ms`);
+  return {
+    name,
+    windowMs,
+    liveWindows: p.liveWindows,
+    ...(p.coarseCompare.reference_windows !== undefined ? { referenceWindows: p.coarseCompare.reference_windows } : {}),
+    retentionMs: p.retentionMs,
+    ...(p.referenceZoneMs !== undefined ? { referenceZoneMs: p.referenceZoneMs } : {}),
+    ...(p.thinningRatio !== undefined ? { thinningRatio: p.thinningRatio } : {}),
+    historyMs: p.historyMs,
+    ...(p.failureBurstAt !== undefined ? { failureCount: p.failureBurstAt } : {}),
+  };
+}
+
+/** The "test-stream" profile as a replay arm. Also listed in REPLAY_ARMS under the name "1h-fresh" it had before the profile existed. */
+export const TEST_STREAM_WIRING: ReplayWiring = wiringFromProfile(TEST_STREAM_PROFILE);
 
 const MIN = 60_000;
 const HOUR = 3_600_000;
@@ -78,7 +104,8 @@ export const REPLAY_ARMS: ReplayWiring[] = [
   // Stretched: the window and the zones are lengthened; the classes and their options are the shipped ones.
   { name: "10min-fresh", windowMs: 10 * MIN, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(10 * MIN, 3, 30), historyMs: S.historyMs },
   { name: "1h-equal", windowMs: HOUR, liveWindows: 3, retentionMs: fresh(HOUR, 3, 3), historyMs: S.historyMs },
-  { name: "1h-fresh", windowMs: HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(HOUR, 3, 30), historyMs: S.historyMs },
+  // The test-stream profile (stream-profile.ts): built from it, so the arm and the process cannot drift apart.
+  { ...TEST_STREAM_WIRING, name: "1h-fresh" },
   { name: "1h-thinned", windowMs: HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: 4 * HOUR, referenceZoneMs: 31 * HOUR, thinningRatio: S.thinningRatio, historyMs: S.historyMs },
   { name: "1h-fresh-by-job", windowMs: HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(HOUR, 3, 30), historyMs: S.historyMs, groupBy: ["agentId"] },
   { name: "1h-fresh-by-area", windowMs: HOUR, liveWindows: 3, referenceWindows: 30, retentionMs: fresh(HOUR, 3, 30), historyMs: S.historyMs, groupBy: ["area"] },
@@ -119,6 +146,12 @@ export interface ReplayTally {
   failingByCount: Array<{ failures: "1" | "2" | "3+"; n: number; flagged: number }>;
   /** Every failing window by its start: was it ever inside a scored package, did a downward tile ever cover it. */
   failingWindowDetail: Map<number, { scored: boolean; flagged: boolean }>;
+  /**
+   * Only with `wiring.failureCount`: the windows a package called a burst (start → failures it named, blind
+   * packages included), against the windows that held that many failures when counted from the events.
+   * `missed` are those in the events no package named; `disagreed` are named with a number the events do not give.
+   */
+  bursts?: { burstAt: number; claimed: Map<number, number>; inEvents: Map<number, number>; missed: number; disagreed: number };
 }
 
 /** One asked boundary, as an outside reader sees it (C20 reads which windows a downward tile covered). */
@@ -166,7 +199,10 @@ export function replayThroughShippedWiring(
   const history = new WindowHistory(buffer, { maxHistoryMs: wiring.historyMs });
   history.track(lens);
   // index.ts's live Comparator, minus the display cap and the volume channel (which no decision reads).
-  const comparator = new Comparator({ spikeZThreshold: 2.0, includeBaseline: true, sensitivityPower: 0.8, maxTiles: Infinity }, history);
+  const comparator = new Comparator({
+    spikeZThreshold: 2.0, includeBaseline: true, sensitivityPower: 0.8, maxTiles: Infinity,
+    ...(wiring.failureCount !== undefined ? { failureCount: wiring.failureCount } : {}),
+  }, history);
   const decl: QCompareParams = {
     reference: "preceding",
     null_model: wiring.nullModel ?? "independent",
@@ -201,6 +237,9 @@ export function replayThroughShippedWiring(
       { failures: "3+", n: 0, flagged: 0 },
     ],
     failingWindowDetail: new Map(),
+    ...(wiring.failureCount !== undefined
+      ? { bursts: { burstAt: wiring.failureCount, claimed: new Map<number, number>(), inEvents: new Map<number, number>(), missed: 0, disagreed: 0 } }
+      : {}),
   };
   /** Per failing window (by start): was it ever in a scored package, ever covered by a downward tile. */
   const failing = tally.failingWindowDetail;
@@ -216,8 +255,10 @@ export function replayThroughShippedWiring(
     const { observation } = liveSpans(t, W, N);
     const failingHere: number[] = [];
     for (let w = observation.fromTs; w < t; w += W) {
-      if (failuresIn(w, w + W) > 0) {
+      const nFail = failuresIn(w, w + W);
+      if (nFail > 0) {
         failingHere.push(w);
+        if (tally.bursts !== undefined && nFail >= tally.bursts.burstAt) tally.bursts.inEvents.set(w, nFail);
         if (!failing.has(w)) failing.set(w, { scored: false, flagged: false });
       }
     }
@@ -233,6 +274,8 @@ export function replayThroughShippedWiring(
       tally.firstError ??= e instanceof Error ? e.message : String(e);
       continue;
     }
+    // A burst is a count of the window itself, so a package without a yardstick still names it.
+    if (tally.bursts !== undefined) for (const b of pkg.failures?.bursts ?? []) tally.bursts.claimed.set(b.windowStart, b.failed);
     if (!pkg.referenceUsable) {
       tally.blind++;
       if (failingHere.length > 0) tally.blindWithFailure++;
@@ -262,6 +305,11 @@ export function replayThroughShippedWiring(
     }
   }
   tally.failingWindows = failing.size;
+  if (tally.bursts !== undefined) {
+    const b = tally.bursts;
+    for (const [w, n] of b.inEvents) if (!b.claimed.has(w)) b.missed++;
+    for (const [w, n] of b.claimed) if (b.inEvents.get(w) !== n) b.disagreed++;
+  }
   for (const [w, f] of failing) {
     if (f.flagged) tally.failingWindowsFlagged++;
     if (!f.scored) tally.failingWindowsOnlyBlind++;
