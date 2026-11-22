@@ -24,6 +24,7 @@ import type { SnapshotPackage } from "./snapshot-curator.js";
 import { Comparator, assertComparable } from "./comparison.js";
 import { WindowHistory } from "./window-history.js";
 import { resolveStreamProfile } from "./stream-profile.js";
+import { CoarseReplayTrigger } from "./coarse-replay-trigger.js";
 import { loadProwLive, prowEventExtractor, type ProwLiveSource, type ProwPersistenceFeed } from "./prow-live.js";
 import { DEFAULT_PROW_JOBS } from "./prow-import.js";
 import { resolve as resolvePath } from "node:path";
@@ -172,9 +173,13 @@ registry.addWriteGate("compare", (p) => {
   }
 });
 registry.set("compare:test_result:v1", { reference: "preceding", null_model: "independent" });
-// A profile whose live view reads a longer reference (test-stream: 30 windows) declares it for that view only.
-// The mock profile writes no such row: its coarse view uses the row above, as it always has.
-if (profile.name !== "mock") registry.set("compare:test_result:v1#coarse", { ...profile.coarseCompare });
+// A profile whose live view reads a longer reference (test-stream: 30 windows) declares it for coarse
+// and for fine (automatic grouped replays, ROADMAP C24, need the same 30-window reference so a 1-hour
+// replay is not blind). The mock profile writes neither row, keeping its comparison unchanged.
+if (profile.name !== "mock") {
+  registry.set("compare:test_result:v1#coarse", { ...profile.coarseCompare });
+  registry.set("compare:test_result:v1#fine", { ...profile.coarseCompare });
+}
 // The `$F` rows each view publishes (ROADMAP_BRIEF.md 2026-10-22 (8), forecast.ts):
 // kriging from the last windows, γ̂ from the window summaries. The history a row
 // may ask for is bounded by what this process keeps, like $Q[compare]'s.
@@ -231,6 +236,10 @@ const forecaster = new Forecaster(windowHistory);
 const forecastMonitor = new ForecastMonitor(forecaster);
 let forecastMonitorFailed = false;
 const ruleBrain  = new RuleBrain(registry);
+// Two-stage Lighthouse loop for test-stream (ROADMAP C24): watch combined in the 1-hour coarse
+// window, and on any downward tile or concurrent-failure burst automatically replay that window
+// grouped by job (`agentId`). Absent under `mock`, so mock RuleBrain (AR/CG/RC) is untouched.
+const coarseReplayTrigger = profile.name !== "mock" ? new CoarseReplayTrigger({ groupBy: ["agentId"] }) : undefined;
 
 /**
  * BRAIN_MODE (ROADMAP L3) — "rule" (default) or "claude".
@@ -458,6 +467,10 @@ setInterval(() => {
   }
   brain.observe(snapshot);
   const decisions = brain.decide();
+  if (coarseReplayTrigger !== undefined) {
+    const livePkg = dashboard.livePackage(snapshot.ts);
+    if (livePkg !== null) decisions.push(...coarseReplayTrigger.evaluate(livePkg));
+  }
   // Replay packages are sent AFTER this tick's decisions (see the broadcast at
   // the bottom): a replay is the answer to a replayRequest, and the SSE
   // decisions channel used to deliver the answer before the request that

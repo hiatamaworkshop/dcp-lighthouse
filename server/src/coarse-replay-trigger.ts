@@ -1,0 +1,125 @@
+/**
+ * Coarse-to-grouped retroactive re-observation trigger (ROADMAP C24).
+ *
+ * C20 showed that splitting a CI test stream by job (`agentId`) or area upfront
+ * widens the Šidák family and thins each group's reference, hurting detection
+ * power — keeping the stream combined in a 1-hour coarse window gave the best
+ * power (60/60 planted 5-test regressions, 10/10 concurrent-failure bursts).
+ * A combined coarse window, however, cannot say which job or area failed.
+ *
+ * This trigger closes the two-stage Lighthouse loop (LIGHTHOUSE_MODEL.md §5):
+ * watch combined in the coarse window, and whenever the coarse SnapshotPackage
+ * raises a downward tile (`dip` / `step_down`) or a concurrent-failure burst
+ * (`failures.bursts`), emit a `replayRequest` over that exact window with
+ * `group_by` (e.g. `["agentId"]`) so Comparator re-observes the retained events
+ * and attributes the failure to the responsible group.
+ *
+ * Deduplicates by window span so the same window is never replayed twice across
+ * ticks or overlapping multi-window observations. Opt-in (wired under
+ * LIGHTHOUSE_PROFILE=test-stream); the default `mock` profile's RuleBrain is
+ * untouched.
+ */
+
+import type { BrainDecision } from "./brain-adapter.js";
+import type { SnapshotPackage, ShapeTag } from "./snapshot-curator.js";
+
+const DOWNWARD_TAGS: ReadonlySet<ShapeTag> = new Set<ShapeTag>(["dip", "step_down"]);
+
+export interface CoarseReplayTriggerOptions {
+  /** Grouping keys for the automatic replay lens. Default: `["agentId"]`. */
+  groupBy?: readonly string[];
+  /** $Q scope written by the emitted replayRequest. Default: `"observe:test_result:v1#fine"`. */
+  scope?: string;
+  /** Maximum distinct window spans remembered for deduplication. Default: 1024. */
+  maxRemembered?: number;
+}
+
+export class CoarseReplayTrigger {
+  private readonly groupBy: readonly string[];
+  private readonly scope: string;
+  private readonly maxRemembered: number;
+  private readonly seen = new Set<string>();
+
+  constructor(opts: CoarseReplayTriggerOptions = {}) {
+    const groupBy = opts.groupBy ?? ["agentId"];
+    if (groupBy.length === 0) throw new RangeError("CoarseReplayTrigger: groupBy must be non-empty");
+    this.groupBy = [...groupBy];
+    this.scope = opts.scope ?? "observe:test_result:v1#fine";
+    this.maxRemembered = opts.maxRemembered ?? 1024;
+  }
+
+  /**
+   * Inspects one coarse SnapshotPackage and returns `replayRequest` decisions for
+   * any newly triggered window (downward tile or concurrent-failure burst).
+   */
+  evaluate(pkg: SnapshotPackage): BrainDecision[] {
+    const bySpan = new Map<string, { start: number; end: number; reasons: string[] }>();
+    const add = (start: number, end: number, reason: string): void => {
+      if (!(end > start)) return;
+      const key = `${start}:${end}`;
+      let entry = bySpan.get(key);
+      if (entry === undefined) {
+        entry = { start, end, reasons: [] };
+        bySpan.set(key, entry);
+      }
+      entry.reasons.push(reason);
+    };
+
+    if (pkg.referenceUsable) {
+      for (const t of pkg.tiles) {
+        if (!DOWNWARD_TAGS.has(t.shapeTag)) continue;
+        const mag = t.magnitude !== undefined ? `${t.magnitude.toFixed(1)}σ` : "flagged";
+        add(t.regionStart, t.regionEnd, `${t.shapeTag} (${mag})`);
+      }
+    }
+
+    for (const b of pkg.failures?.bursts ?? []) {
+      add(b.windowStart, b.windowEnd, `burst (${b.failed} failed)`);
+    }
+
+    const decisions: BrainDecision[] = [];
+    const ordered = [...bySpan.entries()].sort((a, b) => a[1].start - b[1].start);
+    for (const [key, { start, end, reasons }] of ordered) {
+      if (this.seen.has(key)) continue;
+      this.remember(key);
+      const fromIso = new Date(start).toISOString();
+      const toIso = new Date(end).toISOString();
+      decisions.push({
+        type: "replayRequest",
+        reason: `coarse ${reasons.join(" + ")} in [${fromIso}, ${toIso}): re-observing by ${this.groupBy.join(",")}`,
+        qProposal: {
+          scope: this.scope,
+          params: {
+            window_ms: pkg.window_ms,
+            align: "epoch",
+            group_by: [...this.groupBy],
+            fromTs: start,
+            // Inclusive-exclusive correction: RetentionBuffer.segment filters `ts <= toTs`,
+            // while lens windows are half-open [start, end).
+            toTs: end - 1,
+          },
+        },
+        meta: {
+          triggerWindowStart: start,
+          triggerWindowEnd: end,
+          triggers: reasons,
+          groupBy: [...this.groupBy],
+        },
+      });
+    }
+    return decisions;
+  }
+
+  reset(): void {
+    this.seen.clear();
+  }
+
+  private remember(key: string): void {
+    this.seen.add(key);
+    while (this.seen.size > this.maxRemembered) {
+      const oldest = this.seen.values().next().value;
+      if (oldest === undefined) break;
+      this.seen.delete(oldest);
+    }
+  }
+}

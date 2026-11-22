@@ -7095,3 +7095,14 @@ user「直近の実装でもあまり進捗というか使えるシステムに�
 **確認と完了条件**
 - 試験 (`prow-live.test.ts` +2 件、全体 729 件): `ProwPersistenceFeed` が `atMs` まで名乗りを伏せ、全ビルド通過後に `detectPersistence` と完全一致すること、`GET /persistence` と SSE (`/events/snapshot`) が `SnapshotPackage` の外に一致する名乗りを出し、`mock` では `active: false`・SSE 欄なしであることを固定。
 - README・CLAUDE.md・devlog・台帳を合わせた。次は C24 (粗窓発火を契機にしたグループ別自動 replay)。
+
+## 2026-11-22 (4) — C24: 粗窓の発火を契機にグループ別の遡及的再観測を自動で回す
+
+**作ったもの**
+- `coarse-replay-trigger.ts` (`CoarseReplayTrigger`): 粗窓の `SnapshotPackage` から下向きタイル (`dip`・`step_down`、`referenceUsable` 時) または同時多発 (`failures.bursts`、盲目時も含む) の窓区間 `[start, end)` を拾い、同一区間の重複発火を抑止 (`seen` 集合、上限 1024 で古い順に破棄) したうえで、`group_by: ["agentId"]` (設定可)・`align: "epoch"`・`fromTs: start`・`toTs: end - 1` の `replayRequest` を返す。同一窓で dip と burst が両方出た場合は 1 件にまとめる。
+- `index.ts`: `profile.name !== "mock"` (`LIGHTHOUSE_PROFILE=test-stream`) のときだけ `CoarseReplayTrigger({ groupBy: ["agentId"] })` を生成し、`compare:test_result:v1#fine` にも `profile.coarseCompare` (`reference_windows: 30`) を宣言 (これがないと 1 時間窓の grouped replay が 1 窓参照に落ちて盲目になる)。tick ごとに `dashboard.livePackage(snapshot.ts)` を評価して `decisions` に載せ、既存の `replayRequest` 経路で `Comparator.compare` → `dashboard.broadcastReplay` に流す。既定 (`mock`) の `RuleBrain` (AR/CG/RC) の動作・出力は一切不変。
+
+**確認と完了条件**
+1. 試験 (`coarse-replay-trigger.test.ts` 4 件、全体 733 件パス): dip/step_down のみ発火 (spike/baseline 無視)・盲目時の burst 発火・重複抑止と dip+burst の統合・3 ジョブ合成流での 2 段ループ (合算粗窓で検知 → 自動 `group_by: ["agentId"]` replay → `/events/decisions` SSE の `replay_snapshot` で `ci-e2e` のみに帰属) を固定。
+2. 実データ確認 (2026-08-30〜09-09 の 11 日・3 ジョブ・873 ビルド、09-01 の 58 件および 09-06〜07 の同時多発を含む区間): 本番配線 + `CoarseReplayTrigger` で **発火 13 窓 (うち同時多発 9 窓 = 9/9)**、自動 `group_by: ["agentId"]` replay の下向きタイルによる帰属 **12/13 (同時多発は 9/9)**、帰属先はすべて **`ci-kubernetes-e2e-gci-gce`** (他 2 ジョブへの誤帰属 0)。
+3. README・CLAUDE.md・devlog・台帳を合わせた。C23・C22・C24 の 3 項目を完了し、C25 (本物の回帰がある流れでの確認) を `保留(C24 の後)` から `提案` に戻した。

@@ -4,10 +4,12 @@
 
 ## 予定
 
-- [ ] C24
 
 ## 閉じた項目
 
+- [x] C24 粗窓の発火を契機にグループ別の遡及的再観測を自動で回す (2026-11-22、`CoarseReplayTrigger` と `test-stream` の自動 grouped replay 配線。記録は ROADMAP_BRIEF の 2026-11-22 (4) の節)
+  - `coarse-replay-trigger.ts`・`index.ts`: `LIGHTHOUSE_PROFILE=test-stream` で合算 1 時間粗窓の `SnapshotPackage` から下向きタイル (`dip`・`step_down`) または同時多発 (`failures.bursts`) を拾い、窓区間ごとに重複抑止つきで `group_by: ["agentId"]` の `replayRequest` を自動発火 (`compare:#fine` も 30 窓参照、`broadcastReplay` へ配信、`mock` は不変)
+  - 実データ 11 日 (2026-08-30〜09-09、873 ビルド) で発火 13 窓 (同時多発 9/9)・帰属 12/13 (同時多発 9/9) がすべて `ci-kubernetes-e2e-gci-gce` に特定。試験 733 件 (+4)
 - [x] C22 試験ごとの持続の名乗りを灯台の出力にする (2026-11-22、ドメイン層 `ProwPersistenceFeed` と `GET /persistence`・SSE 別欄・dashboard パネル。記録は ROADMAP_BRIEF の 2026-11-22 (3) の節)
   - `prow-live.ts` (`ProwPersistenceFeed`): `PersistenceDetector` (`prow-persist.ts`) を `SnapshotCurator` / `lens.ts` に入れず試験の流れ向けのドメイン層として配線、`atMs` (`finishedMs`) で表に出す (`mock` の package・出力は不変)
   - `dashboard.ts`・`dashboard/index.html`・`dashboard/app.js`: `GET /persistence`・SSE (`/events/snapshot`) の別欄 `persistence`・`#panel-persistence` を追加
@@ -119,22 +121,8 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 - C12 の結果 (2026-11-17 (5)): 1 時間窓 × 参照 30 窓では盲目は 1.2% で、この帰無が無くても動く。要るのは短い窓 (10 分以下) を使うときで、急がない
 - 決定になったら完了条件を付ける
 
-### C24. 粗窓の発火を契機にグループ別の遡及的再観測を自動で回す (観測層と Brain の結線)
-
-設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-22 のレビュー (観察 2・3、推奨 2)、および 2026-08-18 (L3)・2026-09-27 の実地レビュー。
-現在 `index.ts` では `Comparator` / `SnapshotCurator` の出力 (`SnapshotPackage`) を SSE 配信と shadow 裏取りしか読んでおらず、Brain (`RuleBrain` / `ClaudeBrain`) は `$Q` を読まない 5 秒固定窓の `TestorAdapter` だけを見ている。そのため `LIGHTHOUSE_PROFILE=test-stream` (1 時間窓) では Brain が機能しない (RC の 1 秒窓提案も C17・C12 で 100% 盲目)。
-一方、C20 で「常時から `group_by` (ジョブ別・area 別) に分けると Šidák の family が膨らんで検出力が落ち、3 ジョブを 1 本にした 1 時間粗窓が一番よい」と実証された。ただし 3 ジョブ 1 本の粗窓で警報が出ただけでは、どのジョブ (`agentId`)・どの領域 (`domain` / `area`) が原因か分からない。
-
-- 決定 (2026-11-22、user が推奨の整備を承認): 合算の 1 時間粗窓の `SnapshotPackage` に下向きタイル (`dip` / `step_down`) または同時多発 (`failures.bursts`) が出たとき、その窓の区間 `[fromTs, toTs]` に対して `group_by: ["agentId"]` (および `domain`) の `replayRequest` を出し、「普段は合算粗窓で検出力を最大化して見張り、発火した区間だけを遡及再観測して原因のジョブ・領域を特定する」2 段ループを本番配線と dashboard の replay 欄で動かす (`mock` の AR/CG/RC の既存動作は壊さない)
-
-#### 完了条件
-- [ ] `LIGHTHOUSE_PROFILE=test-stream` (または opt-in) のとき、合算の 1 時間粗窓の `SnapshotPackage` に下向きタイル (`dip`・`step_down`) または同時多発 (`failures.bursts`) が出た窓の区間 `[fromTs, toTs]` に対して、`group_by: ["agentId"]` (および `domain`) の `replayRequest` を自動で発火し、`Comparator` の replay package を `broadcastReplay` に流す。既定 (`mock`) の `RuleBrain` (AR/CG/RC) の動作と出力は既存の試験でバイト同一
-- [ ] 同じ窓の区間に重複して `replayRequest` を出し続けない抑止を入れ、どのジョブ (`agentId`)・領域が失敗を持っていたかが replay package から読めることを試験で固定する
-- [ ] 89 日の記録の同時多発 (10 窓) または下向きタイルの窓で自動 replay が走り、dashboard の replay 経路にグループ別の結果が届くことを確かめて devlog に記録する
-- [ ] 全体の試験 (`cd server && npm test`) が通り、README・CLAUDE.md・devlog・台帳を合わせる
-
 ### C25. 本物の回帰がある流れ (presubmit または自前の試験実行) で名乗りを確かめる
-状態: 保留(C24 の後)
+状態: 提案
 
 設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-17 (6)〜(8) と 2026-11-22 のレビュー (観察 4・推奨 3)。Prow の定期 3 ジョブ (merge 後の master) は 89 日で真の回帰が 1 件しか無く (C13)、C20・C21 の検出力は植えた回帰でしか測れていない (植え込みは清潔で全面的なので、C21 の 2 ビルド目 180/180 は上限)。
 
