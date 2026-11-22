@@ -7045,3 +7045,28 @@ user「ok do 19」。C19 の完了条件 4 つを実施。
 **メモ**
 - 89 日の `run-prow-replay-report` は `--max-old-space-size=6144` でも 4 GB 既定でも落ち、10240 で通った (空きメモリ 6 GB 台の機械で)。再生が 7.3M 事象を 2 つの配列 (読み込んだ事象と変換後) で持つためと見ている (測っていない)。truth の報告は 6144 で通る。3 週分の README の手順は変わらない。メモリの増えた原因が今回の変更かは、変更前の出力と比べていない。
 - 本番のライブで 1 時間窓の package が実データで動く姿は未確認 (流れが Prow の記録で、ライブの入口が無い)。C22 の前に要るのは、記録を流す入口か本物の回帰での姿 (案 a)。
+
+## 2026-11-22 — レビュー: 直近の成果が CLI に閉じ、観測層と判断層がまだ繋がっていない。提案 C23〜C25 を起票 (実装なし)
+
+user「直近の実装でもあまり進捗というか使えるシステムには遠いようなのだ、レビューをして改善案があればして欲しい」「観察と推奨として記録を残してやってくれ 起票できることはしてよい」。過去の記録 (`ROADMAP_BRIEF.md`・`LIGHTHOUSE_MODEL.md`・台帳) と本番配線 (`index.ts`・`dashboard.ts`・`rule-brain.ts`・`claude-brain.ts`・`testor-adapter.ts`・`dashboard/app.js`) を突き合わせた。コードは変えていない。
+
+**観察 (使えるシステムに遠く見える 4 つの断絶)**
+1. **入口と出口の断絶 (直近の成果が CLI の報告に閉じている)**: C19 で `LIGHTHOUSE_PROFILE=test-stream` (1 時間窓・`reference_windows` 30・鮮度ゾーン 34 時間・`failureCount`) が `stream-profile.ts` に入り、2026-11-10 の監査の 1 (検証した定数と出荷した定数のずれ) は解消された。しかし `index.ts` は `LIGHTHOUSE_PROFILE=test-stream` で起動しても `MockStreamGenerator` (50 evt/s の乱数) を流すだけで、記録済みの Prow の流れ (`data/prow/`) や外部の試験結果を本番サーバ (`index.ts` → `DashboardServer`) に流す入口が無い (2026-11-19 のメモ末尾)。さらに `dashboard/app.js` は C3 の量チャネルや C5 の `$F` の較正までは描画しているが、C19 で足した `SnapshotPackage.failures` (窓ごとの失敗数と同時多発 `bursts`) も C21 の試験ごとの持続 (`PersistenceDetector`) もまだ画面に出していない。C17〜C21 の成果がすべて `run-prow-*-report.ts` のコンソール出力で止まっている。
+2. **観測層と判断層の断絶 (`index.ts` の中で 2 本のパイプラインが並走している)**: 今、`index.ts` の事象の流れは 2 つの独立した系統に分かれている。
+   - **系統 A (観測層)**: `RetentionBuffer` → `WindowHistory` → `Comparator` → `SnapshotCurator` (`$Q` のレンズ・Šidák・連続性補正・2 値厳密裾・variogram・MDE・量チャネル・`failureCount` を持つ `SnapshotPackage`)。**これを読んでいるのは SSE の配信 (`dashboard.broadcast`) と shadow ログの事後裏取り (`isReroutedAgentBacked`) だけ**。
+   - **系統 B (Brain 判断層)**: `TestorAdapter` (`$Q` を読まない 5 秒固定窓、`index.ts` L158) → `STSnapshot` → `RuleBrain` / `ClaudeBrain`。
+   2026-08-18 (L3) で「ゲートはコード側 (curator) に置き、Brain にはレンズ選択を渡す (未実装)」、2026-09-27 の実地レビューでも「curator が持っている較正と『沈黙か盲目か』の規律が、判断を出す側に届いていない」と記録されたが、その日は `RuleBrain` の 5 秒窓 EWMA に `SE_Z = 3.5` を足す処置で閉じたため、primary の判断経路は今も `SnapshotPackage` を一切読んでいない。結果として、`LIGHTHOUSE_PROFILE=test-stream` (1 時間窓) で動かしても `TestorAdapter` は 5 秒窓・`RuleBrain` は 1 秒 tick と 5 秒窓前提 (RC の提案も `REPLAY_FINE_WINDOW_MS = 1000` の 1 秒窓固定) のままで、実 CI の流れを通しても Brain は動かない (1 秒窓は C17・C12 で 100% 盲目)。
+3. **粗窓の検知と遡及的再観測 (RC) の未結線**: C20 で「常時から `group_by` (ジョブ別・area 別) に分けると Šidák の family が膨らみ参照も薄くなって検出力が落ちる。3 ジョブを 1 本にした 1 時間窓が一番よい (5 試験の回帰 60/60・同時多発 10/10)」と分かった。一方、3 ジョブ 1 本の粗窓で下向きタイル (`dip` / `step_down`) や同時多発 (`failures.bursts`) が出ただけでは、どのジョブ (`agentId`)・どの領域 (`domain` / `area`) が落としたかは分からない。「普段は合算の 1 時間粗窓で静かに見張り (誤警報 0・検出力最大)、発火した窓の区間 `[fromTs, toTs]` だけを `group_by` つきのレンズで遡及再観測 (replay) して原因のジョブ・領域を掘り出す」のが灯台モデル (`LIGHTHOUSE_MODEL.md` §5) の本領であり C20 の統計的制約を解く形だが、まだ 1 段目をハーネスで数えただけで 2 段目の replay に繋がっていない。
+4. **データ源の陽性の少なさ**: Prow の定期 3 ジョブ (merge 後の master) は 89 日で真の回帰が 1 件しか無く (C13)、残りは flaky (599) と同時多発の固まり (10 ビルド)。C20・C21 の検出力は植えた回帰でしか測れていない (C21 の 180/180 は規則の定義上ほぼ自明)。本物の回帰が入る流れ (presubmit = PR の merge 前検査、または自前の試験実行) で確かめる段階が残っている。
+
+**推奨 (過去の規律・既定 `mock` のビット一致を壊さずに結線する順序)**
+1. **入口と画面の結線 (`C23` 新規提案 + `C22` の具体化)**:
+   - 先に、`LIGHTHOUSE_PROFILE=test-stream` で記録済みの Prow の流れ (`data/prow/`、または外部の試験結果) を本番サーバ (`index.ts` → `DashboardServer`) に流せる再生/投入の入口を作り、`dashboard/app.js` に C19 の `SnapshotPackage.failures` (窓の失敗数と同時多発 `bursts`) を表示する (`C23`)。時計は事象の時刻 (`ts`) で進める。
+   - `C22` (試験ごとの持続 `PersistenceDetector` の置き場所) は、ビルドの区切りと `commit` を前提にしていて `test_result:v1` の事象だけでは足りないため、**ドメイン非依存の `SnapshotCurator` / `lens.ts` には入れず、試験の流れ向けのドメイン層に置いて `GET /persistence` と SSE ペイロードの別欄に出し、`dashboard/app.js` に並べる**形を推奨する。
+2. **観測層と Brain の再観測の結線 (`C24` 新規提案)**:
+   - 2026-08-18 (L3) と 2026-09-27 からの宿題である「curator の `SnapshotPackage` を引き金にして Brain がレンズを操作する」を `test-stream` (または opt-in) で繋ぐ。
+   - 合算の 1 時間粗窓の `SnapshotPackage` に下向きタイル (`dip` / `step_down`) または同時多発 (`failures.bursts`) が出たとき、その窓の `[fromTs, toTs]` に対して `group_by: ["agentId"]` (ジョブ別) や `group_by: ["domain"]` (領域別) の `replayRequest` を自動で出し、「合算粗窓で異常検知 → 遡及再観測で落ちたジョブ・領域を特定」の 2 段ループを本番の配線と UI で動かす。
+3. **本物の回帰がある流れでの確認 (`C25` 新規提案)**:
+   - 上の配線が動いた上で、Prow の presubmit (PR の merge 前検査、2026-11-17 (7) の案 a) または自前の試験実行 (`npm test` 等の結果投入) を通し、植え込みでない回帰に対して粗窓 + 再観測 (`C19` + `C24`) と試験ごとの持続 (`C21` + `C22`) がどう名乗るかを確かめる。
+
+**起票・整備 (台帳、実装なし)**: 別の AI にそのまま実装を依頼できるよう、推奨順に `## 予定` を `C23 → C22 → C24` とし、それぞれに `#### 完了条件` を付けた (`C23`: 記録流を本番サーバと UI に流す入口と C19 の画面表示、`C22`: 持続の名乗りをドメイン層・`GET /persistence`・SSE・UI に置く、`C24`: 粗窓発火からのグループ別自動 replay、`C25`: 本物の回帰がある流れでの確認 = `保留(C24 の後)`)。
