@@ -308,9 +308,10 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       C13 の規則は植えた回帰を 360/360 regression と呼ぶ。前提として `RetentionBuffer.evict` の先頭 `splice` を除いた (出力はビット一致)。詳細は ROADMAP_BRIEF.md 2026-11-17 (7)
 - [x] **1 つの試験が続けて落ちることを流れに沿って名乗る** (2026-11-17、C21) — C13 の規則から未来を除いた検出器 (`prow-persist.ts`、規則は計測の前に固定): 同じ試験が連続する 2 ビルドで落ち、どちらの commit でも pass が無ければ 2 ビルド目で名乗る。
       植えた回帰は 180/180 (窓の統計で拾えなかった 1 試験の回帰も。ただし定義と同じ形なので自明に近い)、遅れは中央値 1.2〜1.6 時間 (2 ビルド分)。**記録 89 日では名乗り 2 件 (regression 1・誤 1)**。詳細は ROADMAP_BRIEF.md 2026-11-17 (8)
-- [ ] **次** (判断待ち、台帳 C22・C19): 持続の名乗りを灯台の出力にするか・置き場所 (C22)。試験の流れ向けの本番の構成と「同時多発」の名乗り (C19、決定済み・着手可)。全 pass の参照の帰無 (C18) は保留。merge 前の検査の取り込みは C22 の判断の後。仮想ストリームの常設 (F3) は未着手
+- [x] **記録済みの試験結果の流れを本番サーバと dashboard に流す入口** (2026-11-22、C23) — `LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=prow PROW_REPLAY_FROM=… PROW_REPLAY_TO=…` で、取り込み済みの `data/prow/` の日を仮想時計で本番と同じ `RetentionBuffer` → `WindowHistory` → `Comparator` に流す (`prow-live.ts`。mock の既定は不変)。dashboard は package の `failures` (窓ごとの失敗数と同時多発) と再生の位置を描く。ライブの package は C12 の再生と境界ごとに一致 (試験で固定)。実機で 3 週分 (1,745 ビルド・1,774,055 事象) を 43200 倍速で流して確認 (`failures` あり・盲目 0/11)。詳細は ROADMAP_BRIEF.md 2026-11-22 (2)
+- [ ] **次** (台帳 `## 予定` の順): 持続の名乗りを灯台の出力に (C22) → 粗窓発火からのグループ別自動 replay (C24)。本物の回帰がある流れ (C25)・全 pass の参照の帰無 (C18) は保留。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 718 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 727 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 
@@ -396,6 +397,7 @@ curl -s http://localhost:3001/brain
 |---|---|---|
 | `BRAIN_MODE` | `rule` | `rule` \| `claude` |
 | `LIGHTHOUSE_PROFILE` | `mock` | `mock` \| `test-stream`。`test-stream` は CI の試験結果向け (1 時間窓・参照 30 窓・鮮度ゾーン 34 時間・package に失敗数と同時多発)。モックの 50 件/秒を流すと 34 時間分を保持するのでメモリが要る。未知の名前は起動時に落ちる (`stream-profile.ts`) |
+| `LIGHTHOUSE_SOURCE` | `mock` | `mock` \| `prow`。`prow` は `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可。取り込み済みの `data/prow/` を仮想時計で本番配線に流す (`PROW_REPLAY_FROM` / `PROW_REPLAY_TO` 必須、`PROW_REPLAY_SPEED` 既定 `3600` = 1 時間/秒、`PROW_DIR` / `PROW_JOBS` 任意、`prow-live.ts`) |
 | `CLAUDE_BRAIN_MODEL` | `claude-sonnet-5` | 実測済みは `claude-sonnet-5` / `claude-sonnet-4-6` |
 | `CLAUDE_BRAIN_INTERVAL_MS` | `15000` | 審議の下限間隔 (支出ガード) |
 

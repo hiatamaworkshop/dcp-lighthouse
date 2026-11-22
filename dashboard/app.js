@@ -45,6 +45,10 @@ connect();
 // ── Render snapshot ─────────────────────────────────────────────────────────
 
 function renderSnapshot(data) {
+  // A recorded stream is being played (ROADMAP C23): the badge says where in the recording it is.
+  replayLabel = data.replay
+    ? ` · replay ${new Date(data.replay.virtualNow).toISOString().substr(0, 16).replace("T", " ")}Z (${Math.round(100 * data.replay.progress)}%${data.replay.finished ? ", finished" : ""})`
+    : "";
   renderAgents(data.agents ?? []);
   renderDomains(data.domains ?? []);
   renderTiles(data.snapshot);
@@ -58,6 +62,7 @@ function renderSnapshot(data) {
 // ── Active scenario indicator ────────────────────────────────────────────────
 
 let lastActiveScenario;
+let replayLabel = "";
 
 function renderActiveScenario(activeScenario) {
   // The Stop banner is driven by `streamRunning` in renderSnapshot, not here:
@@ -67,7 +72,7 @@ function renderActiveScenario(activeScenario) {
   // label written only on CHANGE would lose the running scenario's name for
   // the rest of that scenario. Only the TEXT is ours — the `running` class is
   // the connection indicator, owned by the open/error handlers above.
-  badge.textContent = activeScenario ? `live · ${activeScenario} running` : "live";
+  badge.textContent = (activeScenario ? `live · ${activeScenario} running` : "live") + replayLabel;
 
   // The button repaint below is a real diff: it walks the DOM, and nothing
   // else writes `active`, so restating it every tick would be pure cost.
@@ -174,8 +179,40 @@ function renderVolume(noteId, gridId, pkg) {
   grid.innerHTML = v.tiles.map(volumeTileHtml).join("");
 }
 
+// ── Failure counts (SnapshotPackage.failures, ROADMAP C19 / C23) ─────────────
+//
+// How many tests failed in each observed window, and the windows where many failed at once ("bursts").
+// A COUNT of tests, named for what it is — the cause is not named, so a reader must not take a burst
+// for a regression or for infrastructure. Present only under the test-stream profile; a package without
+// `failures` (the mock profile) leaves the area empty.
+
+const utcClock = (ms) => new Date(ms).toISOString().substr(5, 11).replace("T", " ");
+
+function failureTileHtml(w) {
+  return `<div class="tile failures">
+    <div class="tile-label"><span class="tile-mag">${w.failed}</span>tests failed at once</div>
+    <div class="tile-desc">${utcClock(w.windowStart)}–${new Date(w.windowEnd).toISOString().substr(11, 5)} UTC · ${w.failed} of ${w.total} results</div>
+  </div>`;
+}
+
+function renderFailures(noteId, gridId, pkg) {
+  const note = document.getElementById(noteId);
+  const grid = document.getElementById(gridId);
+  const f = pkg && pkg.failures;
+  if (!f) {
+    note.textContent = "";
+    grid.innerHTML = "";
+    return;
+  }
+  const recent = f.windows.slice(-6).map((w) => `${utcClock(w.windowStart)} ×${w.failed}`).join(" · ");
+  const unjudged = f.unjudgedWindows > 0 ? ` · ${f.unjudgedWindows} window(s) cannot be counted (weighted), not read as quiet` : "";
+  note.textContent = `failures (tests failed per window; the cause is not named): ${f.windows.length} window(s) with a failure, ${f.bursts.length} with ${f.burstAt} or more${recent ? ` — ${recent}` : ""}${unjudged}`;
+  grid.innerHTML = f.bursts.map(failureTileHtml).join("");
+}
+
 function renderTiles(pkg) {
   renderVolume("tiles-volume-note", "tiles-volume", pkg);
+  renderFailures("tiles-failures-note", "tiles-failures", pkg);
   document.getElementById("tiles-reach").textContent = reachText(pkg);
   const el = document.getElementById("tiles");
   if (!pkg || !pkg.tiles || pkg.tiles.length === 0) {
@@ -189,6 +226,7 @@ function renderTiles(pkg) {
 
 function renderReplayTiles(pkg) {
   renderVolume("replay-volume-note", "replay-volume", pkg);
+  renderFailures("replay-failures-note", "replay-failures", pkg);
   document.getElementById("replay-reach").textContent = reachText(pkg);
   const el = document.getElementById("replay-tiles");
   if (!pkg || !pkg.tiles || pkg.tiles.length === 0) {

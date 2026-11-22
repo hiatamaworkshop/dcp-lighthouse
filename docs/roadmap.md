@@ -4,11 +4,15 @@
 
 ## 予定
 
-- [ ] C23
 - [ ] C22
 - [ ] C24
 
 ## 閉じた項目
+
+- [x] C23 記録済みの試験結果の流れを本番サーバと dashboard に流す入口と C19 の画面表示 (2026-11-22、`LIGHTHOUSE_SOURCE=prow` の仮想時計再生口と `SnapshotPackage.failures` の UI 描画。記録は ROADMAP_BRIEF の 2026-11-22 (2) の節)
+  - `prow-live.ts`・`index.ts`・`dashboard.ts`: `LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=prow` で取り込み済みの `data/prow/` を仮想時計で本番配線 (`RetentionBuffer` → `WindowHistory` → `Comparator` → `DashboardServer`) に流す。既定 (`mock`) の動作・出力は不変
+  - `dashboard/index.html`・`dashboard/app.js`: `SnapshotPackage.failures` (窓ごとの失敗数と同時多発 `bursts`) と再生位置のバッジを描画 (`failures` 無しでは非表示)
+  - 試験 727 件 (+9): 本番の `livePackage(t)` が `prow-replay` (`1h-fresh`) と境界ごとに盲目・下向きタイル・`bursts` で一致することを固定。実サーバで 3 週分 (1,745 ビルド・1,774,055 事象) の SSE 配信を確認
 
 - [x] C19 試験の流れ向けの本番の定数 (2026-11-19、opt-in のプロファイル `LIGHTHOUSE_PROFILE=test-stream` と、package が名乗る失敗数・同時多発。記録は ROADMAP_BRIEF の 2026-11-19 の節)
   - `stream-profile.ts`: 1 時間窓・`reference_windows` 30・鮮度ゾーン 34 時間 (疎化つき参照ゾーンなし)・3 ジョブを 1 本。index.ts と再生の `1h-fresh` の腕が同じ数字から作られ、ずれない。既定 (`mock`) は従来の定数そのまま
@@ -113,7 +117,6 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 - 決定になったら完了条件を付ける
 
 ### C22. 試験ごとの持続の名乗りを灯台の出力にする (置き場所)
-状態: ブロック(C23 の後)
 
 設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-17 (8) と 2026-11-22 のレビュー。C21 の検出器 (`prow-persist.ts`) は流れに沿って 2 ビルド目で名乗り、89 日の記録で 2 件 (うち 1 件が誤)・植えた回帰は 180/180。今は CLI の報告にしか出ない。
 
@@ -124,18 +127,6 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 - [ ] `DashboardServer` に持続の名乗りを返す `GET /persistence` を追加し、SSE (`/events/snapshot`) のペイロードにも package とは別の欄として載せる
 - [ ] `dashboard/app.js` が持続の名乗り (`job`・`testId`・`buildId`・`firstBuildId`・時刻) を描画する
 - [ ] 記録済みのビルド列を通したとき、`GET /persistence` と SSE に出る名乗りが `detectPersistence` (`prow-persist.ts`) の結果と一致することを試験で固定する
-- [ ] 全体の試験 (`cd server && npm test`) が通り、README・CLAUDE.md・devlog・台帳を合わせる
-
-### C23. 記録済みの試験結果の流れを本番サーバと dashboard に流す入口と C19 の画面表示
-
-設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-22 のレビュー (観察 1・推奨 1)。C19 で `LIGHTHOUSE_PROFILE=test-stream` (1 時間窓・参照 30 窓・鮮度ゾーン 34 時間・`failureCount`) が入ったが、`index.ts` は `test-stream` で起動しても `MockStreamGenerator` (50 evt/s) を流すだけで、記録済みの Prow の流れ (`data/prow/`) や外部の試験結果を本番サーバ (`index.ts` → `DashboardServer`) に流す入口が無い。また `dashboard/app.js` も C19 の `SnapshotPackage.failures` (窓ごとの失敗数と同時多発 `bursts`) をまだ描画しておらず、C17〜C21 の成果が CLI の報告に閉じている。
-
-- 決定 (2026-11-22、user が推奨の整備を承認): `test-stream` で取り込み済みの `data/prow/` の指定期間を事象の時刻 (`ts`) に沿って本番パイプライン (`RetentionBuffer` → `WindowHistory` → `Comparator` → `DashboardServer`) に流す再生口を用意し、`dashboard/app.js` に `SnapshotPackage.failures` (窓ごとの失敗数と `bursts` 同時多発) の表示を追加する (`mock` の既定動作は一切変えない)
-
-#### 完了条件
-- [ ] `LIGHTHOUSE_PROFILE=test-stream` のとき、取り込み済みの `data/prow/` の指定期間 (またはビルド列) を事象の時刻 (`ts`) に沿って本番パイプライン (`RetentionBuffer` → `WindowHistory` → `Comparator` → `DashboardServer`) に流せる再生口を用意する。既定 (`mock`) の動作と出力は既存の試験でバイト同一
-- [ ] `dashboard/app.js` が `SnapshotPackage.failures` (窓ごとの失敗した試験の数と同時多発 `bursts`) を描画する。`failures` が無い package (`mock`) では表示が変わらない
-- [ ] 記録済みの Prow の範囲を本番の再生口から流したとき、出される package の盲目・警報・同時多発 (`bursts`) が `prow-replay` の `1h-fresh` と一致することを試験で固定する
 - [ ] 全体の試験 (`cd server && npm test`) が通り、README・CLAUDE.md・devlog・台帳を合わせる
 
 ### C24. 粗窓の発火を契機にグループ別の遡及的再観測を自動で回す (観測層と Brain の結線)

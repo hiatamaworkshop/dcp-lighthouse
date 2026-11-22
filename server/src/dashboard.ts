@@ -36,6 +36,7 @@ import type { ObservationOverlay } from "./lens-view.js";
 import { floorToWindow, resolveAlign, type LensResult } from "./lens.js";
 import type { BrainDecision } from "./brain-adapter.js";
 import type { SnapshotPackage } from "./snapshot-curator.js";
+import type { ProwLiveStatus } from "./prow-live.js";
 
 export interface DashboardOptions {
   port?: number;
@@ -313,6 +314,12 @@ export class DashboardServer {
     private readonly forecaster?: Forecaster,
     /** Reads whether the `$F` intervals keep their promise (ROADMAP C5); GET /forecast carries its report as `calibration`. */
     private readonly forecastMonitor?: ForecastMonitor,
+    /**
+     * Only when a recorded stream is played instead of the mock generator (ROADMAP C23): where the playback is.
+     * Its presence says the generator is not the source — scenarios are refused, `streamRunning` follows the
+     * playback and the payload carries `replay`. Absent: nothing here changes.
+     */
+    private readonly replayStatus?: () => ProwLiveStatus | undefined,
   ) {}
 
   /**
@@ -344,6 +351,26 @@ export class DashboardServer {
     for (const res of this.decisionSubs) {
       sseWrite(res, { type: "replay_snapshot", ts: pkg.generatedAt, replayPackage: pkg });
     }
+  }
+
+  /**
+   * The live coarse view's package at `ts`: the last windows before the grid boundary at or before `ts`,
+   * against the declared reference — what broadcast() puts in the payload's `snapshot`. Null without a
+   * coarse view. Public so a test (and a recorded-stream check, ROADMAP C23) can ask the question the live
+   * view asks at a chosen instant without a client attached.
+   */
+  livePackage(ts: number): SnapshotPackage | null {
+    const coarseView = this.overlay.get("coarse");
+    if (!coarseView) return null;
+    const lens = this.registry.getObserve(coarseView.schemaId, coarseView.view) ?? {};
+    const compare = this.registry.getCompare(coarseView.schemaId, coarseView.view) ?? {};
+    const windowMs = effectiveWindowMs(lens, coarseView.current().window_ms);
+    this.checkRetentionBudget(windowMs, compare.reference_windows ?? LIVE_REFERENCE_WINDOW_COUNT);
+    this.checkGridAlignment(lens);
+    const { observation } = liveSpans(ts, windowMs, LIVE_REFERENCE_WINDOW_COUNT, lens.origin ?? 0);
+    const pkg = this.comparator.compare(this.buffer, lens, compare, observation);
+    this.reportReferenceBlindness(pkg, windowMs, pkg.comparison!.reference);
+    return pkg;
   }
 
   /** Called by the tick loop — broadcasts snapshot + any decisions. */
@@ -386,35 +413,24 @@ export class DashboardServer {
     // downsample_factor is the one stage that already changes the effective
     // window size, so it is folded in explicitly via effectiveWindowMs()
     // rather than read back off the LensResult.
-    const coarseView = this.overlay.get("coarse");
-    let snapshotPkg: SnapshotPackage | null = null;
-    if (coarseView) {
-      const lens = this.registry.getObserve(coarseView.schemaId, coarseView.view) ?? {};
-      const compare = this.registry.getCompare(coarseView.schemaId, coarseView.view) ?? {};
-      const windowMs = effectiveWindowMs(lens, coarseView.current().window_ms);
-      this.checkRetentionBudget(windowMs, compare.reference_windows ?? LIVE_REFERENCE_WINDOW_COUNT);
-      this.checkGridAlignment(lens);
-      const { observation } = liveSpans(
-        snapshot.ts,
-        windowMs,
-        LIVE_REFERENCE_WINDOW_COUNT,
-        lens.origin ?? 0,
-      );
-      snapshotPkg = this.comparator.compare(this.buffer, lens, compare, observation);
-      this.reportReferenceBlindness(snapshotPkg, windowMs, snapshotPkg.comparison!.reference);
-    }
+    const snapshotPkg = this.livePackage(snapshot.ts);
 
+    // A recorded stream (ROADMAP C23) has no generator to ask: it is flowing until the playback ends.
+    const replay = this.replayStatus?.();
     const payload = {
       ts: snapshot.ts,
       agents: snapshot.agents,
       domains: snapshot.domains,
       snapshot: snapshotPkg,
       qHistory: this.registry.rows().slice(-20),
-      activeScenario: this.generator.getCurrentLoad().activeScenario,
+      activeScenario: replay !== undefined ? null : this.generator.getCurrentLoad().activeScenario,
       // Whether events are flowing at all. /demo/stop halts the baseline too,
       // and the dashboard has no other way to tell a stopped stream from a
       // quiet one (2026-09-27 review, finding 3).
-      streamRunning: this.generator.getCurrentLoad().running,
+      streamRunning: replay !== undefined ? !replay.finished : this.generator.getCurrentLoad().running,
+      // Only when a recorded stream is played: where the playback is. Absent otherwise, so the payload of
+      // a process that does not select one is unchanged.
+      ...(replay !== undefined ? { replay } : {}),
     };
 
     for (const res of this.snapshotSubs) sseWrite(res, payload);
@@ -595,6 +611,12 @@ export class DashboardServer {
     }
 
     if (url.startsWith("/demo/start")) {
+      // A recorded stream is the source: the scenarios drive the mock generator, which is not running here.
+      if (this.replayStatus?.() !== undefined) {
+        jsonHeaders(res, 409);
+        res.end(JSON.stringify({ error: "a recorded stream is being played (LIGHTHOUSE_SOURCE=prow); scenarios drive the mock generator" }));
+        return;
+      }
       const scenario = parseQuery(url).get("scenario") as "AR" | "CG" | "RC" | null;
       if (!scenario || !["AR", "CG", "RC"].includes(scenario)) {
         jsonHeaders(res, 400);
@@ -823,7 +845,8 @@ export class DashboardServer {
       // response it can no longer set a status on — its only remaining move is
       // to destroy the socket, which reaches the caller as a connection error
       // rather than a 500.
-      const body = JSON.stringify(this.generator.getCurrentLoad());
+      const replay = this.replayStatus?.();
+      const body = JSON.stringify(replay !== undefined ? { ...this.generator.getCurrentLoad(), running: !replay.finished, replay } : this.generator.getCurrentLoad());
       jsonHeaders(res);
       res.end(body);
       return;

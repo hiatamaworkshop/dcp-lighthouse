@@ -24,6 +24,9 @@ import type { SnapshotPackage } from "./snapshot-curator.js";
 import { Comparator, assertComparable } from "./comparison.js";
 import { WindowHistory } from "./window-history.js";
 import { resolveStreamProfile } from "./stream-profile.js";
+import { loadProwLive, prowEventExtractor, type ProwLiveSource } from "./prow-live.js";
+import { DEFAULT_PROW_JOBS } from "./prow-import.js";
+import { resolve as resolvePath } from "node:path";
 import { Forecaster } from "./forecast.js";
 import { ForecastMonitor } from "./forecast-monitor.js";
 import { RuleBrain } from "./rule-brain.js";
@@ -44,6 +47,39 @@ const registry = new QRegistry();
  * selects the one measured on CI test results; an unknown name throws here, at boot.
  */
 const profile = resolveStreamProfile(process.env.LIGHTHOUSE_PROFILE);
+
+/**
+ * LIGHTHOUSE_SOURCE (ROADMAP C23) — "mock" (default: MockStreamGenerator) or "prow": a recorded stream of
+ * imported Prow days (data/prow) played into this same chain at a virtual clock. Opt-in, and only with the
+ * "test-stream" profile: the mock profile's 10 s / 1 s views are blind to this stream (C12), so the pair
+ * would run and say nothing.
+ *
+ *   LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=prow PROW_REPLAY_FROM=2026-10-26 PROW_REPLAY_TO=2026-11-15 npm start
+ *
+ * PROW_REPLAY_SPEED: virtual seconds per real second (default 3600 = an hour of the recording per second).
+ * PROW_DIR: where the days were imported (default ../data/prow); PROW_JOBS: comma-separated (default the three C17 jobs).
+ * Every misconfiguration throws here, at boot, as an unknown profile does.
+ */
+const LIGHTHOUSE_SOURCE = process.env.LIGHTHOUSE_SOURCE ?? "mock";
+let prowLive: ProwLiveSource | undefined;
+if (LIGHTHOUSE_SOURCE === "prow") {
+  if (profile.name !== "test-stream") {
+    throw new Error(`LIGHTHOUSE_SOURCE=prow needs LIGHTHOUSE_PROFILE=test-stream (the "${profile.name}" views cannot score this stream)`);
+  }
+  const fromDay = process.env.PROW_REPLAY_FROM;
+  const toDay = process.env.PROW_REPLAY_TO;
+  if (fromDay === undefined || toDay === undefined) {
+    throw new Error("LIGHTHOUSE_SOURCE=prow needs PROW_REPLAY_FROM and PROW_REPLAY_TO (YYYY-MM-DD, imported days)");
+  }
+  const speed = Number(process.env.PROW_REPLAY_SPEED ?? 3600); // virtual s per real s = virtual ms per real ms
+  const jobs = (process.env.PROW_JOBS ?? DEFAULT_PROW_JOBS.join(",")).split(",").filter((j) => j !== "");
+  const loaded = loadProwLive({ dir: resolvePath(process.env.PROW_DIR ?? "../data/prow"), jobs, fromDay, toDay, speed });
+  prowLive = loaded.source;
+  const st = prowLive.status();
+  console.log(`[lighthouse] LIGHTHOUSE_SOURCE=prow — ${fromDay}…${toDay}, ${jobs.join(", ")}: ${loaded.builds} builds (${loaded.missing} could not be read), ${st.total} events, ${speed}x`);
+} else if (LIGHTHOUSE_SOURCE !== "mock") {
+  throw new Error(`LIGHTHOUSE_SOURCE must be "mock" or "prow", got "${LIGHTHOUSE_SOURCE}"`);
+}
 
 /**
  * Bootstrap retention width. The literal appears exactly once: the $Q row below
@@ -156,7 +192,7 @@ if (profile.forecast) {
 
 const generator  = new MockStreamGenerator();
 const adapter    = new TestorAdapter({ windowMs: 5_000 });
-const buffer     = new RetentionBuffer<TestEvent>(testEventExtractor, {
+const buffer     = new RetentionBuffer<TestEvent>(prowLive !== undefined ? prowEventExtractor : testEventExtractor, {
   retentionWindowMs: RETENTION_WINDOW_MS,
   ...(REFERENCE_WINDOW_MS !== undefined ? { referenceWindowMs: REFERENCE_WINDOW_MS } : {}),
   ...(REFERENCE_THINNING_RATIO !== undefined ? { thinningRatio: REFERENCE_THINNING_RATIO } : {}),
@@ -341,8 +377,13 @@ if (BRAIN_MODE === "claude") {
 } else if (BRAIN_MODE !== "rule") {
   throw new Error(`BRAIN_MODE must be "rule" or "claude", got "${BRAIN_MODE}"`);
 }
+// A recorded stream has no per-agent ticks for a Brain to read (that is ROADMAP C24); an LLM deliberating
+// over empty snapshots would only spend.
+if (prowLive !== undefined && BRAIN_MODE !== "rule") {
+  throw new Error(`LIGHTHOUSE_SOURCE=prow runs with BRAIN_MODE=rule only, got "${BRAIN_MODE}"`);
+}
 
-const dashboard  = new DashboardServer(generator, adapter, brain, registry, comparator, overlay, buffer, brainDiagnostics, forecaster, forecastMonitor);
+const dashboard  = new DashboardServer(generator, adapter, brain, registry, comparator, overlay, buffer, brainDiagnostics, forecaster, forecastMonitor, prowLive !== undefined ? () => prowLive!.status() : undefined);
 
 // Two parallel observation views
 overlay.add("coarse", "test_result:v1", { view: "coarse" });
@@ -355,7 +396,8 @@ bindPipelineRetention(registry, buffer);
 
 // ── Wire event flow ───────────────────────────────────────────────────────────
 
-generator.onEvent((event) => {
+// A recorded stream is fed from the tick loop below, on its virtual clock; the mock generator is not the source.
+if (prowLive === undefined) generator.onEvent((event) => {
   // Domain adapter
   adapter.push(event);
 
@@ -393,7 +435,17 @@ setInterval(() => {
       console.warn(`[forecast-monitor] update failed (further failures are not logged): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  const snapshot = adapter.snapshot();
+  // The recorded stream (ROADMAP C23): the events whose time has come go into the buffer — the one the live
+  // view reads — and the tick carries the virtual time, so the view asks what prow-replay.ts asked at that
+  // grid boundary. No per-agent window exists for it, so the Brain reads an empty snapshot and judges nothing.
+  let snapshot: ReturnType<typeof adapter.snapshot>;
+  if (prowLive !== undefined) {
+    const vnow = prowLive.virtualNow(Date.now());
+    prowLive.advanceTo(vnow, (e) => buffer.observe(e, "test_result:v1"));
+    snapshot = { ts: vnow, agents: [], domains: [], touchedBitsThisTick: [] };
+  } else {
+    snapshot = adapter.snapshot();
+  }
   brain.observe(snapshot);
   const decisions = brain.decide();
   // Replay packages are sent AFTER this tick's decisions (see the broadcast at
@@ -570,8 +622,8 @@ setInterval(() => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-generator.start({ rate: 50 });
+if (prowLive === undefined) generator.start({ rate: 50 });
 dashboard.start({ port: 3001 });
 
-console.log(`[lighthouse] Phase 1 pilot running. Generator: 50 evt/s, profile: ${profile.name}`);
-console.log("[lighthouse] POST /demo/start?scenario=AR|CG|RC to run a scenario");
+console.log(`[lighthouse] Phase 1 pilot running. ${prowLive === undefined ? "Generator: 50 evt/s" : "Source: recorded Prow stream"}, profile: ${profile.name}`);
+if (prowLive === undefined) console.log("[lighthouse] POST /demo/start?scenario=AR|CG|RC to run a scenario");

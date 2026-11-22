@@ -7070,3 +7070,16 @@ user「直近の実装でもあまり進捗というか使えるシステムに�
    - 上の配線が動いた上で、Prow の presubmit (PR の merge 前検査、2026-11-17 (7) の案 a) または自前の試験実行 (`npm test` 等の結果投入) を通し、植え込みでない回帰に対して粗窓 + 再観測 (`C19` + `C24`) と試験ごとの持続 (`C21` + `C22`) がどう名乗るかを確かめる。
 
 **起票・整備 (台帳、実装なし)**: 別の AI にそのまま実装を依頼できるよう、推奨順に `## 予定` を `C23 → C22 → C24` とし、それぞれに `#### 完了条件` を付けた (`C23`: 記録流を本番サーバと UI に流す入口と C19 の画面表示、`C22`: 持続の名乗りをドメイン層・`GET /persistence`・SSE・UI に置く、`C24`: 粗窓発火からのグループ別自動 replay、`C25`: 本物の回帰がある流れでの確認 = `保留(C24 の後)`)。
+
+## 2026-11-22 (2) — C23: 記録済みの Prow の流れを本番サーバと dashboard に流す入口と C19 の画面表示
+
+**作ったもの**
+- `prow-live.ts`: 取り込み済みの `data/prow/` の日 (`loadProwRange` で検証・未取り込みの日を含む範囲は拒否) を仮想時計で保持し、時刻が来た事象を順に渡す `ProwLiveSource` と `prowEventExtractor` (`prowLensEvent` そのまま、job = `agentId`・SIG = `area`)。
+- `index.ts`: 環境変数 `LIGHTHOUSE_SOURCE=prow` (既定 `mock`、未知の名前や `LIGHTHOUSE_PROFILE=test-stream` 以外との組・日付欠落・`BRAIN_MODE !== "rule"` は起動時に例外) で、`MockStreamGenerator` の代わりに `ProwLiveSource` を仮想時計 (`PROW_REPLAY_SPEED` 既定 `3600` = 1 時間/秒) で `RetentionBuffer` → `WindowHistory` → `Comparator` → `DashboardServer` に流す。既定 (`mock`) の動作・出力は不変。
+- `dashboard.ts`: `livePackage(ts)` を切り出し、`replayStatus` が渡されたときは `/status` と SSE (`/events/snapshot`) に `replay` の進捗 (`virtualNow`・`progress`・`fed`/`total`・`finished`) を載せ、`/demo/start` を 409 で拒否 (`streamRunning` は `!replay.finished`)。
+- `dashboard/index.html`・`dashboard/app.js`: `SnapshotPackage.failures` (窓ごとの失敗した試験の数と同時多発 `bursts`、原因は名乗らない) を live・replay 両欄に描画 (`failures` の無い `mock` の package では空のまま)。再生時はヘッダのバッジに仮想時刻と進捗を出す。
+
+**確認と完了条件**
+1. 試験 (`prow-live.test.ts` 9 件、全体 727 件パス): 仮想時計・単調送出・進捗・不正入力拒否、本番の `DashboardServer.livePackage(t)` が境界ごとに `prow-replay` (`1h-fresh`) と盲目・下向きタイル・同時多発 (`bursts`) が一致すること、`failureCount` 無しでは `failures` が `undefined` のままであること、`/demo/start` 409 と `/status` の `replay` 欄を固定。
+2. 実サーバ確認: `LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=prow PROW_REPLAY_FROM=2026-10-26 PROW_REPLAY_TO=2026-11-15 PROW_REPLAY_SPEED=43200` で起動 (1,745 ビルド・1,774,055 事象・欠落 0)、`/status` の進捗と `/events/snapshot` SSE の 11 配信 (`scored: 11`, `blind: 0`, `haveFailures: 11`)、`node --check dashboard/app.js` を確認。
+3. README・CLAUDE.md・devlog・台帳を合わせた。次は C22 (持続の名乗りを本番サーバと UI に配線)。
