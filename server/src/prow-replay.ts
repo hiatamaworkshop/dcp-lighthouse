@@ -33,7 +33,7 @@ import { liveSpans } from "./dashboard.js";
 import type { LensEvent } from "./lens.js";
 import type { QCompareParams, QObserveParams } from "./q-registry.js";
 import { RetentionBuffer } from "./retention-buffer.js";
-import type { NullModel, ShapeTag } from "./snapshot-curator.js";
+import type { NullModel, ShapeTag, SnapshotPackage } from "./snapshot-curator.js";
 import { WindowHistory } from "./window-history.js";
 import { TEST_STREAM_PROFILE, type StreamProfile } from "./stream-profile.js";
 
@@ -154,6 +154,18 @@ export interface ReplayTally {
   bursts?: { burstAt: number; claimed: Map<number, number>; inEvents: Map<number, number>; missed: number; disagreed: number };
 }
 
+/**
+ * Where a compared package came from, for a reader that asks the same chain a further question at that
+ * boundary (C28 replays the flagged window grouped, as index.ts does on a CoarseReplayTrigger decision).
+ * The buffer holds exactly the events before `t`.
+ */
+export interface ReplayPackageContext {
+  t: number;
+  buffer: RetentionBuffer<LensEvent>;
+  comparator: Comparator;
+  compare: QCompareParams;
+}
+
 /** One asked boundary, as an outside reader sees it (C20 reads which windows a downward tile covered). */
 export interface ReplayEvaluation {
   /** The grid boundary: when the live view would show this package. */
@@ -187,6 +199,7 @@ export function replayThroughShippedWiring(
   toMs: number,
   wiring: ReplayWiring,
   onEvaluation?: (ev: ReplayEvaluation) => void,
+  onPackage?: (pkg: SnapshotPackage, at: ReplayPackageContext) => void,
 ): ReplayTally {
   const W = wiring.windowMs;
   const N = wiring.liveWindows;
@@ -274,6 +287,7 @@ export function replayThroughShippedWiring(
       tally.firstError ??= e instanceof Error ? e.message : String(e);
       continue;
     }
+    onPackage?.(pkg, { t, buffer, comparator, compare: decl });
     // A burst is a count of the window itself, so a package without a yardstick still names it.
     if (tally.bursts !== undefined) for (const b of pkg.failures?.bursts ?? []) tally.bursts.claimed.set(b.windowStart, b.failed);
     if (!pkg.referenceUsable) {

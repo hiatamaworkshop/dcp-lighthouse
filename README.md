@@ -311,9 +311,10 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **記録済みの試験結果の流れを本番サーバと dashboard に流す入口** (2026-11-22、C23) — `LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=prow PROW_REPLAY_FROM=… PROW_REPLAY_TO=…` で、取り込み済みの `data/prow/` の日を仮想時計で本番と同じ `RetentionBuffer` → `WindowHistory` → `Comparator` に流す (`prow-live.ts`。mock の既定は不変)。dashboard は package の `failures` (窓ごとの失敗数と同時多発) と再生の位置を描く。ライブの package は C12 の再生と境界ごとに一致 (試験で固定)。実機で 3 週分 (1,745 ビルド・1,774,055 事象) を 43200 倍速で流して確認 (`failures` あり・盲目 0/11)。詳細は ROADMAP_BRIEF.md 2026-11-22 (2)
 - [x] **試験ごとの持続の名乗りを灯台の出力にする** (2026-11-22、C22) — `PersistenceDetector` (`prow-persist.ts`) をドメイン非依存層 (`SnapshotCurator` / `lens.ts`) には入れず、試験の流れ向けのドメイン層 (`ProwPersistenceFeed`) として本番サーバに配線。`GET /persistence` と SSE (`/events/snapshot`) の別欄 `persistence`、および `dashboard/app.js` の専用パネルに出す (`mock` では非表示・`active: false`・package は不変)。`detectPersistence` との一致を試験で固定。詳細は ROADMAP_BRIEF.md 2026-11-22 (3)
 - [x] **粗窓の発火を契機にグループ別の遡及的再観測を自動で回す** (2026-11-22、C24) — `CoarseReplayTrigger` (`coarse-replay-trigger.ts`) を `LIGHTHOUSE_PROFILE=test-stream` に配線。合算の 1 時間粗窓で下向きタイル (`dip`・`step_down`) または同時多発 (`failures.bursts`) が出た窓に重複抑止つきで `group_by: ["agentId"]` の `replayRequest` を自動発火 (`compare:test_result:v1#fine` も 30 窓参照を宣言し `broadcastReplay` へ配信、`mock` は不変)。実データ 11 日 (2026-08-30〜09-09、873 ビルド) で発火 13 窓 (同時多発 9/9)・帰属 12/13 がすべて `ci-kubernetes-e2e-gci-gce` に特定。詳細は ROADMAP_BRIEF.md 2026-11-22 (4)
+- [x] **再生速度の上限・自動 replay の専用行・植え込みでの帰属** (2026-11-22、C26〜C28) — 記録流の再生は live が追える速度 (1 時間窓で 7200) を超えると起動時に拒否。自動 replay は `$Q` の `#regroup` 行で採点し、ライブの `#fine` を書き換えない。C24 の帰属 12/13 は既知の 1 ジョブの固まりの配線確認だったので、他のジョブに回帰を植えて測った (`run-prow-attribution-report`): 誤帰属 0、5 試験の回帰で正しいジョブだけを名乗ったのは 1 ジョブ 50/60・2 ジョブ同時 44/60、外れは「名乗らない」側。詳細は ROADMAP_BRIEF.md 2026-11-22 (5)(6)
 - [ ] **次** (判断待ち、台帳 C25): 本物の回帰がある流れ (presubmit または自前の試験実行) で名乗りを確かめる (C25)。全 pass の参照の帰無 (C18)・量チャネル (C7) は保留。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 733 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 742 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 

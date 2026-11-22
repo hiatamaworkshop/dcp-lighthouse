@@ -24,8 +24,8 @@ import type { SnapshotPackage } from "./snapshot-curator.js";
 import { Comparator, assertComparable } from "./comparison.js";
 import { WindowHistory } from "./window-history.js";
 import { resolveStreamProfile } from "./stream-profile.js";
-import { CoarseReplayTrigger } from "./coarse-replay-trigger.js";
-import { loadProwLive, prowEventExtractor, type ProwLiveSource, type ProwPersistenceFeed } from "./prow-live.js";
+import { CoarseReplayTrigger, COARSE_REPLAY_VIEW } from "./coarse-replay-trigger.js";
+import { loadProwLive, maxReplaySpeed, prowEventExtractor, type ProwLiveSource, type ProwPersistenceFeed } from "./prow-live.js";
 import { DEFAULT_PROW_JOBS } from "./prow-import.js";
 import { resolve as resolvePath } from "node:path";
 import { Forecaster } from "./forecast.js";
@@ -34,7 +34,7 @@ import { RuleBrain } from "./rule-brain.js";
 import { BRAIN_ANSWER_SCHEMA, ClaudeBrain } from "./claude-brain.js";
 import { ShadowBrain } from "./shadow-brain.js";
 import { makeAnthropicAsk } from "./anthropic-ask.js";
-import { DashboardServer, isReroutedAgentBacked } from "./dashboard.js";
+import { DashboardServer, isReroutedAgentBacked, LIVE_REFERENCE_WINDOW_COUNT } from "./dashboard.js";
 import type { ResettableBrain } from "./brain-adapter.js";
 import type { TestEvent } from "./mock-stream-generator.js";
 
@@ -61,6 +61,8 @@ const profile = resolveStreamProfile(process.env.LIGHTHOUSE_PROFILE);
  * PROW_DIR: where the days were imported (default ../data/prow); PROW_JOBS: comma-separated (default the three C17 jobs).
  * Every misconfiguration throws here, at boot, as an unknown profile does.
  */
+/** Real ms between ticks of the loop below (Brain, dashboard broadcast, recorded-stream feed). */
+const TICK_MS = 1000;
 const LIGHTHOUSE_SOURCE = process.env.LIGHTHOUSE_SOURCE ?? "mock";
 let prowLive: ProwLiveSource | undefined;
 let prowPersistence: ProwPersistenceFeed | undefined;
@@ -74,6 +76,16 @@ if (LIGHTHOUSE_SOURCE === "prow") {
     throw new Error("LIGHTHOUSE_SOURCE=prow needs PROW_REPLAY_FROM and PROW_REPLAY_TO (YYYY-MM-DD, imported days)");
   }
   const speed = Number(process.env.PROW_REPLAY_SPEED ?? 3600); // virtual s per real s = virtual ms per real ms
+  // Faster than the live view can follow and windows go unscored, with no sign (ROADMAP C26): refuse it.
+  const coarseWindowMs = profile.coarse.window_ms;
+  if (coarseWindowMs === undefined) throw new Error(`profile "${profile.name}" declares no coarse window`);
+  const maxSpeed = maxReplaySpeed(coarseWindowMs, LIVE_REFERENCE_WINDOW_COUNT, TICK_MS);
+  if (!(speed > 0) || speed > maxSpeed) {
+    throw new Error(
+      `PROW_REPLAY_SPEED=${speed} is outside (0, ${maxSpeed}]: the live view scores the last ` +
+        `${LIVE_REFERENCE_WINDOW_COUNT} windows of ${coarseWindowMs} ms each ${TICK_MS} ms tick, so a faster playback skips windows`,
+    );
+  }
   const jobs = (process.env.PROW_JOBS ?? DEFAULT_PROW_JOBS.join(",")).split(",").filter((j) => j !== "");
   const loaded = loadProwLive({ dir: resolvePath(process.env.PROW_DIR ?? "../data/prow"), jobs, fromDay, toDay, speed });
   prowLive = loaded.source;
@@ -174,11 +186,12 @@ registry.addWriteGate("compare", (p) => {
 });
 registry.set("compare:test_result:v1", { reference: "preceding", null_model: "independent" });
 // A profile whose live view reads a longer reference (test-stream: 30 windows) declares it for coarse
-// and for fine (automatic grouped replays, ROADMAP C24, need the same 30-window reference so a 1-hour
-// replay is not blind). The mock profile writes neither row, keeping its comparison unchanged.
+// and for the automatic grouped replays' own view (ROADMAP C24/C27: a 1-hour replay needs the same
+// 30-window reference or it is blind; its own view so the replays never rewrite the live #fine rows).
+// The mock profile writes neither row, keeping its comparison unchanged.
 if (profile.name !== "mock") {
   registry.set("compare:test_result:v1#coarse", { ...profile.coarseCompare });
-  registry.set("compare:test_result:v1#fine", { ...profile.coarseCompare });
+  registry.set(`compare:test_result:v1#${COARSE_REPLAY_VIEW}`, { ...profile.coarseCompare });
 }
 // The `$F` rows each view publishes (ROADMAP_BRIEF.md 2026-10-22 (8), forecast.ts):
 // kriging from the last windows, γ̂ from the window summaries. The history a row
@@ -428,8 +441,7 @@ if (prowLive === undefined) generator.onEvent((event) => {
 });
 
 // ── Tick loop (Brain + dashboard broadcast) ───────────────────────────────────
-
-const TICK_MS = 1000;
+// TICK_MS is declared near the top: the recorded stream's speed check reads it at boot.
 
 /** Highest ShadowEntry.seq already printed (see the shadow block below). */
 let shadowLogCursor = -1;

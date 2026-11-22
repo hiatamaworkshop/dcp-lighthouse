@@ -121,6 +121,24 @@ export class ProwLiveSource {
   }
 }
 
+/**
+ * The fastest playback the live view can follow without skipping windows (ROADMAP C26).
+ *
+ * DashboardServer.livePackage scores only the last `observedWindows` whole windows before the tick's
+ * virtual time, and the tick runs every `tickMs` real ms. Two ticks at virtual times v1 < v2 leave no
+ * window unscored iff floor(v2) − floor(v1) ≤ observedWindows · W, which holds whenever v2 − v1 ≤
+ * observedWindows · W. A late timer makes v2 − v1 larger than speed · tickMs, so one window is kept as
+ * headroom: the cap is (observedWindows − 1) · W / tickMs, which at the cap still covers every window
+ * when a tick is up to tickMs / (observedWindows − 1) late. Above it the coarse-replay trigger and the
+ * SSE would silently miss windows, so index.ts refuses such a speed at boot.
+ */
+export function maxReplaySpeed(windowMs: number, observedWindows: number, tickMs: number): number {
+  if (!(windowMs > 0) || !(tickMs > 0) || !Number.isInteger(observedWindows) || observedWindows < 2) {
+    throw new RangeError(`maxReplaySpeed: needs windowMs > 0, tickMs > 0 and an integer observedWindows ≥ 2 (got ${windowMs}, ${observedWindows}, ${tickMs})`);
+  }
+  return ((observedWindows - 1) * windowMs) / tickMs;
+}
+
 /** The first instant of a UTC day `YYYY-MM-DD`. */
 function dayStartMs(day: string): number {
   const t = Date.parse(`${day}T00:00:00Z`);

@@ -1,11 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { CoarseReplayTrigger } from "./coarse-replay-trigger.js";
+import { CoarseReplayTrigger, COARSE_REPLAY_VIEW } from "./coarse-replay-trigger.js";
 import type { SnapshotPackage } from "./snapshot-curator.js";
 import { ProwLiveSource, prowEventExtractor } from "./prow-live.js";
 import type { ProwEvent } from "./prow-events.js";
 import { TEST_STREAM_PROFILE } from "./stream-profile.js";
-import { QRegistry } from "./q-registry.js";
+import { QRegistry, parseScope } from "./q-registry.js";
 import { RetentionBuffer } from "./retention-buffer.js";
 import { WindowHistory } from "./window-history.js";
 import { Comparator } from "./comparison.js";
@@ -43,7 +43,7 @@ describe("CoarseReplayTrigger (ROADMAP C24)", () => {
     assert.equal(out.length, 1);
     assert.equal(out[0]!.type, "replayRequest");
     assert.deepEqual(out[0]!.qProposal, {
-      scope: "observe:test_result:v1#fine",
+      scope: "observe:test_result:v1#regroup",
       params: {
         window_ms: HOUR,
         align: "epoch",
@@ -100,7 +100,9 @@ describe("CoarseReplayTrigger (ROADMAP C24)", () => {
     registry.set("observe:test_result:v1#coarse", { ...profile.coarse });
     registry.set("observe:test_result:v1#fine", { ...profile.fine });
     registry.set("compare:test_result:v1#coarse", { ...profile.coarseCompare });
-    registry.set("compare:test_result:v1#fine", { ...profile.coarseCompare });
+    registry.set(`compare:test_result:v1#${COARSE_REPLAY_VIEW}`, { ...profile.coarseCompare });
+    const fineObserveBefore = registry.getObserve("test_result:v1", "fine");
+    const fineCompareBefore = registry.getCompare("test_result:v1", "fine");
 
     const buffer = new RetentionBuffer<TestEvent>(prowEventExtractor, { retentionWindowMs: profile.retentionMs });
     const history = new WindowHistory(buffer, { maxHistoryMs: profile.historyMs });
@@ -161,7 +163,8 @@ describe("CoarseReplayTrigger (ROADMAP C24)", () => {
           const p = d.qProposal!.params as Record<string, unknown> & { fromTs: number; toTs: number };
           const { fromTs, toTs, ...lens } = p;
           registry.set(d.qProposal!.scope, p as never);
-          const pkg = comparator.compare(buffer, lens, registry.getCompare("test_result:v1", "fine") ?? {}, { fromTs, toTs });
+          const scope = parseScope(d.qProposal!.scope);
+          const pkg = comparator.compare(buffer, lens, registry.getCompare(scope.target, scope.view) ?? {}, { fromTs, toTs });
           replayedPackages.push(pkg);
           dashboard.broadcastReplay(pkg);
         }
@@ -173,6 +176,12 @@ describe("CoarseReplayTrigger (ROADMAP C24)", () => {
       assert.equal(hour40[0]!.referenceUsable, true);
       const flaggedGroups = hour40[0]!.tiles.filter((t) => t.shapeTag === "dip" || t.shapeTag === "step_down").map((t) => t.group);
       assert.deepEqual(flaggedGroups, ["ci-e2e"], "grouped replay attributes the burst to ci-e2e only");
+      // C27: the replays read their own 30-window reference and leave the live #fine rows as they were
+      const ref = hour40[0]!.comparison!.reference;
+      assert.equal(ref.toTs - ref.fromTs + 1, 30 * HOUR, "the replay is scored against 30 preceding windows");
+      assert.deepEqual(registry.getObserve("test_result:v1", "fine"), fineObserveBefore, "the live fine view's lens is untouched");
+      assert.deepEqual(registry.getCompare("test_result:v1", "fine"), fineCompareBefore, "the live fine view's comparison is untouched");
+      assert.equal(registry.getObserve("test_result:v1", COARSE_REPLAY_VIEW)?.window_ms, HOUR, "the replay lens is recorded in its own row");
 
       // Confirm the replay_snapshot arrived on the /events/decisions SSE channel
       const chunk = await reader.read();

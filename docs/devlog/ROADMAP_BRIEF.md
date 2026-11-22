@@ -7082,6 +7082,7 @@ user「直近の実装でもあまり進捗というか使えるシステムに�
 **確認と完了条件**
 1. 試験 (`prow-live.test.ts` 9 件、全体 727 件パス): 仮想時計・単調送出・進捗・不正入力拒否、本番の `DashboardServer.livePackage(t)` が境界ごとに `prow-replay` (`1h-fresh`) と盲目・下向きタイル・同時多発 (`bursts`) が一致すること、`failureCount` 無しでは `failures` が `undefined` のままであること、`/demo/start` 409 と `/status` の `replay` 欄を固定。
 2. 実サーバ確認: `LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=prow PROW_REPLAY_FROM=2026-10-26 PROW_REPLAY_TO=2026-11-15 PROW_REPLAY_SPEED=43200` で起動 (1,745 ビルド・1,774,055 事象・欠落 0)、`/status` の進捗と `/events/snapshot` SSE の 11 配信 (`scored: 11`, `blind: 0`, `haveFailures: 11`)、`node --check dashboard/app.js` を確認。
+   **注 (2026-11-22 (6)、C26)**: 速度 43200 (12 時間/秒) では live の観測区間 (直近 3 窓) を tick ごとに 12 窓ずつ飛び越えるので、窓の約 3/4 は一度も採点されていない。「11 配信」はその条件の数。今はこの速度は起動時に拒否される (上限 7200)。
 3. README・CLAUDE.md・devlog・台帳を合わせた。次は C22 (持続の名乗りを本番サーバと UI に配線)。
 
 ## 2026-11-22 (3) — C22: 試験ごとの持続の名乗りをドメイン層・`GET /persistence`・SSE・dashboard に配線
@@ -7105,6 +7106,7 @@ user「直近の実装でもあまり進捗というか使えるシステムに�
 **確認と完了条件**
 1. 試験 (`coarse-replay-trigger.test.ts` 4 件、全体 733 件パス): dip/step_down のみ発火 (spike/baseline 無視)・盲目時の burst 発火・重複抑止と dip+burst の統合・3 ジョブ合成流での 2 段ループ (合算粗窓で検知 → 自動 `group_by: ["agentId"]` replay → `/events/decisions` SSE の `replay_snapshot` で `ci-e2e` のみに帰属) を固定。
 2. 実データ確認 (2026-08-30〜09-09 の 11 日・3 ジョブ・873 ビルド、09-01 の 58 件および 09-06〜07 の同時多発を含む区間): 本番配線 + `CoarseReplayTrigger` で **発火 13 窓 (うち同時多発 9 窓 = 9/9)**、自動 `group_by: ["agentId"]` replay の下向きタイルによる帰属 **12/13 (同時多発は 9/9)**、帰属先はすべて **`ci-kubernetes-e2e-gci-gce`** (他 2 ジョブへの誤帰属 0)。
+   **注 (2026-11-22 (5)(6)、C28)**: この区間の固まりは C13 で e2e-gci-gce のものと分かっていたので、これは配線確認 (既知の 1 ジョブの固まりを指した) であって、ジョブを見分ける力の証拠ではない。見分ける力は C28 の植え込みで測った。
 3. README・CLAUDE.md・devlog・台帳を合わせた。C23・C22・C24 の 3 項目を完了し、C25 (本物の回帰がある流れでの確認) を `保留(C24 の後)` から `提案` に戻した。
 
 ## 2026-11-22 (5) — C22〜C24 の評価: 配線は妥当、C24 の帰属の数字は識別の証拠ではない。C26〜C28 を起票 (実装なし)
@@ -7116,3 +7118,41 @@ user「外部AIから知見と実装があるはず、確認して評価を」�
 3. **自動 replay がライブの `$Q` 行を書き換える**: `CoarseReplayTrigger` の `replayRequest` は既存経路で `registry.set("observe:test_result:v1#fine", …)` を通るので、replay のたびに細窓のライブビューが 1 時間窓・`group_by: agentId` に変わったまま残る。replay は保持データを別レンズで見直すことで、ライブの状態を変える副作用は意図と違う。prow 入力では RuleBrain が何もしないので実害は画面だけ → C27。
 
 順序は C26 → C27 → C28 (測る前に入口と副作用を直す)。C25 (本物の回帰の流れ) はその後。
+
+## 2026-11-22 (6) — C26・C27・C28: 再生速度の上限、自動 replay の専用行、植え込みでの帰属
+
+user「do and 出来る所は調整を no team」。(5) で起票した 3 件を順に実装した。試験 742 件 (+9)。
+
+**C26 再生速度の上限**: `maxReplaySpeed(windowMs, observedWindows, tickMs)` (`prow-live.ts`) = (観測窓数 − 1) × 窓幅 ÷ tick。1 窓分は tick の遅れの余裕 (上限ちょうどで tick/(n−1) 遅れても全窓が採点される)。`index.ts` は `LIGHTHOUSE_SOURCE=prow` でこれを超える `PROW_REPLAY_SPEED` を起動時に拒否し、上限を名乗る (1 時間窓で 7200)。試験: 上限ちょうど・tick を交互に最大まで遅らせても 21 日の全窓が観測区間に入る、43200 では 7 割超の窓が採点されない。tick ごとに飛ばした境界をまとめて採点する案は、1 tick の費用と SSE の形が変わるので採らなかった。
+
+**C27 自動 replay の専用行**: `CoarseReplayTrigger` の既定の scope を `observe:test_result:v1#regroup` (`COARSE_REPLAY_VIEW`) にし、`index.ts` は C24 で `compare:#fine` に足した 30 窓参照を `compare:#regroup` へ移した。自動 replay はライブの `#fine` の `$Q[observe]` / `$Q[compare]` 行を書き換えない (試験で固定)。replay の package は 30 窓の参照を名乗る。RuleBrain の RC が `#fine` に書く経路 (L2 の書込面) は不変。
+
+**C28 帰属を植え込みで測る**: `prow-attribution.ts` (`replayCoarseThenRegroup`・`classifyAttribution`) と起動口 `run-prow-attribution-report.ts`。`replayThroughShippedWiring` に `onPackage` の口を足し (既存の集計は不変)、本番と同じ部品の並びで、境界ごとに粗窓の package を `CoarseReplayTrigger` に渡し、決定ごとにその窓を同じバッファから `group_by: ["agentId"]` で再観測する。規則は計測の前に固定: 名乗り = 窓を覆う下向きタイルのグループ、真値 = その窓に植えた失敗があるジョブ。exact / partial (真の一部だけ) / extra (真と偽が混在) / wrong (偽だけ) / none (何も名乗らない)。植えない slice で既に発火した窓は coincided として除く。
+
+範囲 2026-10-26〜11-15 (C20 と同じ 21 日・1,745 ビルド)、種 20261122、各ジョブ 20 起点、植え込みは 3 ビルド、全境界を評価 (C26 の上限以下の再生と同じ)。出力は `data/logs/c28-attribution-20261122.txt`、同じ引数で再実行して出力が一致することを確認。
+
+| 植えた先 / 大きさ | exact | partial | extra | wrong | none | 発火せず | coincided | 遅れ中央値 |
+|---|---|---|---|---|---|---|---|---|
+| unit / 1 試験 | 1 | 0 | 0 | 0 | 4 | 14 | 1 | 1.9 h |
+| unit / 5 試験 | 15 | 0 | 0 | 0 | 5 | 0 | 0 | 0.3 h |
+| integration / 1 試験 | 1 | 0 | 0 | 0 | 4 | 14 | 1 | 2.5 h |
+| integration / 5 試験 | 18 | 0 | 0 | 0 | 2 | 0 | 0 | 0.8 h |
+| e2e / 1 試験 | 6 | 0 | 0 | 0 | 5 | 9 | 0 | 1.4 h |
+| e2e / 5 試験 | 17 | 0 | 0 | 0 | 3 | 0 | 0 | 0.6 h |
+| unit + integration / 1 | 0 | 1 | 0 | 0 | 16 | 3 | 0 | 1.3 h |
+| unit + integration / 5 | 11 | 5 | 0 | 0 | 4 | 0 | 0 | 0.3 h |
+| unit + e2e / 1 | 0 | 5 | 0 | 0 | 11 | 4 | 0 | 1.1 h |
+| unit + e2e / 5 | 15 | 1 | 0 | 0 | 4 | 0 | 0 | 0.3 h |
+| integration + e2e / 1 | 1 | 8 | 0 | 0 | 9 | 2 | 0 | 1.4 h |
+| integration + e2e / 5 | 18 | 1 | 0 | 0 | 1 | 0 | 0 | 0.8 h |
+
+対照 (植えない 21 日): 発火 9 (同時多発 0)、名乗り none 7・e2e 2。
+
+読み:
+- **誤帰属は 0** (wrong・extra は全 240 植え込みで 0)。名乗ったときは、植えたジョブの中からだけ名乗る。外れ方はすべて「名乗らない (none)」= 盲目側に倒れる。
+- **5 試験の回帰は粗窓では 120/120 発火**し、そのうち正しいジョブだけを名乗ったのは 1 ジョブで 50/60 (75〜90%)、2 ジョブ同時で 44/60 (55〜90%)。残りは none か partial (片方だけ)。none になるのは、ジョブ別にすると family が 3 倍になり参照も薄くなる (C20 の制約がそのまま再観測の段にも効く)。
+- **1 試験の回帰は粗窓自体がほぼ発火しない** (C20 と同じ: 窓に 1 件 = flaky と同じ大きさ)。発火しても名乗らないことが多い。
+- 対照の発火 9 のうち名乗ったのは 2 (e2e)。植えない記録では、粗窓の発火のほとんどはジョブ別に分けると根拠が足りなくなる大きさ。
+- C24 の「12/13」は既知の固まりの配線確認として読み替えた (2026-11-22 (4) の節に注記)。
+
+次: C25 (本物の回帰がある流れ) の判断待ち。

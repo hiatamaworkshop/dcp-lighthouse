@@ -23,12 +23,20 @@
 import type { BrainDecision } from "./brain-adapter.js";
 import type { SnapshotPackage, ShapeTag } from "./snapshot-curator.js";
 
+/**
+ * The `$Q` view the automatic replays write (ROADMAP C27). Its own view, not the live `#fine` one: a
+ * replay re-observes retained events through another lens, and writing that lens over the fine view's
+ * row would leave the live view switched to it after the replay. index.ts declares the matching
+ * `compare:test_result:v1#regroup` row (the 30-window reference a 1-hour grouped replay needs).
+ */
+export const COARSE_REPLAY_VIEW = "regroup";
+
 const DOWNWARD_TAGS: ReadonlySet<ShapeTag> = new Set<ShapeTag>(["dip", "step_down"]);
 
 export interface CoarseReplayTriggerOptions {
   /** Grouping keys for the automatic replay lens. Default: `["agentId"]`. */
   groupBy?: readonly string[];
-  /** $Q scope written by the emitted replayRequest. Default: `"observe:test_result:v1#fine"`. */
+  /** $Q scope written by the emitted replayRequest. Default: `"observe:test_result:v1#regroup"` (COARSE_REPLAY_VIEW). */
   scope?: string;
   /** Maximum distinct window spans remembered for deduplication. Default: 1024. */
   maxRemembered?: number;
@@ -44,7 +52,7 @@ export class CoarseReplayTrigger {
     const groupBy = opts.groupBy ?? ["agentId"];
     if (groupBy.length === 0) throw new RangeError("CoarseReplayTrigger: groupBy must be non-empty");
     this.groupBy = [...groupBy];
-    this.scope = opts.scope ?? "observe:test_result:v1#fine";
+    this.scope = opts.scope ?? `observe:test_result:v1#${COARSE_REPLAY_VIEW}`;
     this.maxRemembered = opts.maxRemembered ?? 1024;
   }
 

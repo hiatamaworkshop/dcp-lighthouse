@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ProwLiveSource, ProwPersistenceFeed, prowEventExtractor } from "./prow-live.js";
+import { ProwLiveSource, ProwPersistenceFeed, maxReplaySpeed, prowEventExtractor } from "./prow-live.js";
 import type { ProwEvent } from "./prow-events.js";
 import type { ProwBuild } from "./prow-import.js";
 import { detectPersistence, type Announcement } from "./prow-persist.js";
@@ -12,7 +12,7 @@ import { RetentionBuffer } from "./retention-buffer.js";
 import { WindowHistory } from "./window-history.js";
 import { Comparator } from "./comparison.js";
 import { ObservationOverlay } from "./lens-view.js";
-import { DashboardServer } from "./dashboard.js";
+import { DashboardServer, LIVE_REFERENCE_WINDOW_COUNT, liveSpans } from "./dashboard.js";
 import type { TestEvent } from "./mock-stream-generator.js";
 
 const T0 = Date.parse("2026-11-01T00:00:00Z");
@@ -281,3 +281,46 @@ describe("per-test persistence output (ROADMAP C22)", () => {
   });
 });
 
+
+describe("maxReplaySpeed (ROADMAP C26)", () => {
+  const W = TEST_STREAM_PROFILE.coarse.window_ms!;
+  const TICK = 1000;
+
+  /** Ticks at the real times given; returns the windows (grid starts) never inside any tick's observation span. */
+  function unscored(speed: number, realTicks: number[], fromMs: number, toMs: number): number[] {
+    const covered = new Set<number>();
+    for (const r of realTicks) {
+      const v = Math.min(toMs, fromMs + r * speed);
+      const { observation } = liveSpans(v, W, LIVE_REFERENCE_WINDOW_COUNT, 0);
+      for (let s = observation.fromTs; s < observation.toTs; s += W) covered.add(s);
+    }
+    const missed: number[] = [];
+    for (let s = fromMs; s + W <= toMs; s += W) if (!covered.has(s)) missed.push(s);
+    return missed;
+  }
+
+  it("is (observedWindows − 1) windows of virtual time per tick: 7200 for the test-stream 1-hour window", () => {
+    assert.equal(maxReplaySpeed(W, LIVE_REFERENCE_WINDOW_COUNT, TICK), 7200);
+    assert.throws(() => maxReplaySpeed(W, 1, TICK), RangeError);
+    assert.throws(() => maxReplaySpeed(0, 3, TICK), RangeError);
+  });
+
+  it("at the cap, every window of the range is scored at least once, even with ticks late by up to tick/(n−1)", () => {
+    const speed = maxReplaySpeed(W, LIVE_REFERENCE_WINDOW_COUNT, TICK);
+    const from = T0, to = T0 + 21 * 24 * HOUR;
+    const ticks: number[] = [];
+    const lateMax = TICK / (LIVE_REFERENCE_WINDOW_COUNT - 1);
+    // Every other tick is as late as allowed, the next one on time: the widest gaps the headroom promises to absorb.
+    for (let k = 1; (k - 1) * TICK * speed <= to - from + 2 * W * LIVE_REFERENCE_WINDOW_COUNT; k++) ticks.push(k * TICK + (k % 2 === 0 ? lateMax : 0));
+    assert.deepEqual(unscored(speed, ticks, from, to), []);
+  });
+
+  it("above what the view can follow (C23's 43200 run), most windows are never scored — what the boot check refuses", () => {
+    const from = T0, to = T0 + 21 * 24 * HOUR;
+    const ticks: number[] = [];
+    for (let k = 1; (k - 1) * TICK * 43200 <= to - from; k++) ticks.push(k * TICK);
+    const total = (to - from) / W;
+    const missed = unscored(43200, ticks, from, to).length;
+    assert.ok(missed / total > 0.7, `missed ${missed}/${total}`);
+  });
+});

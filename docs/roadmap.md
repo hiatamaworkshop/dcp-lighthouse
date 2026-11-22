@@ -4,13 +4,18 @@
 
 ## 予定
 
-- [ ] C26
-- [ ] C27
-- [ ] C28
 
 ## 閉じた項目
 
+- [x] C28 粗窓からの自動 replay の帰属を、他のジョブへの植え込みで測る (2026-11-22、誤帰属 0・5 試験の回帰で正しいジョブだけを名乗ったのは 1 ジョブで 50/60・2 ジョブ同時で 44/60。記録は ROADMAP_BRIEF の 2026-11-22 （6） の節)
+  - `prow-attribution.ts`・`run-prow-attribution-report.ts`: 本番と同じ部品の並び + `CoarseReplayTrigger` + 自動 replay を植え込みで再生 (`replayThroughShippedWiring` に `onPackage` の口)。ジョブ別・大きさ別・2 ジョブ同時と、植えない対照 (発火 9・名乗り 2) を同じ出力に並べる
+  - 範囲 2026-10-26〜11-15・種 20261122・3 ビルド・全境界評価を報告に書き、再実行で出力一致。C24 の「12/13」は配線確認と注記
+- [x] C27 自動の遡及的再観測がライブの `$Q[observe]` 行を書き換えない (2026-11-22、専用の `#regroup` 行。記録は ROADMAP_BRIEF の 2026-11-22 （6） の節)
+  - `CoarseReplayTrigger` の既定の scope を `observe:test_result:v1#regroup` に、30 窓参照を `compare:#regroup` に移した。`#fine` の行は起動時のまま (試験で固定)、RuleBrain の RC は不変
+- [x] C26 記録流の再生で、飛ばした窓を黙って作らない (2026-11-22、`maxReplaySpeed` と起動時の拒否。記録は ROADMAP_BRIEF の 2026-11-22 （6） の節)
+  - 1 時間窓で上限 7200。上限ちょうど・tick 遅れありで全窓が採点されることと、43200 で 7 割超が採点されないことを試験で固定。C23 の実サーバ確認に注記
 - [x] C24 粗窓の発火を契機にグループ別の遡及的再観測を自動で回す (2026-11-22、`CoarseReplayTrigger` と `test-stream` の自動 grouped replay 配線。記録は ROADMAP_BRIEF の 2026-11-22 （4） の節)
+  - 注 (C28): 下の「帰属 12/13」は既知の 1 ジョブの固まりを指した配線確認。見分ける力は C28 で測った
   - `coarse-replay-trigger.ts`・`index.ts`: `LIGHTHOUSE_PROFILE=test-stream` で合算 1 時間粗窓の `SnapshotPackage` から下向きタイル (`dip`・`step_down`) または同時多発 (`failures.bursts`) を拾い、窓区間ごとに重複抑止つきで `group_by: ["agentId"]` の `replayRequest` を自動発火 (`compare:#fine` も 30 窓参照、`broadcastReplay` へ配信、`mock` は不変)
   - 実データ 11 日 (2026-08-30〜09-09、873 ビルド) で発火 13 窓 (同時多発 9/9)・帰属 12/13 (同時多発 9/9) がすべて `ci-kubernetes-e2e-gci-gce` に特定。試験 733 件 (+4)
 - [x] C22 試験ごとの持続の名乗りを灯台の出力にする (2026-11-22、ドメイン層 `ProwPersistenceFeed` と `GET /persistence`・SSE 別欄・dashboard パネル。記録は ROADMAP_BRIEF の 2026-11-22 （3） の節)
@@ -132,48 +137,3 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 - user が決めること (C24 の後): 陽性 (本物の回帰) があるどの流れで確かめるか — (a) Prow の presubmit (PR の merge 前検査の取り込み、2026-11-17 (7) の案 a)、(b) 自前の試験実行 (`npm test` 等の結果を灯台に流し込む) のどちらか、または両方か
 - 推奨 (2026-11-22 レビュー): 先に C23・C22・C24 で現在の 89 日の記録流が本番サーバ・UI・再観測まで一通り動く状態を作ってから、presubmit (案 a) または自前の試験実行を同じ入口に通して本物の回帰での名乗りと遅れを測る
 - 決定になったら完了条件を付ける
-
-### C26. 記録流の再生で、飛ばした窓を黙って作らない (`PROW_REPLAY_SPEED` の上限)
-
-設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-22 (5) の 2。`DashboardServer.livePackage` は直近 `LIVE_REFERENCE_WINDOW_COUNT` (3) 窓だけを採点し、tick は 1 秒。`LIGHTHOUSE_SOURCE=prow` で 1 tick に進む仮想時間 (`PROW_REPLAY_SPEED` × 1 秒) が観測区間 (窓幅 × 3) を超えると、一度も採点されない窓が出て、C24 の自動 replay もそこでは発火しない。1 時間窓では速度 10800 超。C23 の実サーバ確認 (43200) はこの条件だった。
-
-- 方針: 起動時に拒否する (未知のプロファイルや日付欠落と同じく `index.ts` で例外)。tick ごとに飛ばした境界をまとめて採点する案は、遅い速度でも同じ答えになる利点があるが、`livePackage` を 1 tick に何度も呼ぶ費用と SSE の配信の形が変わるので採らない
-- 上限は窓幅と `LIVE_REFERENCE_WINDOW_COUNT` と tick から計算する (定数を手で書かない)
-
-#### 完了条件
-- [ ] `LIGHTHOUSE_SOURCE=prow` で、1 tick の仮想時間が live の観測区間 (窓幅 × `LIVE_REFERENCE_WINDOW_COUNT`) を超える `PROW_REPLAY_SPEED` は起動時に例外で拒否され、メッセージが許される上限の速度を名乗る
-- [ ] 上限ちょうどの速度では、再生区間の全ての窓の境界が少なくとも 1 回 `livePackage` の観測区間に入ることを試験で固定する
-- [ ] 既定 (`mock`) と既定の速度 3600 の動作・出力は不変 (既存の試験が通る)
-- [ ] ROADMAP_BRIEF の 2026-11-22 (2) (C23) の節に、実サーバ確認の 43200 は窓の約 3/4 を採点していなかったと注記する
-- [ ] 全試験が通る
-
-### C27. 自動の遡及的再観測がライブの `$Q[observe]` 行を書き換えない
-
-設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-22 (5) の 3。`CoarseReplayTrigger` の `replayRequest` は `index.ts` の既存経路で `registry.set(qProposal.scope, …)` を通り、既定の scope `observe:test_result:v1#fine` (細窓のライブビュー) を 1 時間窓・`group_by: ["agentId"]` に書き換えたまま残す。replay は保持データを別レンズで見直すことで、ライブの状態を変えるのは副作用。
-
-- 方針: 自動 replay は専用の scope (例 `observe:test_result:v1#regroup`) と、それに対応する `compare` 行 (`reference_windows: 30`) を持ち、書込時の検証と `qHistory` への記録は残す。C24 で `compare:#fine` に足した 30 窓参照は、細窓のビューのためのものではないので専用行へ移す
-- RuleBrain の RC 提案が `#fine` に書く経路 (L2 の Brain の書込面) は意図どおりなので触らない
-
-#### 完了条件
-- [ ] `LIGHTHOUSE_PROFILE=test-stream` で `CoarseReplayTrigger` が replay を発火しても、`observe:test_result:v1#fine` と `compare:test_result:v1#fine` の行は起動時の値のまま (試験で固定)
-- [ ] 自動 replay は専用の scope の `$Q[observe]` / `$Q[compare]` 行で採点され、package の `comparison` が 30 窓の参照を名乗る。C24 の 3 ジョブ合成流の 2 段ループの試験 (`ci-e2e` のみに帰属) は通ったまま
-- [ ] 既定 (`mock`) の RuleBrain の RC replay の動作・出力は不変
-- [ ] 全試験が通る
-
-### C28. 粗窓からの自動 replay の帰属を、他のジョブへの植え込みで測る
-状態: ブロック(C27 の後)
-
-設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-22 (5) の 1。C24 の「帰属 12/13・誤帰属 0」は、失敗が e2e-gci-gce にしか無い既知の固まりを含む区間で数えたもので、ジョブを見分ける力の証拠ではない。C20 の植え込み (`prow-plant.ts`) で、帰属先の真値を握った回帰を他のジョブにも植えて測る。
-
-- 植える先: unit・integration-master・e2e-gci-gce の各ジョブ、回帰の大きさは C20 と同じ 5 試験と 1 試験。2 ジョブに同時に植えた場合 (混ざった窓) も数える
-- 帰属の読み方 (計測の前に固定): 自動 replay の package で下向きタイル (`dip`・`step_down`) が付いたグループ = 帰属先。植えた窓で、植えたジョブだけに付けば正、他のジョブに付けば誤、どこにも付かなければ盲
-- 対照: 植えない再生で発火した窓の帰属 (記録の flaky・固まりへの帰属) を同じ規則で数え、植えた差と分けて報告する
-- 区間・乱数の種・速度は報告に書き、起動口 (`run-*-report.ts`) 1 本で再現できるようにする
-
-#### 完了条件
-- [ ] 本番と同じ部品の並び (`RetentionBuffer` → `WindowHistory` → `Comparator` → `CoarseReplayTrigger` → 自動 replay) で植え込みを再生し、ジョブ別・大きさ別に、発火・正しい帰属・誤帰属・盲の件数を出す起動口がある
-- [ ] 2 ジョブに同時に植えた場合の帰属 (両方に付くか・片方だけか) を数える
-- [ ] 植えない再生での発火と帰属を対照として同じ表に並べる
-- [ ] 区間・種・速度を報告に書き、同じ引数で同じ数字が出ることを確認する
-- [ ] 結果を ROADMAP_BRIEF に記録し、C24 の閉じた行と CLAUDE.md・devlog の C24 の帰属の数字を「配線確認 (既知の 1 ジョブの固まり)」と読み替える注記を付ける
-- [ ] 全試験が通る
