@@ -52,6 +52,7 @@ function renderSnapshot(data) {
   renderAgents(data.agents ?? []);
   renderDomains(data.domains ?? []);
   renderTiles(data.snapshot);
+  renderPersistence(data.persistence);
   renderQHistory(data.qHistory ?? []);
   renderActiveScenario(data.activeScenario ?? null);
   // `=== false`, not falsy: a server that predates the field sends nothing,
@@ -208,6 +209,33 @@ function renderFailures(noteId, gridId, pkg) {
   const unjudged = f.unjudgedWindows > 0 ? ` · ${f.unjudgedWindows} window(s) cannot be counted (weighted), not read as quiet` : "";
   note.textContent = `failures (tests failed per window; the cause is not named): ${f.windows.length} window(s) with a failure, ${f.bursts.length} with ${f.burstAt} or more${recent ? ` — ${recent}` : ""}${unjudged}`;
   grid.innerHTML = f.bursts.map(failureTileHtml).join("");
+}
+
+// ── Per-test persistence (domain layer, ROADMAP C22) ─────────────────────────
+//
+// Separate from SnapshotPackage: this detector reads build boundaries and
+// commits (prow-persist.ts). Absent under the mock profile, so the panel stays
+// hidden there.
+
+function renderPersistence(announcements) {
+  const panel = document.getElementById("panel-persistence");
+  const list = document.getElementById("persistence-list");
+  if (!panel || !list) return;
+  if (announcements === undefined) {
+    panel.hidden = true;
+    list.innerHTML = "";
+    return;
+  }
+  panel.hidden = false;
+  if (announcements.length === 0) {
+    list.innerHTML = '<span style="color:var(--muted);font-size:11px">No persistent per-test failure announced yet.</span>';
+    return;
+  }
+  list.innerHTML = [...announcements].reverse().map((a) => `
+    <div class="persist-row">
+      <div class="persist-head">${esc(a.job)} · ${esc(a.testId)}</div>
+      <div class="persist-meta">announced ${esc(utcClock(a.atMs))} UTC (build ${esc(a.buildId)}) · first failure ${esc(utcClock(a.firstMs))} UTC (build ${esc(a.firstBuildId)})</div>
+    </div>`).join("");
 }
 
 function renderTiles(pkg) {

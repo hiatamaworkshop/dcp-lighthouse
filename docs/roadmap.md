@@ -4,11 +4,14 @@
 
 ## 予定
 
-- [ ] C22
 - [ ] C24
 
 ## 閉じた項目
 
+- [x] C22 試験ごとの持続の名乗りを灯台の出力にする (2026-11-22、ドメイン層 `ProwPersistenceFeed` と `GET /persistence`・SSE 別欄・dashboard パネル。記録は ROADMAP_BRIEF の 2026-11-22 (3) の節)
+  - `prow-live.ts` (`ProwPersistenceFeed`): `PersistenceDetector` (`prow-persist.ts`) を `SnapshotCurator` / `lens.ts` に入れず試験の流れ向けのドメイン層として配線、`atMs` (`finishedMs`) で表に出す (`mock` の package・出力は不変)
+  - `dashboard.ts`・`dashboard/index.html`・`dashboard/app.js`: `GET /persistence`・SSE (`/events/snapshot`) の別欄 `persistence`・`#panel-persistence` を追加
+  - 試験 729 件 (+2): `ProwPersistenceFeed`・`GET /persistence`・SSE の名乗りが `detectPersistence` と一致し、`mock` では非稼働であることを固定
 - [x] C23 記録済みの試験結果の流れを本番サーバと dashboard に流す入口と C19 の画面表示 (2026-11-22、`LIGHTHOUSE_SOURCE=prow` の仮想時計再生口と `SnapshotPackage.failures` の UI 描画。記録は ROADMAP_BRIEF の 2026-11-22 (2) の節)
   - `prow-live.ts`・`index.ts`・`dashboard.ts`: `LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=prow` で取り込み済みの `data/prow/` を仮想時計で本番配線 (`RetentionBuffer` → `WindowHistory` → `Comparator` → `DashboardServer`) に流す。既定 (`mock`) の動作・出力は不変
   - `dashboard/index.html`・`dashboard/app.js`: `SnapshotPackage.failures` (窓ごとの失敗数と同時多発 `bursts`) と再生位置のバッジを描画 (`failures` 無しでは非表示)
@@ -116,21 +119,7 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 - C12 の結果 (2026-11-17 (5)): 1 時間窓 × 参照 30 窓では盲目は 1.2% で、この帰無が無くても動く。要るのは短い窓 (10 分以下) を使うときで、急がない
 - 決定になったら完了条件を付ける
 
-### C22. 試験ごとの持続の名乗りを灯台の出力にする (置き場所)
-
-設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-17 (8) と 2026-11-22 のレビュー。C21 の検出器 (`prow-persist.ts`) は流れに沿って 2 ビルド目で名乗り、89 日の記録で 2 件 (うち 1 件が誤)・植えた回帰は 180/180。今は CLI の報告にしか出ない。
-
-- 決定 (2026-11-22、user が推奨の整備を承認): 検出器は CI のビルドの並び (commit・ビルド単位の結果) を前提にしていて、`test_result:v1` の事象だけでは足りない (commit はあるがビルドの区切りが無い)。ドメイン非依存の層 (`SnapshotCurator` / `lens.ts`) には入れず、試験の流れ向けのドメイン層に置いて `GET /persistence` と SSE ペイロードの別欄に出し、`dashboard/app.js` に表示する (既定 `mock` の package は不変)
-
-#### 完了条件
-- [ ] `PersistenceDetector` (`prow-persist.ts`) をドメイン非依存の層 (`SnapshotCurator` / `lens.ts`) には入れず、試験の流れ向けのドメイン層として本番サーバに配線し、ビルドの流れに沿って名乗り (`Announcement`) を保持する。既定 (`mock`) の package と出力は既存の試験でバイト同一
-- [ ] `DashboardServer` に持続の名乗りを返す `GET /persistence` を追加し、SSE (`/events/snapshot`) のペイロードにも package とは別の欄として載せる
-- [ ] `dashboard/app.js` が持続の名乗り (`job`・`testId`・`buildId`・`firstBuildId`・時刻) を描画する
-- [ ] 記録済みのビルド列を通したとき、`GET /persistence` と SSE に出る名乗りが `detectPersistence` (`prow-persist.ts`) の結果と一致することを試験で固定する
-- [ ] 全体の試験 (`cd server && npm test`) が通り、README・CLAUDE.md・devlog・台帳を合わせる
-
 ### C24. 粗窓の発火を契機にグループ別の遡及的再観測を自動で回す (観測層と Brain の結線)
-状態: ブロック(C22 の後)
 
 設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-22 のレビュー (観察 2・3、推奨 2)、および 2026-08-18 (L3)・2026-09-27 の実地レビュー。
 現在 `index.ts` では `Comparator` / `SnapshotCurator` の出力 (`SnapshotPackage`) を SSE 配信と shadow 裏取りしか読んでおらず、Brain (`RuleBrain` / `ClaudeBrain`) は `$Q` を読まない 5 秒固定窓の `TestorAdapter` だけを見ている。そのため `LIGHTHOUSE_PROFILE=test-stream` (1 時間窓) では Brain が機能しない (RC の 1 秒窓提案も C17・C12 で 100% 盲目)。

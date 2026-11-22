@@ -1,7 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ProwLiveSource, prowEventExtractor } from "./prow-live.js";
+import { ProwLiveSource, ProwPersistenceFeed, prowEventExtractor } from "./prow-live.js";
 import type { ProwEvent } from "./prow-events.js";
+import type { ProwBuild } from "./prow-import.js";
+import { detectPersistence, type Announcement } from "./prow-persist.js";
 import { SHIPPED_WIRING, replayThroughShippedWiring, wiringFromProfile, type ReplayEvaluation } from "./prow-replay.js";
 import { TEST_STREAM_PROFILE } from "./stream-profile.js";
 import { prowLensEvent } from "./prow-events.js";
@@ -182,3 +184,100 @@ describe("the server with a recorded stream as its source (ROADMAP C23)", () => 
     }
   });
 });
+
+describe("per-test persistence output (ROADMAP C22)", () => {
+  function mkBuild(id: string, job: string, scheduledMs: number, finishedMs: number, commit: string, cases: Array<{ name: string; status: "passed" | "failed" }>): ProwBuild {
+    return {
+      id, job, scheduledMs, startedMs: scheduledMs, finishedMs, result: cases.some((c) => c.status === "failed") ? "FAILURE" : "SUCCESS", commit,
+      files: [{ file: "junit_01.xml", suites: [{ name: "s", ts: scheduledMs, cases: cases.map((c) => ({ classname: "pkg", name: c.name, time: 1, status: c.status })) }] }],
+    };
+  }
+
+  const builds: ProwBuild[] = [
+    mkBuild("b1", "ci-e2e", T0 + 1 * HOUR, T0 + 1 * HOUR + 1000, "c1", [{ name: "T1", status: "passed" }, { name: "T2", status: "passed" }]),
+    // T1 fails twice on c2 (no pass on c2) → announced at b3's finishedMs
+    mkBuild("b2", "ci-e2e", T0 + 2 * HOUR, T0 + 2 * HOUR + 1000, "c2", [{ name: "T1", status: "failed" }, { name: "T2", status: "failed" }]),
+    mkBuild("b3", "ci-e2e", T0 + 3 * HOUR, T0 + 3 * HOUR + 2000, "c2", [{ name: "T1", status: "failed" }, { name: "T2", status: "passed" }]),
+    // T2 passed on c2 in b3, so a subsequent fail on c2 is NOT persistent
+    mkBuild("b4", "ci-e2e", T0 + 4 * HOUR, T0 + 4 * HOUR + 1000, "c2", [{ name: "T1", status: "failed" }, { name: "T2", status: "failed" }]),
+  ];
+
+  it("ProwPersistenceFeed surfaces each announcement at atMs and matches detectPersistence", () => {
+    const feed = new ProwPersistenceFeed(builds);
+    // Before b3 finishes, nothing is surfaced even though b3 was already scheduled
+    assert.deepEqual(feed.advanceTo(T0 + 3 * HOUR + 1000), []);
+    assert.deepEqual(feed.announcements(), []);
+    // At b3's finish, T1 is announced
+    const newly = feed.advanceTo(T0 + 3 * HOUR + 2000);
+    assert.equal(newly.length, 1);
+    assert.equal(newly[0]!.testId, "pkg::T1");
+    assert.equal(newly[0]!.buildId, "b3");
+    assert.equal(newly[0]!.firstBuildId, "b2");
+    // Advance past all builds and compare with detectPersistence
+    feed.advanceTo(T0 + 10 * HOUR);
+    assert.deepEqual(feed.announcements(), detectPersistence(builds));
+  });
+
+  it("GET /persistence and SSE /events/snapshot serve the announcements outside SnapshotPackage, and stay inactive under mock", async () => {
+    const feed = new ProwPersistenceFeed(builds);
+    feed.advanceTo(T0 + 10 * HOUR);
+    const expected = detectPersistence(builds);
+
+    const registry = new QRegistry();
+    const generator = { getCurrentLoad: () => ({ eventsPerSec: 0, running: false, activeScenario: null }) };
+    const overlay = new ObservationOverlay(registry);
+    const buf = { replay: () => ({ window_ms: 1000, windows: [] }), getRetentionWindowMs: () => 120_000 };
+    const dash = new DashboardServer(generator as never, null as never, { reset: () => {} } as never, registry, null as never, overlay, buf, undefined, undefined, undefined, undefined, () => feed.announcements());
+    const server = dash.start({ port: 0 });
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const addr = server.address();
+    const base = `http://127.0.0.1:${typeof addr === "object" && addr !== null ? addr.port : 0}`;
+    try {
+      const res = (await (await fetch(`${base}/persistence`)).json()) as { active: boolean; announcements: Announcement[] };
+      assert.equal(res.active, true);
+      assert.deepEqual(res.announcements, expected);
+
+      // Verify SSE payload carries `persistence` as a top-level field separate from `snapshot`
+      const ac = new AbortController();
+      const sseRes = await fetch(`${base}/events/snapshot`, { signal: ac.signal });
+      const reader = sseRes.body!.getReader();
+      // Give the server a tick to register the subscriber, then broadcast
+      await new Promise((r) => setTimeout(r, 20));
+      dash.broadcast({ ts: T0 + 10 * HOUR, agents: [], domains: [], touchedBitsThisTick: [] }, []);
+      const chunk = await reader.read();
+      ac.abort();
+      const text = new TextDecoder().decode(chunk.value);
+      const line = text.split("\n\n")[0]!.replace(/^data: /, "");
+      const payload = JSON.parse(line) as { snapshot: unknown; persistence?: Announcement[] };
+      assert.deepEqual(payload.persistence, expected);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+
+    // Without persistence wired (mock mode): GET /persistence reports active:false and SSE omits `persistence`
+    const mockDash = new DashboardServer(generator as never, null as never, { reset: () => {} } as never, registry, null as never, overlay, buf);
+    const mockServer = mockDash.start({ port: 0 });
+    await new Promise<void>((resolve) => mockServer.once("listening", resolve));
+    const mAddr = mockServer.address();
+    const mBase = `http://127.0.0.1:${typeof mAddr === "object" && mAddr !== null ? mAddr.port : 0}`;
+    try {
+      const res = (await (await fetch(`${mBase}/persistence`)).json()) as { active: boolean; announcements: Announcement[] };
+      assert.deepEqual(res, { active: false, announcements: [] });
+
+      const ac = new AbortController();
+      const sseRes = await fetch(`${mBase}/events/snapshot`, { signal: ac.signal });
+      const reader = sseRes.body!.getReader();
+      await new Promise((r) => setTimeout(r, 20));
+      mockDash.broadcast({ ts: T0, agents: [], domains: [], touchedBitsThisTick: [] }, []);
+      const chunk = await reader.read();
+      ac.abort();
+      const text = new TextDecoder().decode(chunk.value);
+      const line = text.split("\n\n")[0]!.replace(/^data: /, "");
+      const payload = JSON.parse(line) as Record<string, unknown>;
+      assert.equal("persistence" in payload, false);
+    } finally {
+      await new Promise<void>((resolve) => mockServer.close(() => resolve()));
+    }
+  });
+});
+

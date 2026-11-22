@@ -16,7 +16,8 @@
  */
 
 import { loadProwRange, type ProwBuild } from "./prow-import.js";
-import { buildsToEvents, prowLensEvent, type ProwEvent } from "./prow-events.js";
+import { buildsToEvents, prowLensEvent, type ProwEvent, type ProwEventOptions } from "./prow-events.js";
+import { PersistenceDetector, type Announcement } from "./prow-persist.js";
 import type { EventExtractor } from "./retention-buffer.js";
 import type { TestEvent } from "./mock-stream-generator.js";
 
@@ -128,10 +129,64 @@ function dayStartMs(day: string): number {
 }
 
 /**
+ * Domain-layer per-test persistence stream (ROADMAP C22).
+ *
+ * Wraps PersistenceDetector (prow-persist.ts) on the virtual clock so builds are
+ * fed in scheduledMs order (preserving PersistenceDetector's invariant even when
+ * two builds of the same job overlap) while each Announcement surfaces only once
+ * the virtual clock reaches `atMs` (the triggering build's finishedMs).
+ *
+ * Kept here in the test-stream domain layer — never inside SnapshotCurator or
+ * lens.ts, which are domain-independent and see only test_result:v1 events
+ * without build boundaries.
+ */
+export class ProwPersistenceFeed {
+  private readonly builds: readonly ProwBuild[];
+  private readonly detector: PersistenceDetector;
+  private fed = 0;
+  private pending: Announcement[] = [];
+  private readonly surfaced: Announcement[] = [];
+
+  constructor(builds: readonly ProwBuild[], opts: ProwEventOptions = {}) {
+    this.builds = [...builds].sort((a, b) => a.scheduledMs - b.scheduledMs);
+    this.detector = new PersistenceDetector(opts);
+  }
+
+  /**
+   * Advances the feed to `virtualMs`: feeds builds scheduled before `virtualMs`
+   * (or finishing at/before `virtualMs`) and surfaces announcements whose `atMs <= virtualMs`.
+   * Returns announcements newly surfaced on this call.
+   */
+  advanceTo(virtualMs: number): Announcement[] {
+    while (this.fed < this.builds.length && this.builds[this.fed]!.scheduledMs < virtualMs) {
+      const announced = this.detector.add(this.builds[this.fed]!);
+      for (const a of announced) this.pending.push(a);
+      this.fed++;
+    }
+    if (this.pending.length === 0) return [];
+    const newly: Announcement[] = [];
+    const still: Announcement[] = [];
+    for (const a of this.pending) {
+      if (a.atMs <= virtualMs) newly.push(a);
+      else still.push(a);
+    }
+    this.pending = still;
+    newly.sort((a, b) => a.atMs - b.atMs);
+    for (const a of newly) this.surfaced.push(a);
+    return newly;
+  }
+
+  /** All announcements surfaced up to the last `advanceTo`, oldest first. */
+  announcements(): Announcement[] {
+    return [...this.surfaced];
+  }
+}
+
+/**
  * The events of imported days, ready to play. Refuses what loadProwRange refuses (a day never imported
  * would read as a day without tests), and a range that holds no event.
  */
-export function loadProwLive(opts: { dir: string; jobs: readonly string[]; fromDay: string; toDay: string; speed: number; startedAtMs?: number }): { source: ProwLiveSource; builds: number; missing: number } {
+export function loadProwLive(opts: { dir: string; jobs: readonly string[]; fromDay: string; toDay: string; speed: number; startedAtMs?: number }): { source: ProwLiveSource; persistence: ProwPersistenceFeed; builds: number; missing: number } {
   const builds: ProwBuild[] = [];
   let missing = 0;
   for (const job of opts.jobs) {
@@ -144,5 +199,6 @@ export function loadProwLive(opts: { dir: string; jobs: readonly string[]; fromD
   const fromMs = dayStartMs(opts.fromDay);
   const toMs = dayStartMs(opts.toDay) + 86_400_000;
   const source = new ProwLiveSource({ events, fromMs, toMs, speed: opts.speed, ...(opts.startedAtMs !== undefined ? { startedAtMs: opts.startedAtMs } : {}) });
-  return { source, builds: builds.length, missing };
+  const persistence = new ProwPersistenceFeed(builds);
+  return { source, persistence, builds: builds.length, missing };
 }

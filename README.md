@@ -309,9 +309,10 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **1 つの試験が続けて落ちることを流れに沿って名乗る** (2026-11-17、C21) — C13 の規則から未来を除いた検出器 (`prow-persist.ts`、規則は計測の前に固定): 同じ試験が連続する 2 ビルドで落ち、どちらの commit でも pass が無ければ 2 ビルド目で名乗る。
       植えた回帰は 180/180 (窓の統計で拾えなかった 1 試験の回帰も。ただし定義と同じ形なので自明に近い)、遅れは中央値 1.2〜1.6 時間 (2 ビルド分)。**記録 89 日では名乗り 2 件 (regression 1・誤 1)**。詳細は ROADMAP_BRIEF.md 2026-11-17 (8)
 - [x] **記録済みの試験結果の流れを本番サーバと dashboard に流す入口** (2026-11-22、C23) — `LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=prow PROW_REPLAY_FROM=… PROW_REPLAY_TO=…` で、取り込み済みの `data/prow/` の日を仮想時計で本番と同じ `RetentionBuffer` → `WindowHistory` → `Comparator` に流す (`prow-live.ts`。mock の既定は不変)。dashboard は package の `failures` (窓ごとの失敗数と同時多発) と再生の位置を描く。ライブの package は C12 の再生と境界ごとに一致 (試験で固定)。実機で 3 週分 (1,745 ビルド・1,774,055 事象) を 43200 倍速で流して確認 (`failures` あり・盲目 0/11)。詳細は ROADMAP_BRIEF.md 2026-11-22 (2)
-- [ ] **次** (台帳 `## 予定` の順): 持続の名乗りを灯台の出力に (C22) → 粗窓発火からのグループ別自動 replay (C24)。本物の回帰がある流れ (C25)・全 pass の参照の帰無 (C18) は保留。仮想ストリームの常設 (F3) は未着手
+- [x] **試験ごとの持続の名乗りを灯台の出力にする** (2026-11-22、C22) — `PersistenceDetector` (`prow-persist.ts`) をドメイン非依存層 (`SnapshotCurator` / `lens.ts`) には入れず、試験の流れ向けのドメイン層 (`ProwPersistenceFeed`) として本番サーバに配線。`GET /persistence` と SSE (`/events/snapshot`) の別欄 `persistence`、および `dashboard/app.js` の専用パネルに出す (`mock` では非表示・`active: false`・package は不変)。`detectPersistence` との一致を試験で固定。詳細は ROADMAP_BRIEF.md 2026-11-22 (3)
+- [ ] **次** (台帳 `## 予定` の順): 粗窓発火からのグループ別自動 replay (C24)。本物の回帰がある流れ (C25)・全 pass の参照の帰無 (C18) は保留。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 727 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 729 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 

@@ -24,7 +24,7 @@ import type { SnapshotPackage } from "./snapshot-curator.js";
 import { Comparator, assertComparable } from "./comparison.js";
 import { WindowHistory } from "./window-history.js";
 import { resolveStreamProfile } from "./stream-profile.js";
-import { loadProwLive, prowEventExtractor, type ProwLiveSource } from "./prow-live.js";
+import { loadProwLive, prowEventExtractor, type ProwLiveSource, type ProwPersistenceFeed } from "./prow-live.js";
 import { DEFAULT_PROW_JOBS } from "./prow-import.js";
 import { resolve as resolvePath } from "node:path";
 import { Forecaster } from "./forecast.js";
@@ -62,6 +62,7 @@ const profile = resolveStreamProfile(process.env.LIGHTHOUSE_PROFILE);
  */
 const LIGHTHOUSE_SOURCE = process.env.LIGHTHOUSE_SOURCE ?? "mock";
 let prowLive: ProwLiveSource | undefined;
+let prowPersistence: ProwPersistenceFeed | undefined;
 if (LIGHTHOUSE_SOURCE === "prow") {
   if (profile.name !== "test-stream") {
     throw new Error(`LIGHTHOUSE_SOURCE=prow needs LIGHTHOUSE_PROFILE=test-stream (the "${profile.name}" views cannot score this stream)`);
@@ -75,6 +76,7 @@ if (LIGHTHOUSE_SOURCE === "prow") {
   const jobs = (process.env.PROW_JOBS ?? DEFAULT_PROW_JOBS.join(",")).split(",").filter((j) => j !== "");
   const loaded = loadProwLive({ dir: resolvePath(process.env.PROW_DIR ?? "../data/prow"), jobs, fromDay, toDay, speed });
   prowLive = loaded.source;
+  prowPersistence = loaded.persistence;
   const st = prowLive.status();
   console.log(`[lighthouse] LIGHTHOUSE_SOURCE=prow — ${fromDay}…${toDay}, ${jobs.join(", ")}: ${loaded.builds} builds (${loaded.missing} could not be read), ${st.total} events, ${speed}x`);
 } else if (LIGHTHOUSE_SOURCE !== "mock") {
@@ -383,7 +385,11 @@ if (prowLive !== undefined && BRAIN_MODE !== "rule") {
   throw new Error(`LIGHTHOUSE_SOURCE=prow runs with BRAIN_MODE=rule only, got "${BRAIN_MODE}"`);
 }
 
-const dashboard  = new DashboardServer(generator, adapter, brain, registry, comparator, overlay, buffer, brainDiagnostics, forecaster, forecastMonitor, prowLive !== undefined ? () => prowLive!.status() : undefined);
+const dashboard  = new DashboardServer(
+  generator, adapter, brain, registry, comparator, overlay, buffer, brainDiagnostics, forecaster, forecastMonitor,
+  prowLive !== undefined ? () => prowLive!.status() : undefined,
+  prowPersistence !== undefined ? () => prowPersistence!.announcements() : undefined,
+);
 
 // Two parallel observation views
 overlay.add("coarse", "test_result:v1", { view: "coarse" });
@@ -442,6 +448,10 @@ setInterval(() => {
   if (prowLive !== undefined) {
     const vnow = prowLive.virtualNow(Date.now());
     prowLive.advanceTo(vnow, (e) => buffer.observe(e, "test_result:v1"));
+    const newly = prowPersistence?.advanceTo(vnow) ?? [];
+    for (const a of newly) {
+      console.log(`[persistence] ${a.job} · ${a.testId} (builds ${a.firstBuildId} → ${a.buildId} at ${new Date(a.atMs).toISOString()})`);
+    }
     snapshot = { ts: vnow, agents: [], domains: [], touchedBitsThisTick: [] };
   } else {
     snapshot = adapter.snapshot();

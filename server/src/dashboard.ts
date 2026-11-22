@@ -17,6 +17,7 @@
  *                                            and `scores`: rows already realized, judged against it
  *   GET /status             — current load
  *   GET /brain              — Brain diagnostics (shadow tally, LLM counters)
+ *   GET /persistence        — per-test persistence announcements (domain layer, ROADMAP C22)
  *
  * SSE payload is always newline-delimited JSON ("data: {...}\n\n").
  * Mirrors the Minecraft dashboard SSE pattern.
@@ -37,6 +38,7 @@ import { floorToWindow, resolveAlign, type LensResult } from "./lens.js";
 import type { BrainDecision } from "./brain-adapter.js";
 import type { SnapshotPackage } from "./snapshot-curator.js";
 import type { ProwLiveStatus } from "./prow-live.js";
+import type { Announcement } from "./prow-persist.js";
 
 export interface DashboardOptions {
   port?: number;
@@ -189,6 +191,7 @@ function sseHeaders(res: ServerResponse): void {
     "Connection": "keep-alive",
     "Access-Control-Allow-Origin": "*",
   });
+  res.flushHeaders();
 }
 
 function jsonHeaders(res: ServerResponse, status = 200): void {
@@ -320,6 +323,12 @@ export class DashboardServer {
      * playback and the payload carries `replay`. Absent: nothing here changes.
      */
     private readonly replayStatus?: () => ProwLiveStatus | undefined,
+    /**
+     * Per-test persistence announcements from the test-stream domain layer (ROADMAP C22).
+     * Separate from SnapshotPackage (which is domain-independent); absent under mock mode,
+     * so mock SSE payloads remain unchanged and GET /persistence reports `active: false`.
+     */
+    private readonly persistence?: () => readonly Announcement[] | undefined,
   ) {}
 
   /**
@@ -417,6 +426,7 @@ export class DashboardServer {
 
     // A recorded stream (ROADMAP C23) has no generator to ask: it is flowing until the playback ends.
     const replay = this.replayStatus?.();
+    const persistence = this.persistence?.();
     const payload = {
       ts: snapshot.ts,
       agents: snapshot.agents,
@@ -431,6 +441,9 @@ export class DashboardServer {
       // Only when a recorded stream is played: where the playback is. Absent otherwise, so the payload of
       // a process that does not select one is unchanged.
       ...(replay !== undefined ? { replay } : {}),
+      // Domain-layer per-test persistence announcements (ROADMAP C22). Absent when not active, so
+      // mock payloads are byte-for-byte unchanged.
+      ...(persistence !== undefined ? { persistence } : {}),
     };
 
     for (const res of this.snapshotSubs) sseWrite(res, payload);
@@ -834,6 +847,16 @@ export class DashboardServer {
       // `mode: "rule"` rather than a 404: "this build has no LLM Brain" is an
       // answer, and a 404 would read to a polling client as a broken route.
       const body = JSON.stringify(this.brainDiagnostics?.() ?? { mode: "rule" });
+      jsonHeaders(res);
+      res.end(body);
+      return;
+    }
+
+    if (url.startsWith("/persistence")) {
+      // Domain-layer per-test persistence announcements (ROADMAP C22). Same
+      // convention as /brain: `active: false` rather than 404 when inactive.
+      const list = this.persistence?.();
+      const body = JSON.stringify({ active: list !== undefined, announcements: list ?? [] });
       jsonHeaders(res);
       res.end(body);
       return;

@@ -7083,3 +7083,15 @@ user「直近の実装でもあまり進捗というか使えるシステムに�
 1. 試験 (`prow-live.test.ts` 9 件、全体 727 件パス): 仮想時計・単調送出・進捗・不正入力拒否、本番の `DashboardServer.livePackage(t)` が境界ごとに `prow-replay` (`1h-fresh`) と盲目・下向きタイル・同時多発 (`bursts`) が一致すること、`failureCount` 無しでは `failures` が `undefined` のままであること、`/demo/start` 409 と `/status` の `replay` 欄を固定。
 2. 実サーバ確認: `LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=prow PROW_REPLAY_FROM=2026-10-26 PROW_REPLAY_TO=2026-11-15 PROW_REPLAY_SPEED=43200` で起動 (1,745 ビルド・1,774,055 事象・欠落 0)、`/status` の進捗と `/events/snapshot` SSE の 11 配信 (`scored: 11`, `blind: 0`, `haveFailures: 11`)、`node --check dashboard/app.js` を確認。
 3. README・CLAUDE.md・devlog・台帳を合わせた。次は C22 (持続の名乗りを本番サーバと UI に配線)。
+
+## 2026-11-22 (3) — C22: 試験ごとの持続の名乗りをドメイン層・`GET /persistence`・SSE・dashboard に配線
+
+**作ったもの**
+- `prow-live.ts` (`ProwPersistenceFeed`): `PersistenceDetector` (`prow-persist.ts`) をドメイン非依存層 (`SnapshotCurator` / `lens.ts`) に入れず、試験の流れ向けのドメイン層として仮想時計に載せた。ビルドは `scheduledMs` 順で検出器に渡し、各名乗り (`Announcement`) は `atMs` (`finishedMs`) に達した時点で初めて表に出す (`loadProwLive` が同じビルド列から生成)。
+- `dashboard.ts`: `GET /persistence` を新設 (非稼働時は `GET /brain` と同じく 200 `{ active: false, announcements: [] }`、稼働時は `{ active: true, announcements }`)。SSE (`/events/snapshot`) のペイロードにも `SnapshotPackage` とは別のトップレベル欄 `persistence` として載せる (`mock` 時は省略、既存出力とバイト一致)。あわせて `sseHeaders` に `res.flushHeaders()` を足し、SSE 接続直後にヘッダが返るようにした。
+- `index.ts`: `LIGHTHOUSE_SOURCE=prow` 時に `prowPersistence.advanceTo(vnow)` を tick ごとに進め、新たな名乗りをログ出力しつつ `DashboardServer` に渡す。
+- `dashboard/index.html`・`dashboard/app.js`: `#panel-persistence` (`mock` 時は `hidden`) を追加し、`job`・`testId`・`buildId`・`firstBuildId`・時刻 (`atMs` / `firstMs` UTC) を描画。
+
+**確認と完了条件**
+- 試験 (`prow-live.test.ts` +2 件、全体 729 件): `ProwPersistenceFeed` が `atMs` まで名乗りを伏せ、全ビルド通過後に `detectPersistence` と完全一致すること、`GET /persistence` と SSE (`/events/snapshot`) が `SnapshotPackage` の外に一致する名乗りを出し、`mock` では `active: false`・SSE 欄なしであることを固定。
+- README・CLAUDE.md・devlog・台帳を合わせた。次は C24 (粗窓発火を契機にしたグループ別自動 replay)。

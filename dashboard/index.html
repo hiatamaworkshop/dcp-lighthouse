@@ -106,6 +106,12 @@
     #q-feed { font-size: 11px; color: var(--muted); }
     .q-row { padding: 2px 0; }
     .q-row .scope { color: var(--pass); }
+
+    /* Per-test persistence (domain layer, ROADMAP C22) */
+    #panel-persistence { grid-column: 1 / -1; }
+    .persist-row { background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--fail); border-radius: 4px; padding: 6px 10px; margin-bottom: 6px; font-size: 11px; }
+    .persist-head { font-weight: bold; color: var(--text); overflow-wrap: anywhere; }
+    .persist-meta { color: var(--muted); margin-top: 2px; font-size: 10px; }
   </style>
 </head>
 <body>
@@ -181,6 +187,10 @@
           <div id="forecast-fine"><span style="color:var(--muted);font-size:11px">Waiting for a forecast…</span></div>
         </div>
       </div>
+    </section>
+    <section id="panel-persistence" hidden>
+      <h2>Per-Test Persistence — 2 consecutive failing builds without a pass on either commit</h2>
+      <div id="persistence-list"></div>
     </section>
   </main>
   <script src="app.js"></script>
