@@ -26,7 +26,7 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 - **いまの実データは公開 CI の試験結果 (Kubernetes Prow、`data/prow/`)**。1 時間窓 × 参照 30 窓の構成 (`LIGHTHOUSE_PROFILE=test-stream`)・
   持続の名乗り (`/persistence`)・粗窓発火からのグループ別自動 replay まで本番配線済み (C12〜C28)。`mock` が既定で従来のまま
 - **次**: C25 (本物の回帰があるデータ源を 1 本に決める) → C29 (その流れで名乗りを測る) → C30 (自前テスト用 `POST /ingest/build`、保留)。
-  整備項目は C31〜C33。詳細は `docs/roadmap.md`
+  整備項目 C31〜C33 は 2026-11-25 に閉じた (C32 は見送り、`data/` は判定の生データとして残す)。詳細は `docs/roadmap.md`
 - 数値・日付つきの経緯を知りたいときは `grep -n "^## " docs/devlog/ROADMAP_BRIEF.md` で見出しを引き、該当節だけ `Read` する (全文は 600 KB 超)
 
 | | dcp-minecraft | dcp-lighthouse |

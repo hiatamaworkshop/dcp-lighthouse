@@ -1,9 +1,14 @@
 ---
 name: wiki-collector-ops
-description: Check, restart, or troubleshoot the real-data calibration period's Wikimedia EventStreams collector (server/src/wikimedia-collector.ts). Use after an OS restart or sleep, when asked whether collection is healthy, when gaps.jsonl grows, or before touching the collector's code or its scheduled task.
+description: Reference for the Wikimedia EventStreams collector (server/src/wikimedia-collector.ts), STOPPED since 2026-11-17 (scheduled task disabled, data kept in data/wikimedia/). Use only when the user explicitly asks to restart collection, to inspect or prune the stored days, or before touching the collector's code or its scheduled task. Do NOT restart it after an OS restart or sleep.
 ---
 
 # Wikimedia 収集器 — 状態確認と運用
+
+> **2026-11-17 に停止済み (参照専用)**。タスクスケジューラのタスクは無効化、`data/wikimedia/` のデータは第 1〜5 段階の判定の生データとして保持
+> (EventStreams は数日分しか遡れず、消すと再取得できない。2026-11-25 の C33 で「残す」と決定)。
+> OS 再起動やスリープの後に**再起動しない**。収集を再開するのは user が明示したときだけで、その場合は下の手順と、
+> 事前登録の規則 (欠落 = 盲目) をそのまま使う。いまの実データは Prow の試験結果 (`data/prow/`、README の「実データ較正期間の運用」)。
 
 実データ較正期間 (ROADMAP_BRIEF.md 2026-09-27 (3)) の収集器を点検・再起動するときの手順。
 **事前登録の規則 5「収集の欠落は盲目として扱う」** を守るのがこの収集器の唯一の追加責務。

@@ -9,6 +9,12 @@
 
 ## 閉じた項目
 
+- [x] C33 運用ドキュメントの最新化 (2026-11-25、範囲を文書に絞った。`data/` は残す。記録は ROADMAP_BRIEF の 2026-11-25 (4) の節)
+  - `README.md`: 次の行を C25 → C29 → C30 の決定に、「次は C16・C17」を現状に、コマンド一覧に `run-prow-attribution-report`、環境変数の表に `PROW_REPLAY_SPEED` の上限 (7200・C26)
+  - `wiki-collector-ops`: description と冒頭を「2026-11-17 停止・参照専用、OS 再起動の後に再起動しない」に (誤って収集を再開させる発動を防ぐ)
+  - `run-lighthouse`: `test-stream` + `prow` の起動と、`/persistence`・`failures`・自動 replay (`#regroup`) の確かめ方の節を追加
+  - 残すと決めたもの: `data/wikimedia/`・`data/otel*` (第 1〜5 段階の判定の生データ、EventStreams は数日しか遡れず再取得できない。空き 211 GB で C6 の 100 GiB 規則にも当たらない)・`server/strategy-b-*` (対策B の課金実測の生出力、33 KB)
+- [x] C32 `ROADMAP_BRIEF.md` のアーカイブ分割 — **見送り** (2026-11-25。常時読み込みの重さは C31 で解消し、devlog は見出しを grep して節だけ読む運用。分割すると `server/src` の 51 ファイルを含む 229 か所の「ROADMAP_BRIEF.md <日付>」参照が索引経由の遠回りになる。記録は ROADMAP_BRIEF の 2026-11-25 (4) の節)
 - [x] C31 `CLAUDE.md` のスリム化 (2026-11-25、84 KB・715 行 → 11 KB・144 行。過去の時系列は削り `ROADMAP_BRIEF.md` を正本とするポインタに。記録は ROADMAP_BRIEF の 2026-11-25 (3) の節)
   - 残したもの: 現在地・起動/テスト手順・ディレクトリ地図・設計制約と不変条件 (dcp-core との境界・統計層・実データの規律・Brain)・常設ルール・`@CLAUDE.local.md`
   - 削った 250〜700 行目の詳細 (L1〜L5・較正期間・F2 など) は `git show 2cab5b2:CLAUDE.md` で全文を読める
@@ -164,25 +170,4 @@ Prow presubmit は多数の無関係な PR が並行して走るため「1 本�
 設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-25 の方針決定 (2 段構えの 2 段目)。C29 で本物の回帰に対する検証フェーズを閉じたあと、普段の開発 (`node --test` の JSON/TAP 出力や JUnit XML、マルチエージェント開発のテスト実行) を HTTP 経由で灯台サーバにリアルタイム投入し、`RetentionBuffer`・`PersistenceDetector`・`Dashboard` で監視できるようにする。
 
 - user が決めること (C29 の後): 投入形式 (ビルド単位 JSON / JUnit XML)、不定期なローカル実行に対して時間窓のままにするか実行単位の窓 (C17 案 c) を併設するか
-- 決定になったら完了条件を付ける
-
-### C32. `docs/devlog/ROADMAP_BRIEF.md` (637 KB・7,171 行) のフェーズ別アーカイブ分割
-状態: 提案
-
-設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-25 (2)。単一の追記ファイルが 637 KB (7,171 行) に達し、検索・閲覧や引き継ぎの取り回しが重くなっている。
-
-- user が決めること: 完了済みの過去フェーズを `docs/devlog/archive/` に切り出してよいか (記録は 1 バイトも削らず移動のみ)
-- 案: 例として `archive/2026-06_09-phase01-L1-L5.md` (Phase 0/1・L1〜L5) と `archive/2026-09_11-wikimedia-otel.md` (Wikimedia / OTel 実データ較正 第 1〜5 段階) に分割し、`ROADMAP_BRIEF.md` 冒頭に索引を置いて現行フェーズ (公開 CI 試験結果 `2026-11-17` 以降) を追記先にする。台帳や `CLAUDE.md` の参照先も壊れないよう注記する
-- 決定になったら完了条件を付ける
-
-### C33. 運用ドキュメント (`README.md`・`.claude/skills/`) の最新化とローカル残骸データ (`data/` 約 6.9 GB) の棚卸し
-状態: 提案
-
-設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-25 (2)。実装に追いついていないドキュメントと、終了済み実験のローカルデータが残っている。
-- `README.md` (46 KB): 315 行目が「判断待ち C25」のまま、350 行目に「次は C16・C17」という古い記述が残存。Prow コマンド一覧に `run-prow-attribution-report.js` (C28) が抜け、`PROW_REPLAY_SPEED` 上限 (C26: 7200) や `GET /persistence` (C22) の説明も未反映
-- `.claude/skills/run-lighthouse/SKILL.md`: `mock` (AR/CG/RC) の手順のみで、`LIGHTHOUSE_PROFILE=test-stream`・`LIGHTHOUSE_SOURCE=prow`・`GET /persistence`・`#regroup` 自動 replay の実地確認手順が無い
-- `.claude/skills/wiki-collector-ops/SKILL.md`: 収集器は `2026-11-17` に停止・タスク無効化済みだが、冒頭が稼働中前提のまま (停止済み・参照専用であることを冒頭に明記する)
-- ローカル残骸 (untracked、削除には user 承認が要る): `data/wikimedia/` (4.46 GB)・`data/otel/` + `data/otel-rehearsal*` (2.24 GB)・`server/strategy-b-*.{log,jsonl}` / `server/server.log`
-
-- user が決めること: ドキュメント・スキルの最新化を行うか。あわせて `data/wikimedia/`・`data/otel*`・`server/strategy-b-*` を残すか、削除・退避するか (特に `data/` は公開リポジトリ外で復元できないため明示承認が要る)
 - 決定になったら完了条件を付ける

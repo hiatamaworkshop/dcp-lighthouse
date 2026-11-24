@@ -1,6 +1,6 @@
 ---
 name: run-lighthouse
-description: Launch the dcp-lighthouse observation dashboard and drive a scenario (AR/CG/RC) to verify it end-to-end. Use when asked to run/start the lighthouse server, check the dashboard in a browser, verify replay or snapshot tiles render, or confirm Brain decisions fire on a live stream.
+description: Launch the dcp-lighthouse observation dashboard and verify it end-to-end — either the mock stream with a scenario (AR/CG/RC) or the recorded Prow test-result stream (LIGHTHOUSE_PROFILE=test-stream, LIGHTHOUSE_SOURCE=prow). Use when asked to run/start the lighthouse server, check the dashboard in a browser, verify replay or snapshot tiles render, confirm Brain decisions or automatic grouped replays fire on a live stream, or check /persistence.
 ---
 
 # dcp-lighthouse — 起動と実地検証
@@ -116,7 +116,42 @@ for(const l of lines){
   参照区間が retention 外に落ちると前者になる。混同するな
 - バースト**進行中**の粗窓タイルが `[baseline]` のみなのは**正常** (RC の前提そのもの)
 
-## 5. 後片付け
+## 5. 記録済みの試験結果の流れ (`test-stream` + `prow`) を流す
+
+モック (§1〜4) とは別の起動。取り込み済みの `data/prow/` の日を仮想時計で本番配線に流す (C23)。
+`mock` の既定は不変なので、§1〜4 の手順はこの節の影響を受けない。
+
+```bash
+cd server && npm run build
+LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=prow \
+  PROW_REPLAY_FROM=2026-10-26 PROW_REPLAY_TO=2026-11-15 PROW_REPLAY_SPEED=3600 \
+  node dist/index.js
+```
+
+- 起動ログに `LIGHTHOUSE_SOURCE=prow — <from>…<to>, <jobs>: N builds (M could not be read), K events, <speed>x` が出る。
+  取り込んでいない日を指定すると読めないビルドが数えられる (先に `run-prow-import` で取り込む)
+- **`PROW_REPLAY_SPEED` は上限 7200** (= (ライブの観測 3 窓 − 1) × 1 時間窓 ÷ 1 秒 tick、`maxReplaySpeed`・C26)。超えると起動時に落ちる = 正常。
+  3600 で 1 秒 = 記録の 1 時間。3 週分なら約 8 分で流れ切る
+- `test-stream` は鮮度ゾーン 34 時間なのでメモリを食う。89 日を一度に流すより 1〜3 週に分ける
+- `LIGHTHOUSE_SOURCE=prow` は `LIGHTHOUSE_PROFILE=test-stream` 無しでは起動時に落ちる (mock の 10 s / 1 s 窓はこの流れに盲目、C12)
+
+確かめる点 (`/demo/start` は使わない):
+
+```bash
+curl -s http://localhost:3001/status          # 再生中は running:true と replay (再生の位置)、流れ切ると running:false
+curl -s http://localhost:3001/persistence     # 試験ごとの持続の名乗り (C22)。mock では active:false
+```
+
+- **snapshot チャネル** (`/events/snapshot`): `replay` 欄 (再生の位置)・`persistence` 欄・`snapshot` (package) の
+  `failures` (窓ごとの失敗数と、10 件以上の窓 = 同時多発 `bursts`)。`mock` ではこれらの欄自体が無い
+- **decisions チャネル** (`/events/decisions`): 粗窓の `dip`・`step_down` または同時多発の窓で、`CoarseReplayTrigger` が
+  `group_by: ["agentId"]` の `replayRequest` を自動で出し (C24)、続けて `replay_snapshot` が届く。採点は `$Q` の
+  `#regroup` 行で、ライブの `#fine` 行は書き換わらない (C27。`qHistory` で確かめられる)
+- 参考値: 08-30〜09-09 の 11 日で発火 13 窓 (同時多発 9/9)、帰属は 12/13 が `ci-kubernetes-e2e-gci-gce`。
+  ただしこれは既知の 1 ジョブの固まりの**配線確認**で、見分ける力の証拠ではない (C28 の植え込みが正本)
+- `snapshot.referenceUsable:false` (盲目) が続くなら、まず流した範囲の頭 (参照 30 窓 = 30 時間分が溜まるまで) かを疑う
+
+## 6. 後片付け
 
 ```bash
 curl -s http://localhost:3001/demo/stop

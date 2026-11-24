@@ -312,7 +312,7 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **試験ごとの持続の名乗りを灯台の出力にする** (2026-11-22、C22) — `PersistenceDetector` (`prow-persist.ts`) をドメイン非依存層 (`SnapshotCurator` / `lens.ts`) には入れず、試験の流れ向けのドメイン層 (`ProwPersistenceFeed`) として本番サーバに配線。`GET /persistence` と SSE (`/events/snapshot`) の別欄 `persistence`、および `dashboard/app.js` の専用パネルに出す (`mock` では非表示・`active: false`・package は不変)。`detectPersistence` との一致を試験で固定。詳細は ROADMAP_BRIEF.md 2026-11-22 (3)
 - [x] **粗窓の発火を契機にグループ別の遡及的再観測を自動で回す** (2026-11-22、C24) — `CoarseReplayTrigger` (`coarse-replay-trigger.ts`) を `LIGHTHOUSE_PROFILE=test-stream` に配線。合算の 1 時間粗窓で下向きタイル (`dip`・`step_down`) または同時多発 (`failures.bursts`) が出た窓に重複抑止つきで `group_by: ["agentId"]` の `replayRequest` を自動発火 (`compare:test_result:v1#fine` も 30 窓参照を宣言し `broadcastReplay` へ配信、`mock` は不変)。実データ 11 日 (2026-08-30〜09-09、873 ビルド) で発火 13 窓 (同時多発 9/9)・帰属 12/13 がすべて `ci-kubernetes-e2e-gci-gce` に特定。詳細は ROADMAP_BRIEF.md 2026-11-22 (4)
 - [x] **再生速度の上限・自動 replay の専用行・植え込みでの帰属** (2026-11-22、C26〜C28) — 記録流の再生は live が追える速度 (1 時間窓で 7200) を超えると起動時に拒否。自動 replay は `$Q` の `#regroup` 行で採点し、ライブの `#fine` を書き換えない。C24 の帰属 12/13 は既知の 1 ジョブの固まりの配線確認だったので、他のジョブに回帰を植えて測った (`run-prow-attribution-report`): 誤帰属 0、5 試験の回帰で正しいジョブだけを名乗ったのは 1 ジョブ 50/60・2 ジョブ同時 44/60、外れは「名乗らない」側。詳細は ROADMAP_BRIEF.md 2026-11-22 (5)(6)
-- [ ] **次** (判断待ち、台帳 C25): 本物の回帰がある流れ (presubmit または自前の試験実行) で名乗りを確かめる (C25)。全 pass の参照の帰無 (C18)・量チャネル (C7) は保留。仮想ストリームの常設 (F3) は未着手
+- [ ] **次** (2026-11-25 決定、台帳 C25 → C29): presubmit (複数 PR が混ざる) は避け、1 本の統合ブランチ上で本物の回帰が流れるデータ源を 2 候補 (Prow の非ゲート定期ジョブ / Treeherder `autoland`) から実地で確かめて 1 本に決め (C25)、その流れで本物の回帰に対する名乗りと遅れを測る (C29)。自前の試験を流し込む `POST /ingest/build` (C30) はその後。全 pass の参照の帰無 (C18)・量チャネル (C7) は保留。仮想ストリームの常設 (F3) は未着手
 
 現在テスト計 742 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
@@ -338,6 +338,7 @@ node dist/run-prow-replay-report.js --from 2026-10-26 --to 2026-11-15 # (89 日�
 node --max-old-space-size=6144 dist/run-prow-truth-report.js --from 2026-08-19 --to 2026-11-15 --arms 1h-fresh,1h-fresh-by-job  # 導出した真値 (flaky / regression / isolated) と、再生の結果との突き合わせ
 node --max-old-space-size=6144 dist/run-prow-plant-report.js --from 2026-10-26 --to 2026-11-15 --per-job 20  # 回帰を植えて検出を測る (C20、約 20 分)
 node --max-old-space-size=6144 dist/run-prow-persist-report.js --from 2026-08-19 --to 2026-11-15 --plant-from 2026-10-26 --plant-to 2026-11-15  # 試験ごとの持続の名乗り: 記録での件数と、C20 の植え込みでの検出 (C21、約 3 分)
+node dist/run-prow-attribution-report.js --from 2026-10-26 --to 2026-11-15 --per-job 20  # 粗窓の発火 → ジョブ別の自動 replay が名乗るジョブを植え込みで数える (C28。exact/partial/extra/wrong/none と植えない対照)
 node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
 node dist/run-otel-flag-schedule.js        # H4 の障害フラグ切替 (既定: paymentFailure 50%、休止 10%、≒ 24 h)。真値は data/otel/flags.jsonl
 node dist/run-otel-report.js --from <day> --to <day>   # H4。p=1 の配線確認が通らなければ判定を出さない (判定日 10-03 は使用済み)
@@ -347,7 +348,7 @@ node dist/run-otel-report.js --from <day> --to <day>   # H4。p=1 の配線確�
 判定を記録した後は探索データとして読める (出力にその旨と立っている判定が出る)。`--holdout` は使用済みとして拒否する。
 未使用の保留期間は無い (第 5 段階は 2026-11-17 に判定して使用済み)。
 Wikimedia の収集は 2026-10-14 に一度止め、同日に第 3 段階のため再開し、**2026-11-17 に停止した** (タスクは無効化、データは保持)。
-次の実データは公開 CI の試験結果 (台帳 C16・C17)。保持は C6 の `run-wiki-retention` (空き 100 GiB 未満で古い日から。保留週の ±2 日と直近 14 日は残す)。
+いまの実データは公開 CI の試験結果 (Prow、`data/prow/`。C16・C17 で取り込みを始めた)。Wikimedia の日別 gz の保持は C6 の `run-wiki-retention` (空き 100 GiB 未満で古い日から。保留週の ±2 日と直近 14 日は残す)。
 
 OTel Demo (open-telemetry/opentelemetry-demo、事前登録で読んだのは 858f76f) は最小構成・観測スタック無しで、
 lighthouse の上書きを最後に重ねて起動する (Demo のディレクトリで):
@@ -400,7 +401,7 @@ curl -s http://localhost:3001/brain
 |---|---|---|
 | `BRAIN_MODE` | `rule` | `rule` \| `claude` |
 | `LIGHTHOUSE_PROFILE` | `mock` | `mock` \| `test-stream`。`test-stream` は CI の試験結果向け (1 時間窓・参照 30 窓・鮮度ゾーン 34 時間・package に失敗数と同時多発)。モックの 50 件/秒を流すと 34 時間分を保持するのでメモリが要る。未知の名前は起動時に落ちる (`stream-profile.ts`) |
-| `LIGHTHOUSE_SOURCE` | `mock` | `mock` \| `prow`。`prow` は `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可。取り込み済みの `data/prow/` を仮想時計で本番配線に流す (`PROW_REPLAY_FROM` / `PROW_REPLAY_TO` 必須、`PROW_REPLAY_SPEED` 既定 `3600` = 1 時間/秒、`PROW_DIR` / `PROW_JOBS` 任意、`prow-live.ts`) |
+| `LIGHTHOUSE_SOURCE` | `mock` | `mock` \| `prow`。`prow` は `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可。取り込み済みの `data/prow/` を仮想時計で本番配線に流す (`PROW_REPLAY_FROM` / `PROW_REPLAY_TO` 必須、`PROW_REPLAY_SPEED` 既定 `3600` = 1 時間/秒、上限はライブの粗窓が窓を飛ばさない速さ (1 時間窓で `7200`、超えると起動時に落ちる・C26)、`PROW_DIR` / `PROW_JOBS` 任意、`prow-live.ts`) |
 | `CLAUDE_BRAIN_MODEL` | `claude-sonnet-5` | 実測済みは `claude-sonnet-5` / `claude-sonnet-4-6` |
 | `CLAUDE_BRAIN_INTERVAL_MS` | `15000` | 審議の下限間隔 (支出ガード) |
 

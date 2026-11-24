@@ -7186,3 +7186,12 @@ user「C31 を最初にやる」。常時読み込みの `CLAUDE.md` から、�
 - 残したのは、現在地 (2026-11-25)・起動/テスト手順 (`npm test` は `dist/*.test.js`・`BRAIN_MODE=claude` は実課金)・ディレクトリ地図・不変条件・常設ルール・`@CLAUDE.local.md`
 - 不変条件は節ごとの経緯ではなく規則として書き直した: 既定の出力をバイト同一に保つ opt-in・`count` は実保持事象数のまま・採点可能性の述語は 1 つ・沈黙と盲目の区別・読み手のないガードを作らない・規則は測る前に固定し使用済みの保留は探索データ・発火は curator でレンズ選択だけ LLM・primary は RuleBrain
 - 経緯を引く方法を冒頭に書いた (`grep -n "^## " ROADMAP_BRIEF.md` で見出しを引き、該当節だけ読む)
+
+## 2026-11-25 (4) — C32 は見送り、C33 は文書の最新化に絞って実施 (`data/` は残す)
+
+user「新しく出した項目を先に評価して」→「yes continue」。C31 の後で C32・C33 を見直した。
+
+- **C32 見送り**: 起票の理由 (重さ) の大半は常時読み込みの `CLAUDE.md` で、C31 で解消した。devlog は自動では読まれず、見出しを grep して節だけ読むので 1 ファイル 640 KB でも費用はほぼ変わらない。分割すると「ROADMAP_BRIEF.md <日付>」の参照 229 か所 (`server/src` の 51 ファイルのコメントを含む) が索引経由の遠回りになる。利点は全文を読むときだけで、それは避けるべき読み方
+- **C33 の起票文の検算**: README 315 行目 (「判断待ち C25」)・350 行目 (「次は C16・C17」) は事実どおり。`run-prow-attribution-report`・`PROW_REPLAY_SPEED`・`/persistence` は状態の行には出ていたので、「抜け」はコマンド一覧と環境変数の表に限った話だった。skill 2 件の指摘は事実どおり
+- **実施**: README の上記 4 か所、`wiki-collector-ops` の description と冒頭を「停止済み・参照専用・OS 再起動の後に再起動しない」に (旧 description は「OS 再起動の後に使う」で、停止済みの収集器を再開させる方向に発動しえた)、`run-lighthouse` に `test-stream` + `prow` の節 (起動・速度の上限 7200 = (観測 3 窓 − 1) × 1 時間 ÷ 1 秒 tick・`/status`・`/persistence`・SSE の `replay`/`persistence`/`failures` 欄・自動 replay と `#regroup`)
+- **`data/` は消さない**: `data/wikimedia/` (4.4 GB) と `data/otel*` (約 2.2 GB) は第 1〜5 段階の判定の生データで、EventStreams は数日しか遡れず再取得できない。空きは 211 GB で C6 の「100 GiB 未満で古い日から」にも当たらない。`server/strategy-b-*` (33 KB) は対策B (2026-08-17) の課金実測の生出力で残骸ではない。古い `*.pid`・空の `collector.err*.log` は影響が無いのでそのまま
