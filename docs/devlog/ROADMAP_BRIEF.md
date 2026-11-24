@@ -7177,3 +7177,12 @@ user「実装以外の整備があればそれも起票を」。リポジトリ�
 1. **C31 (`CLAUDE.md` のスリム化)**: 84 KB (715 行)、27 行目の 1 セルだけで 8,000 文字超。毎セッション・全ワーカーで常時読み込まれるトークンの大半を占めている。過去の時系列詳細は devlog に逃がし、現在地・ファイル地図・不変条件・起動手順に圧縮する案。
 2. **C32 (`ROADMAP_BRIEF.md` のアーカイブ分割)**: 単一ファイルで 637 KB (7,171 行)。完了済みの Phase 0/1・L1〜L5 および Wikimedia/OTel 較正期間を `docs/devlog/archive/` に切り出し (1 バイトも捨てない)、冒頭に索引を置いて現行フェーズを追記先にする案。
 3. **C33 (運用ドキュメント・スキルの最新化とローカル残骸の棚卸し)**: `README.md` の古い記述 (350 行目「次は C16・C17」、C26 速度上限・C22 `/persistence`・C28 起動口の抜け)、`run-lighthouse` スキルの `test-stream` / `prow` 未反映、`wiki-collector-ops` スキルの停止済み明記、および untracked の `data/wikimedia/` (4.46 GB)・`data/otel*` (2.24 GB)・`server/strategy-b-*` の扱い (削除可否は user 承認)。
+
+## 2026-11-25 (3) — C31: `CLAUDE.md` を 84 KB・715 行から 11 KB・144 行へスリム化
+
+user「C31 を最初にやる」。常時読み込みの `CLAUDE.md` から、このログと重複していた過去の時系列 (L1〜L5・較正期間の第 1〜5 段階・F2・C2〜C10 など、旧 250〜700 行目) と、8,000 文字超の状態表のセルを削った。
+
+- 削る前に、旧本文の主な節の語 (対策A・isScorable・decay_anchor・lensGate・2026-08-25・2026-09-27・H-clean・ForecastMonitor ほか) がこのログに存在することを grep で確認した。全文は `git show 2cab5b2:CLAUDE.md` に残る
+- 残したのは、現在地 (2026-11-25)・起動/テスト手順 (`npm test` は `dist/*.test.js`・`BRAIN_MODE=claude` は実課金)・ディレクトリ地図・不変条件・常設ルール・`@CLAUDE.local.md`
+- 不変条件は節ごとの経緯ではなく規則として書き直した: 既定の出力をバイト同一に保つ opt-in・`count` は実保持事象数のまま・採点可能性の述語は 1 つ・沈黙と盲目の区別・読み手のないガードを作らない・規則は測る前に固定し使用済みの保留は探索データ・発火は curator でレンズ選択だけ LLM・primary は RuleBrain
+- 経緯を引く方法を冒頭に書いた (`grep -n "^## " ROADMAP_BRIEF.md` で見出しを引き、該当節だけ読む)

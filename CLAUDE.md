@@ -1,715 +1,144 @@
 # dcp-lighthouse — 引継ぎコンテキスト
 
-## プロジェクト概要
+灯台モデル (Lighthouse Model) のパイロット実装。DCP Pipeline を観測層として、マルチエージェント開発時代の
+テスト/コード品質ストリームを扱う。灯台は DCP の「観測 → 予見 → 解釈 → 決定」のうち
+**観測と予見を数理だけで、軽量に、較正つきで担う層** (2026-10-08 合意)。
 
-灯台モデル (Lighthouse Model) のパイロット実装
-DCP Pipeline を観測層として、マルチエージェント開発時代のテスト/コード品質ストリームを扱う
-
-**親プロジェクト**: dcp-core (DCP Pipeline コア) — 非公開
-**姉妹プロジェクト**: dcp-minecraft (高頻度ストリーム処理の実証) — 非公開
+**親**: dcp-core (DCP Pipeline コア・非公開) / **姉妹**: dcp-minecraft (高頻度ストリームの実証・非公開)
 > 非公開プロジェクトはローカルに並べて置く前提。参照は名前で行い、パス表記はしない。
 
-**設計仕様ドキュメント**:
-- `docs/LIGHTHOUSE_MODEL.md` — 灯台モデルの概念・$Q shadow・stream replay・コード応用展望
-- `docs/LIGHTHOUSE_PILOT_DATA.md` — モックデータ要件・シナリオ・検証基準
-- `docs/devlog/ROADMAP_BRIEF.md` — 時系列の開発ログ (追記式。仕様ではない)
-- `docs/roadmap.md` — 作業の単位の台帳 (`### C<n>. 題`。agent-hub から依頼できる形。L1〜L5 は devlog 側の工程名で別物)
+| 文書 | 役割 |
+|---|---|
+| `docs/LIGHTHOUSE_MODEL.md` | 概念設計 ($Q shadow・stream replay・コード応用) |
+| `docs/LIGHTHOUSE_PILOT_DATA.md` | モックデータ要件・シナリオ・検証基準 (§10) |
+| `docs/roadmap.md` | **作業の単位の台帳** (`### C<n>. 題`。agent-hub から依頼できる形) |
+| `docs/devlog/ROADMAP_BRIEF.md` | 時系列の開発ログ (追記式・仕様ではない)。**過去の判定結果・数値・経緯の正本** |
+| `README.md` | ステータス表・コマンド一覧 |
+
+L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 
 ---
 
-## 立ち位置
+## 現在地 (2026-11-25)
+
+- **Phase 0 + Phase 1 完了**。L1〜L5 (足場・Brain write surface・ClaudeBrain・レンズチェーン・参照ゾーン) 完了。テスト 742 件
+- **実データ較正期間 (Wikimedia / OTel、第 1〜5 段階) は完了**。収集は 2026-11-17 に停止 (タスク無効化・データ保持)。未使用の保留期間は無い
+- **いまの実データは公開 CI の試験結果 (Kubernetes Prow、`data/prow/`)**。1 時間窓 × 参照 30 窓の構成 (`LIGHTHOUSE_PROFILE=test-stream`)・
+  持続の名乗り (`/persistence`)・粗窓発火からのグループ別自動 replay まで本番配線済み (C12〜C28)。`mock` が既定で従来のまま
+- **次**: C25 (本物の回帰があるデータ源を 1 本に決める) → C29 (その流れで名乗りを測る) → C30 (自前テスト用 `POST /ingest/build`、保留)。
+  整備項目は C31〜C33。詳細は `docs/roadmap.md`
+- 数値・日付つきの経緯を知りたいときは `grep -n "^## " docs/devlog/ROADMAP_BRIEF.md` で見出しを引き、該当節だけ `Read` する (全文は 600 KB 超)
 
 | | dcp-minecraft | dcp-lighthouse |
 |---|---|---|
 | 証明する性質 | 高頻度ストリーム処理 | 観測層と Brain 制御 |
-| データ源 | Bukkit Plugin / 実 Minecraft | モックストリーム生成器 |
+| データ源 | Bukkit Plugin / 実 Minecraft | モック生成器 → 実データ (Wikimedia・OTel・Prow) |
 | Brain の役割 | ルート変更・throttle・$V 更新 | 観測パラメータ操作・reroute・target schema 更新 |
-| ステータス | 動作確認済 (Phase B 完了) | Phase 0+1 完了・L1〜L5 完了 (L4の`agg_func`はmean/median/percentile実装済)・分業アーキテクチャ (rerouteSchema分) と参照ゾーンの`$Q`動的設定も完了・レビュー欠陥4件修正済・実地レビュー (2026-09-27) 対応済・実データ較正期間の第0段階を実装済・収集器の再開欠陥 (2026-09-30) 修正済・H4 のフラグ切替器/コレクタ設定/レポート整備済・H2 の報告に対照と実効 family を併記 (2026-10-01)・H4 の予行で配線確認の障害 3 件を除去 (テスト487件)・第1段階の最終集計 (2026-10-06): H1 支持 / H2 保留 / H4 規則外・過分散の帰無を opt-in で実装・step も判定化 (2026-10-07、テスト503件)・H3 の最終集計 (2026-10-14): 支持・収集停止・step を両方の帰無で判定化・時間依存の帰無 (variogram) を opt-in で実装・その帰無では step を形の説明に格下げ・10 s の残差は量と率が同時に動く窓 = 本物の出来事として残し `volumeRatio` で名乗る・比較 (参照・帰無) を `$Q[compare]` に宣言し package が名乗る ・レビュー (2026-10-14 (9)) の 8 件を修正 (表示用の `maxTiles` を判定・計測が読んでいた等)・窓要約の常設履歴で variogram を本番で宣言可能に (opt-in、2026-10-14 (10))・F1 周期合わせの参照は実データでは効かず本番に入れない (2026-10-14 (11))・第 3 段階を事前登録し収集再開 (探索 10-15〜18・保留 10-19〜21、2026-10-14 (12)) ・H4 の判定日を 3 つの帰無で探索として読み直し (variogram で OFF 2.3% だが検出 4/23、新しい判定日は回さない、2026-10-16)・第 3 段階の最終集計 (2026-10-22): 主張 V は棄却 (V-a 14.89%・V-b 4.53%)・物差しの見直し (2026-10-22): 主張 V は構成の変化を数えていた → 使用済み保留を探索に開放・variogram は平常の量の窓で較正済み (60 s |z|≥2 3.6%)・帰無の改良は打ち切り・第 4 段階 (10-26〜11-01) を事前登録・F2: kriging の予見 (`$F` の行) を実装 (60 s の 1 窓先で区間 −23%・較正維持)・`$Q[forecast]`・`GET /forecast` (テスト576件)・第 4 段階の最終集計 (2026-11-02): 保留 (V-a \|z\|≥2 1.58%・分散 0.533 で保守的すぎる、10 s 腕 2.09%)・過敏側の失敗ではなく判定は受け入れ・保留週は使用済み・足りない箇所の整理と次の 3 手 (2026-11-02 (2)): 1 手目として package が検出の届く範囲 (MDE、`sensitivityPower`) を名乗る・厳密な裾の窓は MDE も厳密に・H-mix (履歴の構成の変化が γ̂ を膨らませ平常の量で保守的に) の診断器・H-mix 支持 (2026-11-02 (3))・量チャネル・`ForecastMonitor`・`history_clean: median` (opt-in)・C10: 本番の履歴 1 時間で 10 s 腕は成り立ち V-a は成り立たない (2026-11-12)・**第 5 段階 (封印週 11-09〜11-15、2026-11-17): H-clean SUPPORTED** (V-a var z 1.044・10 s 腕 1.005。除いたから入ったと言えるのは 10 s 腕だけ。回帰確認で本番は変えない)・C8 まで台帳で閉じた・**次の実データは公開 CI の試験結果** (2026-11-17 決定、C16 データ源の実地確認 → C17 取り込みと形の調査 → C12・C13)・Wikimedia の収集は 2026-11-17 に停止 (タスク無効化・データ保持)・**C17 形の調査 (2026-11-17 (4))**: Prow の 3 ジョブ・21 日は 8.4 万事象/日・失敗 1 万 3 千件に 1 件・日周なし。本番の 10 s 窓と 1 s 窓は失敗のある窓をほぼ採点できない (参照が全 pass で分散 0 → `isReferenceUsable` が偽)、1 時間窓 × 参照 30 窓なら 122/123・**C12 本番の配線への再生 (2026-11-17 (5))**: 出荷時の構成 (10 s・1 s 窓) は問うた package の 99.8〜100% が盲目。同じ部品で 1 時間窓 × `reference_windows` 30・34 時間級の保持にすると盲目 1.2%・失敗の無い区間の警報 0/213、単発の失敗には反応せず 1 時間に 2 件以上で反応 (7/11・2/2)。**C13 真値の導出 (2026-11-17 (6))**: 89 日・3 ジョブでエピソード 689 のうち flaky 599・isolated 89・regression 1 = この流れに回帰はほぼ無く検出力は測れない。失敗の 31% は 10 件以上が同時に落ちた 10 ビルドの固まりで、1 時間窓 × 参照 30 窓はそれを 10/10 拾い単発は 2/379・失敗の無い区間の警報 0/1,082。**C20 回帰を植えた検出 (2026-11-17 (7))**: 1 時間窓 × 参照 30 窓 (3 ジョブを 1 本) は 5 試験の回帰を 60/60・中央値 0.4〜0.6 時間で拾い、1 試験だけの回帰は 1 時間ごとのジョブで 2〜3 割 (窓に 1 件 = flaky と同じ大きさ)。分けると悪くなる。C13 の規則は植えた回帰を 360/360 regression と呼ぶ。`RetentionBuffer.evict` の先頭 splice を除いた (ビット一致)。**C21 試験ごとの持続 (2026-11-17 (8))**: C13 の規則から未来を除き流れに沿って 2 ビルド目で名乗る検出器。植えた回帰 180/180 (自明に近い)・遅れ 1.2〜1.6 時間・記録 89 日の名乗りは 2 件 (うち誤 1)。C19 (試験の流れ向けの構成と同時多発の名乗り) は決定済み。次は C22 (名乗りの置き場所) の判断待ち・**C19 試験の流れ向けのプロファイル (2026-11-19)**: `LIGHTHOUSE_PROFILE=test-stream` (opt-in、既定 `mock` は従来のまま) = 1 時間窓・参照 30 窓・鮮度ゾーン 34 時間。package が窓ごとの失敗数と、10 件以上の窓を「同時多発」(原因は名乗らない) として名乗る (`failureCount`、採点は動かない)。89 日の再生は C12・C13 と同じ数字。C18 は保留 (テスト718件)・**レビューと台帳整備 (2026-11-22)**: 直近の成果が CLI に閉じ、観測層 (`SnapshotPackage`) と判断層 (`Brain`・再観測) が未結線である 4 つの断絶と推奨順序を記録し、`## 予定` を `C23 → C22 → C24` に整備・**C23 記録流のライブ再生口と C19 画面表示 (2026-11-22 (2))**: `LIGHTHOUSE_SOURCE=prow` (`prow-live.ts`) で `data/prow/` を仮想時計で本番配線 (`index.ts` → `DashboardServer`) に流し、`dashboard/app.js` に `failures` / `bursts` と再生位置を表示。ライブの package は C12 再生 (`1h-fresh`) と一致 (テスト727件)・**C22 試験ごとの持続の名乗りを出力に配線 (2026-11-22 (3))**: `ProwPersistenceFeed` (`prow-live.ts`) で `PersistenceDetector` をドメイン層に配線し、`GET /persistence`・SSE 別欄 `persistence`・dashboard パネルに出力 (`mock` は不変、テスト729件)・**C24 粗窓発火からのグループ別自動 replay (2026-11-22 (4))**: `CoarseReplayTrigger` (`coarse-replay-trigger.ts`) を `test-stream` に配線 (`compare:#fine` も 30 窓参照)。合算 1 時間粗窓の dip/burst から重複抑止つきで `group_by: ["agentId"]` の replay を自動発火して `broadcastReplay` へ配信。実データ 11 日 (08-30〜09-09) で発火 13 (同時多発 9/9)・帰属 12/13 がすべて `ci-kubernetes-e2e-gci-gce` に特定 (`mock` は不変、テスト733件。**既知の 1 ジョブの固まりの配線確認**で、見分ける力の証拠ではない = 2026-11-22 (5))・**C26〜C28 (2026-11-22 (6))**: 記録流の再生速度を起動時に上限 (1 時間窓で 7200) で拒否・自動 replay は専用の `$Q` 行 `#regroup` でライブの `#fine` を書き換えない・植え込みでの帰属 (`prow-attribution.ts`): 誤帰属 0、5 試験の回帰で正しいジョブだけを名乗ったのは 1 ジョブ 50/60・2 ジョブ同時 44/60 (外れは名乗らない側)、1 試験の回帰は粗窓がほぼ発火しない (テスト742件)。次は C25 の判断待ち・**C25 方針決定 (2026-11-25)**: Prow presubmit (複数 PR 混線) を避け、1 本の統合ブランチ上で本物の回帰が流れる 2 候補 (1-A: Prow 非ゲート定期ジョブ / 1-B: Treeherder `autoland`) を実地確認して 1 本に決める (`C25`) → 選んだ実流で本物の回帰に対する名乗りを測る (`C29`) → その後に自前テスト向け `POST /ingest/build` (`C30`、保留) の 2 段構えに決定 |
-
-灯台モデルは dcp-minecraft で得た知見 (DCP Stream は止めずに観測層を被せられる) を、コード生成検証ドメインに応用するもの。データ源とドメイン語彙が変わるだけで、DCP コアの仕組みは同じ。
 
 ---
 
-## 実装順序
-
-`docs/LIGHTHOUSE_MODEL.md` §8 / `LIGHTHOUSE_PILOT_DATA.md` §1.5 に従う。
-2 フェーズに分ける: Phase 0 でドメイン非依存のコア機構を「真値が既知のストリーム」で検証し、Phase 1 でコードテストドメインに適用する。テストドメインは機構バグとドメインモデリングの妥当性が混線するため分離する。
+## 起動・テスト
 
 ```
-=== Phase 0: コア機構検証 (Minecraft ベースライン + 自作異常) ===
-参考データ = 既存 Minecraft デモのイベント (自然な分布、ingestion〜$ST 配線済み)
-異常 = 手作りで注入し真値を握る (例: source-C の平均を t=10s から 0.5→0.3)
-検証するコア4要素: 遡及的再観測 (retroactive re-observation) / 動的データセット追加 /
-                   観測チューニング割り込み / Brain用観測UI
-重要: replay は「分散を縮める/推定を良くする」ではない。
-      保持した生データを別レンズ ($Q[observe]) で見直すこと。詳細は MODEL.md §5
-
-Step 1: $Q[observe] パラメータ抽出
-        — $ST collector が専用 $Q レジストリ経由で window/decay/group_by を読む
-        — $Q は既存 FieldMapping (path 解決の単一責務) に相乗りさせない。別レジストリ
-        — 現状 StCollector は windowMs をコンストラクタ固定・実行中変更不可。動的 read を足す
-        — 既存 Minecraft デモの動作を壊さないこと
-
-Step 2: $Q[pipeline] retention + replay 実装 (遡及的再観測)
-        — IngestionBus に retention_window (生データ保持)
-        — replay_mode = "n_rounds" のみ。保持セグメントを別 $Q[observe] で再集計
-        — 正当性検証: 粗窓で平均化され消えた局所構造 (注入バースト) を
-          細窓で再観測すると復元できること。注入真値が予測する
-          「そのレンズでの集計値」と一致するかを照合 (分散縮小の検証ではない)
-        — 検証ハーネスが注入真値 (分布+delta+タイミング) を必ず記録すること
-
-Step 3: 並行 $ST オーバーレイ + チューニング割り込み + 動的データ追加
-        — 1 ストリームに複数 StCollector が独自パラメータで attach 可能に
-        — 実行中に $Q を変えて live view が再構成されること
-        — 流れているストリームに新ソースを投入できること
-
-Step 3b: Brain用観測UI = スナップショット・パッケージ (動的GIFではない)
-        — 形 + ラベル + 該当数値 のタイル陳列 (LIGHTHOUSE_PILOT_DATA.md §12)
-        — 特徴的/例外的な瞬間を $U が機械的に抽出して並べる
-        — LLM はアニメをフレームサンプリングするので静止スナップショットで十分
-        — 人間向けは別途ライブグラフ。AI向けの正本はスナップショット陳列
-        — チューニング変更 / 異常 が「形」で視覚的に分離されることを照合
-
-=== Phase 1: コードテストドメイン適用 ===
-検証済み機構を test_result:v1 に皮を貼り替え
-(sourceId→agentId, channel→area, value分布→pass/fail/flaky)
-機構は信頼済みなので、ここではドメイン表現の妥当性だけを問う
-
-Step 4: TestorAdapter (モック版)
-        — MockStreamGenerator が test_result:v1 を生成
-
-Step 5: bitpos (固定仮想 area 空間)
-        — 256bit、auth/payment/ui/utils の 4 ドメイン
-
-Step 6: RuleBrain (BrainAdapter 経由で差し替え可能)
-        — 3 シナリオ (AR/CG/RC) に対する判断ルール
-
-Step 7: ダッシュボード (公開アーティファクト)
-        — 「世界が変わった」vs「観測を変えた」を視覚的に分離
+cd server && npm run dev          # tsc && node dist/index.js → http://localhost:3001
+/demo/start?scenario=AR|CG|RC     # モックのシナリオ
+npm test                          # tsc && node --test "dist/*.test.js"
 ```
 
-Phase 0 (Step 1-3b) は Minecraft デモ上でコア機構を真値照合で検証してから、Phase 1 (Step 4-) で lighthouse 固有領域に入る。混ぜない。
+- `npm test` は **`dist/*.test.js` を指定**する。ディレクトリ指定だと `dist/index.js` (実サーバ) が起動して `EADDRINUSE` になる
+- `BRAIN_MODE=claude` は **実課金の API 呼び出し**が走る (既定は `rule`)。配線確認は `ANTHROPIC_BASE_URL` のスタブで課金ゼロにできる
+- 環境変数: `LIGHTHOUSE_PROFILE=mock|test-stream` / `LIGHTHOUSE_SOURCE=prow` (記録済み Prow を仮想時計で再生、`PROW_REPLAY_SPEED` は起動時に上限で拒否)
+- ブラウザでの実地確認は skill `run-lighthouse`、Wikimedia 収集器の運用は skill `wiki-collector-ops`
 
 ---
 
-## モックデータ仕様
+## Phase と検証基準
 
-詳細は `docs/LIGHTHOUSE_PILOT_DATA.md`。要点のみ:
+- **Phase 0** (Minecraft デモ + 手作り異常で真値を握り、コア機構を検証): $Q[observe] 抽出 → retention + replay (遡及的再観測) →
+  並行オーバーレイ・チューニング割り込み → Brain 用スナップショット・パッケージ (Step 1〜3b)
+- **Phase 1** (`test_result:v1` に皮を貼り替え、ドメイン表現の妥当性だけを問う): TestorAdapter・bitpos・RuleBrain・ダッシュボード (Step 4〜7)
+- Phase 0 と Phase 1 は混ぜない (機構バグとドメインモデリングの混線を避ける)。詳細は MODEL.md §8 / PILOT_DATA.md §1.5
+- **replay は分散縮小ではない**。保持した生データを別レンズ (`$Q[observe]`) で見直すこと (MODEL.md §5)
 
-### イベントスキーマ
-```
-["$S","test_result:v1",8,"ts","testId","agentId","areas","result","duration","weight","commitHash"]
-```
+モックのシナリオ (`PILOT_DATA.md` §10 の基準): **AR** agent-C の pass 率 95%→70% (5 秒以内に reroute)・**CG** auth 領域の欠落
+(10 秒以内にヒートマップに穴、持続で target-update)・**RC** 粗窓で見えない局所バースト (細窓の再観測で既知の位置・大きさで復元)。
+背景は 50 events/sec の定常 (シナリオ間は静か)。late-arrival は ts 駆動集計が in-order と数値一致。
 
-### エージェント
-4 体: agent-A (基準) / agent-B (広く浅い) / agent-C (regression 候補) / agent-D (flaky 出力)
-
-### area 空間 (256 bit 固定仮想)
-```
-bit 0-31:    auth      critical
-bit 32-63:   payment   critical
-bit 64-127:  ui        normal
-bit 128-255: utils     low
-```
-
-### シナリオ (3 つ)
-- **AR** Agent Regression — agent-C の pass 率が 95%→70% → Brain: rerouteSchema
-- **CG** Coverage Gap — auth 領域に常時欠落 → Brain: schemaUpdate
-- **RC** Retroactive re-observation — 粗窓で見えない局所バースト → Brain が保持セグメントを細窓で再観測して復元 (分散縮小ではなく「保持データを別レンズで見直す」こと)
-
-### ベースライン
-50 events/sec の定常背景 (シナリオ間も流れ続ける)
+イベント: `["$S","test_result:v1",8,"ts","testId","agentId","areas","result","duration","weight","commitHash"]`。
+エージェント 4 体 (A 基準 / B 広く浅い / C regression 候補 / D flaky)。area 空間は 256 bit 固定 (auth 0-31・payment 32-63・ui 64-127・utils 128-255)。
 
 ---
 
-## ディレクトリ構成
-
-各 `*.ts` に `*.test.ts` が隣接する (テストは実装の隣に置く)。
+## ディレクトリ構成 (`*.ts` の隣に `*.test.ts`)
 
 ```
-dcp-lighthouse/
-  CLAUDE.md              ← このファイル
-  docs/
-    LIGHTHOUSE_MODEL.md          ← 概念設計
-    LIGHTHOUSE_PILOT_DATA.md     ← モック要件
-    devlog/ROADMAP_BRIEF.md      ← 時系列の開発ログ (追記式)
-  server/src/            ← Node.js / TypeScript
-    ── 観測層コア (Phase 0 / L4) ──
-      q-registry.ts              ← $Q レジストリ (observe/pipeline/schema、書込時バリデート)
-      lens.ts                    ← applyLens = レンズチェーン本体 (window/origin/group_by/downsample/decay)
-      lens-view.ts               ← LensView / ObservationOverlay (1ストリーム複数レンズ)
-      retention-buffer.ts        ← 鮮度ゾーン ring (IngestionBus.tap の上)
-      snapshot-curator.ts        ← $U。タイル選出と統計判定 (Šidák・連続性補正・isScorable)
-      calibration.ts             ← 誤警報率/検出力の測定器 (レンズを引数に取る)
-      q-collector-binding.ts     ← $Q[observe] → StCollector 動的 bind
-      q-retention-binding.ts     ← $Q[pipeline] → retention 窓
-      comparison.ts              ← $Q[compare] (参照・帰無) を解決して採点する唯一の場所。package が comparison を名乗る
-      stream-profile.ts          ← 起動時の定数の束を名前で選ぶ (`mock` = 従来、`test-stream` = C19)。index.ts と Prow 再生の `1h-fresh` の腕が同じ数字を読む
-      window-history.ts          ← 窓要約の常設履歴 (疎化前に要約・1 時間)。variogram の帰無と予見が読む
-      forecast-monitor.ts        ← `$F` の較正の常時監視 (C5。ForecastMonitor が 1 分に 1 起点を採点して蓄積、1 h / 24 h × 地平の状態を `GET /forecast` の `calibration` で名乗る)
-      forecast.ts                ← F2 `$F` の行: γ̂ に有効な型を当てて kriging (virtual: true)。Forecaster は窓要約から作る
-    ── 実データ較正期間 (2026-09-27 事前登録。実データ用・灯台側のみ) ──
-      wikimedia-collector.ts     ← EventStreams 収集器 (v1 レコード・欠落=盲目・日別 gzip・
-                                   トピック別再開 Last-Event-ID・未確定の穴は collector-state.json)
-      otlp-receiver.ts           ← OTLP/HTTP JSON 受け口 (H4。weight = 1/p)
-      otel-flag-schedule.ts      ← H4 の障害フラグ切替器 (固定予定・flagd-ui API 経由・flagd で切替を確認して真値ログへ)
-      real-data-harness.ts       ← 再生ハーネス: R_real vs FA_shuffle・注入・φ/ラグ1・間引き再生・
-                                   フラグ真値 (ON 区間の除外と検出)
-      run-wikimedia-collector.ts / run-otlp-receiver.ts / run-otel-flag-log.ts / run-otel-flag-schedule.ts /
-      run-real-data-report.ts / run-otel-report.ts / run-h3-report.ts / run-variogram-report.ts / run-f1-report.ts /
-      run-volume-report.ts (平常の量での較正・構成の変化・量を変えない変化の検出。第 4 段階の --holdout は使用済み) /
-      run-forecast-report.ts (F2: kriging と持続の予見の較正・区間の幅・誤差) /
-      run-sensitivity-report.ts (1a: 名乗る MDE を埋め込みで検算) / run-history-mix-report.ts (1b: H-mix の診断、履歴の除外は診断専用。`--history-total-ms` で本番の形の履歴の長さを測る = C10) /
-      run-volume-channel-report.ts (C3: 量チャネルの z・構成の変化の捕捉) /
-      range-coverage.ts (C9: 集計の前検査。範囲の端まで事象があるか・未確定の穴がないかを時刻だけで確かめ、足りなければ `--holdout` / `--rehearse` が拒否) /
-      prow-import.ts / run-prow-import.ts (C17: Kubernetes の Prow の試験結果を日別に取り込む。取れなかったビルドは days.jsonl に残り、取り込んでいない日を含む範囲は拒否) /
-      prow-events.ts (C17: 保存したビルド → `test_result:v1`。skipped は事象にしない・flaky は作らない) /
-      prow-replay.ts / run-prow-replay-report.ts (C12: 記録済みの試験結果を本番と同じ部品の並び RetentionBuffer → WindowHistory → Comparator に流す。差し替えるのは時計だけ・数えるだけ) /
-      prow-live.ts (C23/C22: 記録済みの Prow の日を仮想時計で本番サーバ index.ts → DashboardServer に流す入口と、ドメイン層の持続検出 ProwPersistenceFeed。LIGHTHOUSE_SOURCE=prow で opt-in) /
-      prow-attribution.ts / run-prow-attribution-report.ts (C28: 粗窓の発火 → ジョブ別の自動 replay が名乗るジョブを植え込みで数える。exact/partial/extra/wrong/none の規則は計測の前に固定) /
-      coarse-replay-trigger.ts (C24: 粗窓の下向きタイルまたは同時多発 bursts を契機に group_by: ["agentId"] の replayRequest を重複抑止つきで自動発火。test-stream で配線) /
-      prow-truth.ts / run-prow-truth-report.ts (C13: 記録から真値を導出。同じコードが通してもいれば flaky・割れが無く 2 ビルド以上で regression・1 ビルドだけは isolated。規則は突き合わせの前に固定) /
-      prow-persist.ts / run-prow-persist-report.ts (C21: 同じ試験が連続する 2 ビルドで落ちどちらの commit でも pass が無ければ 2 ビルド目で名乗る。規則は計測の前に固定。記録での件数と C20 の植え込みでの検出を数える) /
-      prow-plant.ts / run-prow-plant-report.ts (C20: 記録済みの流れに回帰を植え、植えない再生との差で検出と遅れを数える。開始は commit の最初のビルド、終わりは n ビルド目の commit の終わり) /
-      prow-shape.ts / run-prow-shape-report.ts (C17: 形の調査。採点できる窓・参照が使える窓の割合を curator の述語で数える。判定はしない) /
-      run-wiki-retention.ts (C6: 空き 100 GiB 未満で古い日別 gz を消す。既定は dry run・消した日は pruned.jsonl に記録され、その日に触れる範囲はハーネスが拒否)
-                                 ← 起動口 (第 1〜4 段階の保留は使用済みで --holdout は拒否。第 5 段階 2026-11-09〜11-15 も 2026-11-17 に判定 (SUPPORTED) して使用済み。未使用の保留は無い)
-  server/otel/
-      otelcol-config-lighthouse.yml ← OTel Demo のコレクタ extras (traces → 受け口へ OTLP/JSON)
-      compose.lighthouse.yaml    ← OTel Demo の compose 上書き (checkout の GC 空回り回避・負荷 50 HTTP ユーザ)
-    ── ドメイン適用 (Phase 1) ──
-      mock-stream-generator.ts   ← MockStreamGenerator
-      testor-adapter.ts          ← test_result:v1 への正規化
-      brain-adapter.ts           ← interface 定義 (BrainAdapter / ResettableBrain)
-      rule-brain.ts              ← BrainAdapter 実装 (rule-based)。既定の primary
-      claude-brain.ts            ← BrainAdapter 実装 (LLM)。審議を tick から切り離す・提案の関所
-      shadow-brain.ts            ← primary/shadow 併走。shadow の決定は decide() から返さない
-      bitpos.ts                  ← 固定仮想 area space
-      dashboard.ts / index.ts    ← SSE bridge / 起動
-    ── §12 A/B 実験 (L3 前段) ──
-      ab-fixture.ts / ab-harness.ts / ab-strategy-b.ts / run-ab-strategy-b.ts / anthropic-ask.ts
-  server/scripts/
-      run-wiki-collector.ps1     ← 収集器のタスクスケジューラ入口 (conhost --headless・data/logs/)
-      run-h4-day.ps1             ← H4 判定日の無人実行 (コンテナ退避 → 受け口 → Demo → 切替器 → 片付け)
-  dashboard/             ← ブラウザ UI (HTML + JS)
-  .claude/skills/        ← run-lighthouse (ダッシュボード実地検証) / wiki-collector-ops (収集器の点検・運用)
-    index.html
-    app.js
+docs/            LIGHTHOUSE_MODEL.md / LIGHTHOUSE_PILOT_DATA.md / roadmap.md / devlog/ROADMAP_BRIEF.md
+dashboard/       ブラウザ UI (index.html + app.js)
+server/src/      Node.js / TypeScript
+  ── 観測層コア ──
+  q-registry.ts           $Q レジストリ (observe/pipeline/schema/compare/forecast の 5 層、書込時バリデート・書込ゲート)
+  lens.ts                 applyLens = レンズチェーン (window/origin/align/group_by/downsample/decay/agg_func)
+  lens-view.ts            1 ストリーム複数レンズ (LensView / ObservationOverlay)
+  retention-buffer.ts     鮮度ゾーン ring + 参照ゾーン (疎化 = 加重)。IngestionBus.tap の上
+  window-history.ts       窓要約の常設履歴 (疎化前に要約・1 時間)
+  snapshot-curator.ts     $U。タイル選出と統計判定 (Šidák・連続性補正・isScorable・帰無 independent/overdispersed/variogram)
+  comparison.ts           $Q[compare] を解決して採点する唯一の場所 (package が comparison を名乗る)
+  forecast.ts / forecast-monitor.ts   $F の行 (kriging、virtual: true) と較正の常時監視
+  calibration.ts          誤警報率/検出力の測定器 (レンズを引数に取る)
+  q-collector-binding.ts / q-retention-binding.ts   $Q → StCollector / retention の動的 bind
+  stream-profile.ts       定数の束を名前で選ぶ (mock = 従来 / test-stream)
+  coarse-replay-trigger.ts   粗窓の発火 → group_by agentId の replay を自動発火 ($Q 行 `#regroup`)
+  ── ドメイン (Phase 1) ──
+  mock-stream-generator.ts / testor-adapter.ts / bitpos.ts
+  brain-adapter.ts (interface) / rule-brain.ts (primary) / claude-brain.ts (LLM) / shadow-brain.ts (併走)
+  dashboard.ts (SSE bridge・制御 API) / index.ts (起動) / prow-live.ts (記録流の再生口・持続の名乗り)
+  ── 実データ (検証ハーネス・レポート。起動口は run-*.ts) ──
+  wikimedia-collector.ts / otlp-receiver.ts / otel-flag-schedule.ts / real-data-harness.ts / range-coverage.ts
+  prow-{import,events,replay,truth,persist,plant,shape,attribution}.ts   Prow の取り込み・再生・真値導出・植え込み・帰属
+  ── §12 A/B 実験 ──  ab-fixture.ts / ab-harness.ts / ab-strategy-b.ts / anthropic-ask.ts
+server/otel/     OTel Demo の extras (collector 設定・compose 上書き)
+server/scripts/  run-wiki-collector.ps1 / run-h4-day.ps1
+.claude/skills/  run-lighthouse / wiki-collector-ops
 ```
 
----
-
-## Brain の差し替え方針
-
-```typescript
-interface BrainAdapter {
-  observe(snapshot: STSnapshot): void
-  decide(): BrainDecision[]
-  describe(): string
-}
-```
-
-パイロットは `RuleBrain implements BrainAdapter`。
-`ClaudeBrain implements BrainAdapter` も実装済みで、`BRAIN_MODE=claude` で RuleBrain の
-shadow として併走する (L3)。primary は RuleBrain のまま。
-Minecraft で検証済みのパターン。
+各 `run-*-report.ts` が何を測るかは README.md のコマンド一覧と、冒頭コメントを参照。
 
 ---
 
-## 検証基準
+## 設計制約と不変条件 (破ると過去に踏んだ罠が戻る)
 
-`docs/LIGHTHOUSE_PILOT_DATA.md` §10:
+**dcp-core との境界** (2026-05-28、user 指示): コアには汎用の拡張点だけ (`StCollector.get/setWindowMs`・`IngestionBus.tap`・
+`PipelineControl.onExtraDecision`)。**`$Q` ロジック本体は灯台側**。`FieldMapping` は path 解決専用なので `$Q` を相乗りさせない。
+dcp-core を触るときは両プロジェクトで動作確認する。本番 AST 解析・mutation score・実テストランナー統合は将来 (パイロットは観測層の証明に集中)。
 
-1. **AR**: agent-C reroute 決定が regression 開始から 5 秒以内に発火、per-agent パネルで視覚的に分離
-2. **CG**: ヒートマップに穴が 10 秒以内に表示、閾値を超えて持続したら target-update 決定
-3. **RC**: 粗窓で平均化され見えない注入バーストが、保持セグメントを細窓で再観測すると既知の位置・大きさで復元される (注入真値との照合)。Brain が自発的に再観測を起動。分散縮小の主張ではない
+**統計層**
+- 新しい機構は **既定の出力をバイト同一に保つ opt-in**。無加重レンズ・既存 fixture・A/B のシード集合を動かさない
+- `count` は**実保持事象数**のまま。疎化・減衰は `weight` / `effectiveN` (Kish) で表し、`count` に代表数を入れない
+- 採点可能性は述語 1 つ (`isScorable` / `isReferenceUsable`) を全箇所が呼ぶ。コピーを作らない (3 コピーがズレた前例)
+- **沈黙と盲目を区別する**。採点できない・参照が無い・集計を拒否した、は申告する (`unscoredGroups`・`aggFuncUnscored`・`referenceUsable`)。収集の欠落も盲目
+- ガード・フラグには**読み手**を付ける (読み手 0 件の `getSummary`/`aggFuncUnscored` が誤診断を生んだ)。動く経路だけでなく拒否される経路も試す
+- 仮想 (予見・間引き・植え込み) は専用の軸 `virtual: true` で持ち、読み手は全てそれを見る
+- 予見の読み手の物差しは**較正** (誤警報率が分かる形)。閾値で実データを黙らせない
 
-ベースライン: シナリオ間は静かであること。late-arrival テスト: ts 駆動集計が in-order と数値一致。
+**実データの規律**
+- 規則 (判定線・真値の導出) は**測る前に固定**する。保留期間は 1 回だけ使い、**使用済みは探索データ**として扱う (`--holdout` は拒否)
+- 実データで警報率を設計値に合わせて調整しない。対照 (シャッフル・植え込みなし) を同じ出力に並べる
+- 「本物の回帰が無い流れ」の検出力は植え込みでしか測れない。植え込みは清潔で上限になる
 
----
-
-## 注意事項
-
-- **dcp-core には汎用拡張点のみ整備済み (2026-05-28)。$Q ロジック本体は灯台側に置く** — コアは $Q を名指ししない素のフックだけ持ち、配線は灯台側で行う方針 (user 指示)。コアに足した3つ (デフォルト挙動不変、テスト57件パス):
-  - `StCollector.getWindowMs() / setWindowMs()` — `windowMs` を mutable 化、running 中は timer 再起動。$Q[observe] の window 動的変更を灯台側が呼ぶ口
-  - `IngestionBus.tap(observer): () => void` — push を覗く read-only フック。retention buffer 本体はコアに無し → 灯台側が tap で ring buffer を実装 (Step 2)
-  - `PipelineControl.onExtraDecision(type, handler): () => void` — 未知 outbound type を登録ハンドラへ委譲。灯台側が `observe_update`/`replay` を登録。PostBox/OutboundType は未変更
-  - テストは `dcp-core/src/extension-points.test.ts` (13件)
-- **まだコアに無い = 灯台側で埋める範囲**:
-  - $Q レジストリ本体 (置き場所も含め灯台側設計)。`FieldMapping` は path 解決専用なので相乗りさせない
-  - StCollector の group_by 集計 (現状 pass/fail カウントのみ)
-  - tap の上に載せる ring buffer / retroactive re-observation ロジック (一番アーキ的に重い)
-  - `observe_update`/`replay` の OutboundMessage 定義と発行・適用ロジック (onExtraDecision で受ける側)
-- dcp-core を触るときは両プロジェクトで動作確認する。Phase 0 (Step 1-3b) の拡張点変更は Minecraft デモで確認済み (既存44テストを壊さない)
-- 本番 AST 解析・mutation score・実テストランナー統合はすべて将来。パイロットは観測層の証明に集中
-- primary Brain は RuleBrain 固定。ClaudeBrain は実装済みだが shadow 併走のみで、昇格は `/brain` のログを根拠に別途判断する
+**Brain**
+- primary は **RuleBrain 固定**。ClaudeBrain は shadow 併走のみで、昇格は `GET /brain` のログを根拠に別途判断
+- **発火 (いつ異常か) は curator**、LLM には**レンズ選択**だけを渡す。σ・タイル判定をプロンプトに入れない (転写の罠)
+- 審議は tick から切り離す (`decide()` は同期)。提案の関所 (`validateObserveParams`・`lensGate`) は Brain 側、`registry.set` の catch は最後の砦
+- shadow は per-tick 一致率を出さない (cadence の差を測ってしまう)
 
 ---
 
-## 現在の状態
+## 常設ルール
 
-Phase 0 + Phase 1 実装完了 (詳細・ファイル対応は [README.md](README.md) のステータス表参照)。
-起動: `cd server && npm run dev` → `http://localhost:3001`。シナリオ: `/demo/start?scenario=AR|CG|RC`。
-
-## 次のステップ (工程 L1–L5)
-
-E2E 検証は完了済み (当時テスト 113 件、§10 基準を実測)。以後の工程は
-**`docs/devlog/ROADMAP_BRIEF.md` の「2026-07-03 — 本体ロードマップ再編」を正とする**。要約:
-
-- **L1 ✅ (2026-07-03)** 足場固め — field findings の core 還元 (ts≤now クロック方針 / count 窓・有効性 / baseline ゲート+床)
-- **L2 ✅ (2026-07-03)** Brain write surface + replay 表面化 — $Q[schema] baseline_delta 昇格・区間指定 replay (fromTs/toTs)・dashboard 粗/細対比 UI。ブラウザ実地確認も完了 (2026-07-25)
-- **L3 ✅ (2026-08-18)** **ClaudeBrain (本丸)** — `claude-brain.ts` + `shadow-brain.ts`。
-  `BRAIN_MODE=claude` で RuleBrain と shadow 併走。設計判断 4 つ:
-  - **審議を tick から切り離した** — `BrainAdapter.decide()` は同期、tick は 1s、モデルはどちらでもない。
-    インターフェースを非同期化すると RuleBrain/dashboard/E2E が巻き添えなので、`observe()` が
-    審議を開始しうる (in-flight ラッチ + `minIntervalMs` の床 = 支出ガード 2 枚)、`decide()` は
-    到着済みを drain する。決定は誘発した snapshot の数 tick 後に出るので **`meta.snapshotTs` が
-    「何時のデータを考えていたか」を名乗る** (drain した tick ではない)
-  - **提案の関所を Brain 側に置いた** — `validateObserveParams` を通らないレンズは
-    BrainDecision に**ならない**。index.ts の `registry.set` catch は最後の砦であって関門ではなく、
-    決定ログには実際に取れる行動だけが並ぶべき。棄却は `stats.rejectedProposals` に数える
-    (不正提案を続けるモデルはノイズではなく findings)。同じ答えの中の他の決定は巻き添えにしない
-  - **shadow は per-tick 一致率を出さない** — ClaudeBrain は `minIntervalMs` ごとに 1 回しか
-    聞かれず答えも遅れる。RuleBrain は毎 tick。tick 単位の差分は**cadence の差**を測ってしまい、
-    「聞かれてすらいない tick で不一致」と採点する。2 本のストリームを記録し種別/対象で要約するに留める
-    (それ以上は未検証の照合規則を計測器に焼き込むこと = §12 再分析で 1 度踏んだ穴)
-  - **プロンプトがレンズの語彙を教える** — L3 の核心は「LLM が dip を分類できる」ではなく
-    「LLM が $Q を操作する」。`replayRequest` に `window_ms`/`group_by`/`downsample_factor`/`decay` を載せさせる
-  - 配線確認は **Messages API のスタブ** (`ANTHROPIC_BASE_URL` 差し替え) で課金ゼロで実施
-  - **実走測定済 (2026-08-18、Sonnet 5、$0.49)** — **中核主張は実証**: replayRequest は全て
-    `window_ms:1000`+`group_by:["agentId"]` を載せ、理由文も機序を言い当てた。
-    **ただし識別は不可**: RC バーストは捉えるが無事象の agent にも同率で撃つ
-    (agent-C 2/17 vs 別対象 5/17、QUIET 27 審議中 10 回提案)。
-    **「どう操作するか」は正しく「いつ・何に」がノイズから選ばれている** — §12 A/B と同型の構図。
-    **primary 昇格は見送り**。次は生系列でなく curator の snapshot package (σ付き) を渡す = curated アーム
-  - **判断規律の 2×2×2 実測 (2026-08-18、$1.41)** — 「性格か問い方か」を切り分けた。
-    QUIET (陰性) / AR (断定チャネルの陽性) / RC (観測チャネルの陽性) × base / placebo / disciplined
-    × Sonnet 5 / Sonnet 4.6、計 12 セル。ハーネスは scratchpad (`askFn` ラップで注入、
-    `claude-brain.ts` は不変 = base 腕は記録済み実走とバイト同一)
-    - **枠組みが支配的**。長さを揃えた placebo では**何も動かない** (p=1.0) が、
-      内容を入れると提案率が 14/22→3/25 (p=0.0003)。モデル軸は 4 比較すべて有意差なし
-      (p=0.235〜0.667、ただし n=22〜26 で検出力不足 = 「無い」ではなく「枠組みより小さい」)
-    - **しかし散文で入るのは「全体の保守性ノブ 1 個」** — 規律ブロックは
-      「断定を上げ観測変更は据え置く」と明記したのに、**各モデルが最も多用していた
-      チャネルだけが削られた**。Sonnet 5 は断定が無反応で RC の replayRequest が 0/21
-      (中核主張のチャネルが消えた)、4.6 は断定が 9→2 に効いた代わりに AR の
-      agent-C 名指しが 6→2・lag が 7.2s→14.3s。**どちらの腕も出荷できない**
-    - **上の②を下方修正**: 断定的な誤警報だけなら **4.5% = curator の設計値 4.55% と同水準**。
-      59% を膨らませていたのは可逆な `replayRequest`。一方**識別はプロンプトで全く動かない**
-    - **結論**: ゲートはコード側 (curator) に置き、LLM には**レンズ選択**だけを渡す。
-      §12 の転写の罠も踏まない (LLM が写せる判定が存在しない)。**未実装**
-  - **Opus 5 はこのプロンプトを拒否する (2026-08-18)** — `stop_reason:"refusal"`、出力 0 tok、
-    11/11 再現。最小プロンプトには正常応答するのでアクセス問題ではない。引き金は
-    プレアンブル冒頭 2 行の**組**(単独では通る)。かつては `onMeta` 未配線で refusal が
-    `stats.unparseable` に化けた (=「モデルが JSON を書けない」と誤読) が、**2026-08-18 のレビューで修正**
-    (下記)。付随: **Haiku 4.5 は `output_config.effort` を 400 で拒否**する
-  - **レビューで出た欠陥 3 件 (2026-08-18、同日修正)**:
-    - **`ClaudeBrain.reset()` が in-flight の審議を切り離していなかった** — `/demo/start` は
-      審議中 (5〜10s 対 15s 床) に来るのが常態。前シナリオの決定が新シナリオに drain され、
-      さらに reset がラッチを開けるので**同時 2 本**になっていた (支出ガード 2 枚の 1 枚が無効)。
-      `generation` カウンタで解決: reset は世代を上げるだけで**ラッチは開けない**。
-      走っている呼び出しがラッチの持ち主なので `finally` は無条件に返す (条件付きにすると
-      reset 後に閉じたまま固着する)。捨てた答えは `stats.discarded` に数える (課金は発生済み)
-    - **shadow の証拠に読み手がいなかった** — `getSummary`/`getStats` はテスト以外に呼び出し元ゼロ。
-      「これらのログの証拠で昇格を判断する」と書いてあるのに出口が無い状態だった。
-      **`GET /brain`** を新設 (dashboard は `brainDiagnostics?: () => unknown` を受けるだけで
-      ClaudeBrain/ShadowBrain を知らないまま)。`onMeta` 配線もここで閉じた
-    - **`ShadowSummary` が保持ログを数えていた** — `maxEntries` を超えると古い決定が静かに
-      counts から消え、**長時間走行ほど「不一致が少ない」方向に過小報告**する。
-      record() 時点の累積タリーに変更、`recorded`/`retained` を併記
-  - **実課金の罠 (先回りして潰した)**: Sonnet 5/Opus 5 は thinking が既定オンで `max_tokens` は
-    思考+本文の合計上限。`anthropic-ask.ts` に `effort` を optional 追加し Brain 側で
-    `maxTokens:2048, effort:"low"` を明示。**既定は不変** = 対策B のリクエストはバイト同一のまま
-  - 前段の §12 A/B 実験 (以下) は当初の仮説が検証できなかった件も含めそのまま記録:
-  **前段 dry-run 完了 (2026-07-28)**: A/B fixture (RC/AR + QUIET 陰性対照、シード付き、`ab-fixture.ts`) +
-  ハーネス dry-run 層 (`ab-harness.ts` — prompt 2 アーム/パーサ/採点器、`askFn` 注入シームで API 接触ゼロ)。
-  **A/B 実行済 (2026-07-28、haiku 66 trial)**。ただし**再分析で当初結論を下方修正** —
-  §12 仮説「提示形式が判断を助ける」は**検証できていない**。curated アームでは LLM が
-  curator の閾値判定を転記しているだけ (タイル生成と 9/9 完全一致)。測れたのは
-  「curator の 2σ 判定 > haiku の目算」であって presentation の効果ではない。
-  **本命の発見は curator の package 単位誤警報率 29%** (出荷中の較正欠陥)。
-  **対策A実装済 (2026-07-28)**: `snapshot-curator.ts` に Šidák 補正 (spike/dip
-  判定ゲートのみ、`spikeZThreshold` は「窓ごと」から「package全体の誤警報予算」に
-  再定義)。同じ31 seedで再検証: package単位誤警報率 29%→6.5%。RC(35σ)/AR(21〜23σ)は
-  無傷。残る対策 B〜E は未着手。
-  詳細は ROADMAP_BRIEF.md 「再分析 (Opus 5 レビュー)」「今後の対策」「対策A 実装完了」参照
-  - **較正の追い込み (2026-08-17)**: 残っていた 6.85% を**連続性補正**で 4.40% (設計値 4.55%) に。
-    真因は歪度ではなく**格子の粗さ + 構造的に到達不能な上側の裾**で、Cornish-Fisher が
-    失敗したのは「モデル化しようとした誤差が滑らかでなかった」から。格子は仮定せず
-    `sumSq/count` の恒等式で**検出**する (連続データでは自分で切れ、実測ビット同一)。
-    Fisher 正確検定 (設計値を一度も超えない) と「到達可能な裾への alpha 配分」(12.60% に悪化) は
-    どちらも**測って却下**。副作用として **A/B の fp シード集合が変わった** (旧 9 件中 5 件が
-    誤警報しなくなった) ので、今後の対策B 実行は記録済み 18 trial と比較不能
-- **L4 ✅ (2026-08-12)** レンズチェーン — 前段の「参照レンズ設計」(2026-07-25、curator を
-  `curate(observation, reference)` の二項演算化、SE は `sqrt(var_ref × (1/n_w + 1/n_ref))`) に続き、
-  **格子 (`origin`/`align`) と `group_by` を実装**。
-  - `align:"epoch"` で窓境界がレンズの性質になる (従来は渡されたセグメントの性質だった)。
-    格子の読み手 (`liveSpans` / `applyLens`) は `floorToWindow` を共有する
-  - `group_by` は**加算的** — `LensResult.windows` の混合ビューは残り、`groups` が増える。
-    全グループが**共通 origin** を使うので窓が対応付く (これが格子を先にやる理由)
-  - curator は 1 グループ = 1 比較単位、参照は**同じグループ**と対応付け。対応が無いものは
-    スコアせず `unscoredGroups` で申告 (盲目と沈黙の区別のグループ版)。
-    **Šidák の family は package のまま** (グループごとの予算にすると対策A の膨張が戻る)
-  - RuleBrain の RC 提案が `group_by:["agentId"]` を載せる = Brain がレンズ 2 段を操作する
-  - **実測**: 混合 1.77σ (出ない) → grouped 3.51σ (出る)。実走 replay は 2.48σ → 6.5σ
-  - **代償** (仕様として記録): grouping は family を N→N×G にするので感度が下がる。
-    細窓×grouping は 1 窓の n を薄くする。詳細は ROADMAP_BRIEF.md 2026-08-12
-  - **`downsample_factor` 実装済 (2026-08-16)** — 十分統計量 (count/sum/sumSq) の厳密プーリングで
-    N 窓を 1 窓にマージ。curator の統計モデルは無変更で済む。`LensResult.window_ms` を
-    `window_ms * factor` にスケールして `windowEnd - windowStart === window_ms` を維持。
-    dashboard の `/control/coarse-downsample?factor=N` から live coarse view に書ける (2026-08-17)
-  - **`decay` 実装済 (2026-08-17、step 形のみ)** — `step(cutoff=now-60s)` は純粋なイベント
-    フィルタなので統計モデルに触れない。**`decay_anchor`** (`"segment_end"` 既定 / `"now"`) を
-    `align` と同じ思想で新設 — 壁時計アンカーだと過去セグメントの再観測 (MODEL.md §5) が
-    毎回違う答えになる (anchor-slide の decay 版)。decay は**イベント段**で効かせる
-    (MODEL.md §137 の並びは window の後だが、§229 の「1分より古いものを捨てる」自体が
-    イベントの操作であり、窓単位で落とすと境界窓の扱いが不定になる)。
-    `exp(τ=...)` は**パースするが throw** — 黙って無視すると「適用していないレンズ」の数値を
-    報告することになるため
-  - **`decay` の exp 形 実装済 (2026-08-17)** — `applyDecay` が「フィルタ **または**
-    重み関数」を返す段になり、`aggregate` が加重十分統計量 (`Σw·v` / `Σw·v²` / `sumW` / `sumW2`)
-    を出す。無加重レンズは `weights` を emit しないのでバイト同一。
-    **較正を測り直して判明したこと**: 加重窓で格子検出を諦める実装 (加重和は格子上に無い、
-    という一見もっともな理由) は**測って誤り** — 誤警報が 7.1% = 補正導入前の値に戻った。
-    加重が gate にしていたのは「連続性補正を切ること」だけだった。二値性の恒等式は
-    count を**総重み**に置き換えれば加重でも成立するので一般化し 4.5% (設計値 4.55%) に復帰。
-    `gateZ` の除数も `count` → `effectiveN` (無加重では厳密同値、加重では保守側)。
-    **Kish はスケール不変なので窓自身の精度はほぼ落ちない** — decay が効くのは pool の
-    取り分であって観測窓の SE ではない。無加重の数値・A/B fixture・fp シード集合は全て不変。
-    詳細は ROADMAP_BRIEF.md 2026-08-17 (続々)
-  - **レビューで出た欠陥 (同日修正)**: 約 414τ より古い窓は**重みの二乗が underflow** して
-    `effectiveN` が 0 に潰れる (`ΣW² === 0` かつ `ΣW > 0`)。標準誤差が Infinity なので
-    **絶対発火しない**のに、scorability 判定が `count` だけだったため **Šidák family には
-    数えられ**、他の窓の閾値を 2.00σ→2.27σ に上げていた。`isScorable` を新設し、
-    family サイズ・採点ループ・到達不能裾の**3 箇所が同一述語を呼ぶ**ようにした
-    (コピーが 3 つあったのが温床)。述語は `count >= MIN_VALID_COUNT && effectiveN > 0` —
-    `effectiveN >= MIN_VALID_COUNT` にすると健全な 3 事象窓が n_eff 2.999998 で落ちる。
-    **標本サイズの判定は `count` の仕事、`effectiveN` に問うのは「標準誤差が存在するか」だけ**
-  - 残るチェーン段: **`agg_func`** (median/percentile が本質的に重い。理由は下記)
-  - **`agg_func` の本質的な難しさ (2026-08-17 に判明)**: z 検定のガウス仮定が変わることだけが
-    問題なのではない。median/percentile は**十分統計量からプールできない** (2 窓の median を
-    マージしても merged median にならない)。`downsample` と参照レンズのプーリングは
-    どちらもこの分解可能性に依存しているので、`agg_func: median` と `downsample_factor` の
-    組み合わせは現設計では**数学的に整合しない**。実装するなら生値保持か sketch (t-digest 等) が要る。
-  - **throw ガード実装済 (2026-08-18)**: median 本体より先に「整合しない値を throw する」方を入れた
-    (`decay: exp(τ)` で作った前例と同じ順序。逆順だと動くケースと壊れるケースが黙って混在する期間が
-    できる)。`validateObserveParams` が `agg_func` を検証し、`"mean"`(省略時の既定と同じ) 以外は
-    RangeError。`"mean"` は `WindowStat` が既に `{mean, count, sumSq}` そのものなので別コード
-    パスが要らない — 実装が要るのは median/percentile 側だけ。ClaudeBrain の `replayRequest`
-    ゲート (`validateObserveParams` を再利用) も自動的にこの値を拒否するようになった
-    (`claude-brain.test.ts` の「REJECTS a replayRequest whose lens the rulebook refuses」に
-    `agg_func: median` を追加、`lens.test.ts` に専用 describe を追加)。
-  - **`agg_func: "median"` 本体 実装済み (2026-08-23)** — 十分統計量からのプールという当初の
-    前提を外し、**生値保持** (`WindowStat.values?: number[]`) で実装。sketch (t-digest 等) の
-    近似プーリングと違い**厳密**なので、疎化の加重で1度踏んだ「測らずに較正が狂う」罠を踏まない
-    (再較正不要)。`downsample_factor` は窓をまたいで`values`を連結してから中央値を再計算する
-    ことで median でも厳密に成立する — §C原文が「数学的に整合しない」としていたのは
-    十分統計量プーリング前提の話であり、生値保持ならその制約自体が外れる、という認識の
-    修正が実装の核。**スコープは非加重 median のみ** — `decay`との組合せは
-    `validateObserveParams`で静的に拒否 (レンズ自体が加重を宣言)、L5の参照ゾーン疎化
-    (レンズではなくイベント側の`weight`) は`aggregate()`のflush()で動的に拒否
-    (静的検査が見えない加重源のための2枚目のガード)。
-    **percentile は 2026-09-29 に実装** — `agg_func:"percentile"` + `agg_percentile` (0〜100 の
-    開区間、百分率。0.95 は p0.95 として通るので単位の取り違えは範囲検査で捕まらない)。
-    median と同じ生値保持経路に乗り、線形補間 (R type 7、p50 は median と厳密一致)。
-    downsample は生値連結で厳密、decay 併用・加重(疎化)イベントは median と同じ2段ガードで拒否、
-    curator は median と同じく `aggFuncUnscored` で採点拒否。median の出力はバイト同一
-    (lens.test.ts 7件・snapshot-curator.test.ts 1件、テスト417件)。
-    curator側は`SnapshotPackage.aggFuncUnscored`を新設し、observation/referenceの
-    どちらかがmedianなら**全体を採点拒否** (`tiles:[]`、z検定はガウス仮定前提で
-    median窓には適用不能・新しい統計モデルは作らない、という§C原文の設計方針どおり)。
-    grouped lensでは`unscoredGroups`ではなく**package全体のフラグに一本化**
-    (グループ単位の「参照が無い」とpackage単位の「この統計量自体を採点できない」は
-    別の性質のfindingsなので混ぜない)。raw LensResultの`values`/`mean`(実際の中央値)は
-    そのまま残る — curatorは**判断を拒否するが値は隠さない**。
-    ダッシュボード/ClaudeBrainプロンプトへの配線は行っていない
-    (curatorが常にtiles:[]を返すため実利用の受け皿がまだ無い、L5の「実読み手」と同種の
-    別作業として意図的に見送り)
-    (lens.test.ts 7件、snapshot-curator.test.ts 4件、既存の固定テスト2件を新挙動に更新)。
-    詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §C, 2026-08-23
-- **L5** retention 参照ゾーン (疎化) — **疎化は「加重」であって新しい統計ではない**。
-  exp decay で実装・較正済みの `weights{sumW,sumW2}` / `effectiveN` (Kish) / 加重 `poolStats` を
-  そのまま使う (並行の統計パスを新設しない)。踏んではいけないのは **`count` に代表数を入れること** —
-  `count` は実保持事象数のままでないと `isScorable` の標本サイズ判定が
-  「持っていない証拠を持っている」と信じる。格子検出は加重で一般化済みなので疎化しても
-  連続性補正は切れない (この罠は閉じ済み)。
-  - **前提条件の締め直し実装済 (2026-08-18)**: `referenceUsable` の判定が `effectiveN >= 2` =
-    「分散が存在するか」の床でしかなく、疎化は事象数を減らさないまま有効標本だけ落とすので
-    減衰より見えにくい、という指摘どおり `effectiveN >= MIN_VALID_COUNT` (3) に締めた。
-    ついでに判明した実バグも修正: `referenceUsable` フラグ・`buildScoringUnits` (グループ別
-    ペアリング)・`detectSteps` (連続ラン判定) の**3 箇所が同じ判定を別々にコピーしていて既に
-    乖離していた** — `variance > 0` チェックはフラグにしか無く (2026-08-17 に追加)、グループ・
-    step 側は分散ゼロの参照を素通りで「採点可能」扱いしていた (`isScorable` が一度踏んだのと
-    同じ「3 コピーが揃っているつもりでズレていた」形)。`isReferenceUsable(ref)` 1 個に統一し
-    3 箇所が同じ述語を呼ぶようにした。実害を再現するテスト追加: 全windowが100%passの
-    agent (event数は十分、分散のみゼロ) が `unscoredGroups` ではなく無言のスコア対象に
-    なっていたケースを固定。詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §B
-  - **L5 本体 実装・較正・本番配線 完了 (2026-08-22)**: 疎化の形状は固定比率 (N個に1個、
-    残した1個の `weight` に N)。`LensEvent` に `weight?: number` を追加し、`lens.ts` の
-    `aggregate()` で decay の `weightOf(ts)` と**掛け算で合成** (どちらかがどちらかを上書きしない)。
-    `count` は無変更のまま (疎化1個は `count:1`)。`retention-buffer.ts` に参照ゾーンを新設 —
-    鮮度ゾーンの `evict()` が捨てていたイベントを `absorbIntoReference()` で1/N保持し、
-    参照ゾーン自身も鮮度ゾーンと同じアンカリングで無制限に育たないよう bound。`segment()` が
-    両ゾーンを透過的に結合するので `index.ts`/`dashboard.ts` の呼び出し側は無変更。
-    デフォルトは完全オフ (opt-in)、既存の全呼び出し元・全テストはバイト同一のまま。
-    **較正測定** (calibration.ts に retention オプションを配線): x2 (実効n≈500) は誤警報4.0%
-    (設計4.55%近傍) で安全域、x5以降は実効n低下による**既知の「薄い窓」残差**
-    (decayの短いτ・無疎化の低密度と同じ現象) に合流し悪化。疎化固有の新しい誤較正メカニズムは
-    見つからなかった。**本番配線**: `index.ts` に `REFERENCE_WINDOW_MS = 鮮度ゾーン×10`
-    (丸め数字)・`REFERENCE_THINNING_RATIO = 2` (較正で安全域と実測された値をそのまま採用)。
-    `$Q` 経由の動的再設定は2026-08-23に実装 (下記)。
-  - **参照ゾーンへの初の実読み手 `/control/replay` 実装・実地確認済 (2026-08-22)**:
-    手動トリガーの制御エンドポイント (ユーザ判断で、Brain側のreplayRequest拡張ではなくこちら)。
-    `replaySpanWithReference()` を `dashboard.ts` に export し、`index.ts` のBrain駆動replay
-    パスもこれを呼ぶよう統一 (2箇所目の呼び手を作る前に既存1箇所を共通化)。
-    ユニットテストだけでなく**本番構成のまま起動した実サーバで約140秒待ち、125〜130秒前
-    (120秒鮮度ゾーンを超えた区間) を指定して `referenceUsable:true` が実際に返る**ことを
-    確認済み。RuleBrain/ClaudeBrain自体はまだ自発的に120秒超のreplayを要求しない
-    (手動経路のみ、意図的にスコープ外)。詳細は
-    ROADMAP_BRIEF.md 2026-08-22 (2)〜(5)
-- **分業アーキテクチャ — rerouteSchema分 実装済み (2026-08-23)** — スコープは
-  `rerouteSchema`/`quarantine` のみ。`schemaUpdate` (domain coverage) はcuratorが
-  判定する概念自体が無い (pass率のdip/spike/gapとarea bitカバレッジは別指標、
-  2026-08-23の複数試行検証で判明) ためスコープ外に明示的に残した。
-  `dashboard.ts`に`isReroutedAgentBacked()`を新設 — ClaudeBrainの決定が名指しした
-  agentIdを、`meta.snapshotTs`の時点で`buffer.replay()`を`group_by:["agentId"]`
-  付きでオンデマンド再実行しcuratorで裏取りする。常設のungrouped粗窓ビューは
-  使わない (2026-08-23のRC複数試行で検出が不安定と判明済み)。新しい保持機構は
-  追加せず、既存の`replaySpanWithReference`と同型のon-demand replayパターンを再利用。
-  配線は`index.ts`のtick loopのshadow logブロック (ClaudeBrainは現状shadowのみで
-  primaryには昇格していないため、decide()の出力ではなくshadow log側で判定・診断)。
-  `ClaudeBrainStats`に`gateRejected`を新設し`rejectedProposals`と分離
-  (前者=形式不正、後者=断定したがcuratorの裏が取れなかった)、`/brain`で実走中に見える。
-  `renderBrainPrompt`にσ/タイル判定は入れていない (§12の転写の罠、不変条件のまま)。
-  詳細は ROADMAP_BRIEF.md 2026-08-18 (5) §A, 2026-08-23
-- **参照ゾーンの`$Q`動的設定 実装済み (2026-08-23)** — `RetentionBuffer`に
-  `getReferenceWindowMs()`/`setReferenceWindowMs()`/`getThinningRatio()`/`setThinningRatio()`
-  を新設。**既存のオプトイン境界を維持** — これらのsetterは構築時に参照ゾーンを
-  opt-inしていたバッファのリサイズ専用で、`$Q`書き込みで冷たい状態からゾーンを
-  新設することはできない (未設定なら`RangeError`)。`q-retention-binding.ts`が
-  `QPipelineParams`に`reference_window_ms`/`reference_thinning_ratio`を追加し、
-  同じ「拒否はwarnのみ・throwしない」パターンで配線。`index.ts`の起動時
-  `registry.set("pipeline:*", ...)`にも両値を明示的に含め、`retention_window_ms`
-  と同じく「$Qの行が生きた正本」にした (以前はconstructorに渡すだけで$Q行は
-  飾りだった、というretention_window_msの過去の教訓と同じ形の修正)。
-  `setThinningRatio`は**リアクティブ** — 変更前に既に疎化済みのイベントは
-  古い比率の`weight`を保持したまま (再重み付けするとanchor-slide系のバグに
-  なる、`decay_anchor`/`liveSpans`の格子と同じ理由)
-  (retention-buffer.test.ts 6件、q-retention-binding.test.ts 9件)。
-- **レビューで出た欠陥 4 件 (2026-08-25、同日修正)** — 直近 4 コミットをまとめてレビューしたもの。
-  共通の形は **1/2 が「ガードやフラグを正しく作ったが、読み手/呼び出し側が追随していない」**、
-  **3/4 が「動く経路しか試していない」**。詳細は ROADMAP_BRIEF.md 2026-08-25
-  - **median の書込ゲートと実行時ガードが食い違っていた** — §C の 2 段ガードは個々には正しいが、
-    `validateObserveParams` が素の `median` を通す一方で本番は `REFERENCE_THINNING_RATIO=2` =
-    参照ゾーンのイベントは必ず加重。`index.ts` の `try` は **`registry.set` だけ**を包んでいたので、
-    `replaySpanWithReference` の throw が `setInterval` から uncaughtException に抜けていた。
-    **(a) 関所側** = `ClaudeBrainOptions.lensGate` を新設し `index.ts` の `refuseUnrunnableLens` が
-    「このプロセスの buffer が疎化 opt-in 済なら median を拒否」を合成 (ランタイム配線を知るのは
-    `index.ts` だけだから、判定もそこに置く)。**(b) 最後の砦側** = `try` をレンズの**適用**まで拡張、
-    §A ゲートも包み「ゲートが実行できなかった」を `gateRejected` と混ぜず別ログにした
-  - **`aggFuncUnscored` に読み手が 0 件だった** — curator の median 分岐が `referenceUsable:false` を返すので、
-    `reportReferenceBlindness` が**「物差しが無い=盲目」と誤診断**していた。「沈黙 vs 盲目」の区別が
-    1 段ずれた形で再発したもの (`GET /brain` で閉じた shadow ログの件と同型)。
-    第 3 の状態として分岐を追加し、**`referenceUsable` より先に読む** (curator は参照を見る前に return する)
-  - **`npm test` が `dist/index.js` を起動していた** — `node --test dist/` はディレクトリ指定なので
-    実サーバと 50 evt/s ジェネレータが走る。dev サーバ稼働中は `EADDRINUSE` で**1 件も走らずにコケる**し、
-    `BRAIN_MODE=claude` を env に置いたままだと**実課金の API 呼び出し**が走る経路でもあった。
-    `node --test "dist/*.test.js"` に変更
-  - **dashboard の Stop バナーが消えなかった** — retract が「変化したか」の早期 return より後ろにあった。
-    併せて SSE 再接続でバッジのシナリオ名が失われる件も修正。実地確認で RC 回帰なし
-    (agent-C dip 8.7〜13.1σ、新設 catch は未発火)。**`lensGate` は live では踏めない** —
-    `BRAIN_MODE=rule` が既定で median を `$Q[observe]` に書ける HTTP 経路が存在しないため、ユニットテストのみで担保
-- **実地動作確認レビュー (2026-09-27)** — §10 の AR/CG/RC は通るが、判断側が未較正だった。
-  **生成器は Windows のタイマー粒度で実際には約 32 evt/s** (`/status` は 50 と報告) で、RuleBrain の
-  固定 10pt は 50 evt/s でしか成立せず静穏で 0.37 回/分誤発火していた。生成器を時計基準の正確な rate に、
-  閾値を `baseline − max(delta, 3.5·SE)` に、warmup を単純平均にして **静穏誤発火 0** (検出力は不変)。
-  併せて `/demo/start` の重複に 409、`stop()` がシナリオも中断、`/status` と SSE が稼働状態を返す、
-  事象ゼロの tick を Brain が判定しない、replay の `referenceCoverage` 申告、reroute 再武装のヒステリシス。
-  RC の replay レンズ (1s 窓 × `group_by:agentId`) は静穏でも **package 誤警報 41%** だった
-  (薄い窓でガウス近似が dip 側を甘く見る。しかも本番は flaky=0.5 の三値なので連続性補正すら
-  掛かっていなかった)。**二値/三値の非加重窓は正確な裾 (事後予測 Dirichlet 多項・mid-p) を
-  等価 z にして Šidák gate へ** — 41%→**2.4%** (本番構成 4.3%)、RC 深さの検出力は 100% のまま。
-  calibration.ts に多系列 (`agents`) を足し RC レンズを常設の較正対象に。加重窓は従来 gate のまま。
-  詳細は ROADMAP_BRIEF.md 2026-09-27, 2026-09-27 (2)
-- **第 1 段階の最終集計 (2026-10-06、保留期間 10-03〜10-05 を `--holdout` で 1 回)** —
-  **H1 支持** (10 s: φ 7.63・R_real 99.8% 対 FA_shuffle 5.0% = 周辺モデルは正しく膨張は依存)。
-  **H2 保留** (機械的には棄却だが実効 family が 24.1→25.7 で機序が発動していない、改訂 2026-10-01 規則 2)。
-  **H4 規則外** (配線 20/23 は通過、ただし p=1 の OFF 警報率が既に 9.1% > 4.55%)。
-  欠落は 0。次の統計課題は **過分散を織り込んだ帰無分布**。収集は第 2 段階 (H3) に向けて継続 (user 判断)、
-  H3 は改訂 2026-10-06 で探索 10-07〜10-10・保留 10-11〜10-13 に (`run-h3-report`、飽和なら保留)。
-  探索データでは 60 分の腕が全時間帯 100% で飽和 = 過分散の帰無が先に要る。詳細は ROADMAP_BRIEF.md 2026-10-06, 2026-10-06 (2)
-- **過分散を織り込んだ帰無 (2026-10-07、opt-in)** — `SnapshotCurator` の `nullModel: "overdispersed"`
-  (レポートは `--null-model overdispersed`)。参照窓だけから窓間分散 τ² を ANOVA で推定し、正規経路の SE と
-  正確な裾の Dirichlet 集中度に足し、τ̂² の推定誤差は Student-t (Satterthwaite) で裾に織り込む。τ̂²=0 なら既定と同一。
-  探索データで H1 の R_real 100%→18.7% (10 s)、H3 の 60 分の腕は飽和が解けて 37.2%・r 0.57。代償は iid での検出力
-  (0.8 深さ 99.7%→90.4%)。残差の主だった **step タイル (分散を見ない 30% 規則) も同じ gate にかけた**
-  (ランの潜在水準は τ² の 1 回の引き = 保守側。independent は不変)。探索データで H1 の 1 s 窓 R_real 4.1% (設計 4.6%)、
-  10 s 窓 13.4% (ドリフト残差)、H3 の 60 分の腕 31.4%・r 0.534、1 分の腕 6.0%。代償: step としての段差検出が弱い
-  (dip としては拾う)・H2 の注入 (−0.39 = commonswiki の 1.2τ) は検出されない。
-  **H3 の判定はこの帰無で読む** (改訂履歴 2026-10-07 (2)(3)、user 承認。`run-h3-report` の既定、`--holdout` は他を拒否)。
-  残る課題は 10 s 窓のドリフト (参照の外へのラグの外挿が要る)。詳細は ROADMAP_BRIEF.md 2026-10-07, 2026-10-07 (2)
-- **H3 の最終集計 (2026-10-14、保留期間 10-11〜10-13 を `--holdout` で 1 回)** — **H3 支持**
-  (60 分の腕 r 0.621 ≥ 0.5、過分散の帰無。独立の帰無なら飽和で保留だった)。1 分の腕は 3.7%・r −0.025 で日周と無相関。
-  **ただし 60 分の腕の全体警報率は 21.2% (設計 4.6%)** = 60 s 窓の帰無はまだ過小で、勾配の小さい 14Z〜18Z にも残差。
-  次の実装順は 2026-10-14 (2) (下記)。欠落 0。**Wikimedia 収集はここで停止** (user 判断、タスクは無効化のみ)、
-  データは保持。詳細は ROADMAP_BRIEF.md 2026-10-14
-- **到達目標の再整理 (2026-10-08、user 合意)** — 灯台は DCP の「観測 → 予見 → 解釈 → 決定」のうち
-  **観測と予見を数理だけで、軽量に、較正つきで担う層**。出発点の DCP 側の構想 (shadow = 推論ゼロの短期予測バッファ・
-  `$F` Forecast・`$O` 変換の仮想ストリームによる予測制御) のうち、灯台は観測 (過去・今) を実装済みで予見の生成は未実装。
-  これまでの統計の仕事は「予見と実値のずれを誤警報率が分かる形で測る物差し」= 予見の前提。過分散の帰無は既に
-  次の窓の予測分布、ハーネスの注入・シャッフル・間引きは `$O` 分岐の仮想ストリームと同形。
-  **H3 判定後の工程 (未着手、順序は 2026-10-14 (2) で改訂)**: F1 周期合わせの参照 (前日の同時刻) → F2 `$F` の行 (curator の予測分布を horizon・
-  信頼度つきで出す) → F3 仮想ストリームの常設。作法: 仮想であることは専用の軸で持ち読み手は全てそれを見る・
-  戻せるかを決定の型ごとに宣言・審議の生出力を再生できるよう残す。README「到達目標」、詳細は ROADMAP_BRIEF.md 2026-10-08
-- **次の実装順 (2026-10-14 (2)、較正期間のまとめ)** — 残った外れ方は**窓より長い時間の依存** (窓が広いほど・参照から
-  離れるほど外れる。10 s 窓 13.4%・60 s 窓 21.2%)。0 step 検出の下限 (independent・薄い窓、未調査) →
-  **1 時間依存の帰無** (variogram。今の τ² は γ が平らな特殊ケース。変動は参照の終わりまでの長い履歴の窓要約から推定。
-  `independent`/`overdispersed` の出力は不変、まずハーネスで測る) → 2 比較 (参照・帰無) を `$Q` に宣言 →
-  3 F1 周期合わせの参照 (1 の対比として) → 4 第 3 段階 (収集済みの 16 日は全部見たので、事前登録と新しい保留期間) →
-  5 F2 `$F` の行 → 6 F3。未決: 保持期限・収集再開・OTel の 1 日。詳細は ROADMAP_BRIEF.md 2026-10-14 (2)
-  - **0 完了 (2026-10-14 (3))**: 薄い窓に限らず、independent では step が 30% 規則だけで出ていた (率 0.4・1 窓 10 事象で
-    72%)。両方の帰無で step も Šidák gate にかけ、採点できない窓はランを切る (user 承認)。残る 1〜2pt の超過
-    (step が family に数えられていない) は 1 で扱う。第 1 段階・H3 の数値は修正前のコミット (`d5d13d4`) で再現。
-    `run-h3-report --holdout` も使用済みとして常に拒否に
-  - **1 の見立て確認 (2026-10-14 (4)、コード変更なし・探索日のみ)**: γ̂ はラグとともに上がる (60 s 窓で 1 時間 3.4 倍、
-    1 s はほぼ平ら)。60 分の腕の警報は参照から離れるほど単調に増える (窓あたり 6.7‰ → 30.3‰)。合成の AR(1) で同じ形が出て、
-    独立な潜在率なら今の帰無は 3.5% に収まる → 1 はそのまま進める。**新しい残差: 10 s・60 s 窓の動きの裾が重い**
-    (60 s で 3.36 超が正規の約 14 倍)。variogram では消えないので、1 の後に残差を測ってから履歴の経験分布で扱うか決める (1b)
-  - **1 実装 (2026-10-14 (5))**: `nullModel: "variogram"` + `curate(obs, ref, { history })` (参照の終わりまでの履歴の窓要約から
-    γ̂、窓・step ランごとの比較分散、自由度はブロック間のばらつき、step を family に数える)。independent/overdispersed は
-    HEAD とバイト一致。**探索日で H3 の 60 分の腕 26〜31% → 3.1〜3.7%・位置の勾配が消えた**、10 s 窓 14〜15% → 6〜7.5%。
-    残り: 1 s 窓の step (選んだ区間の走査、計 5〜5.5%)・10 s の分布形・日周を一部吸うので 3 の問いが変わる。
-    本番配線は 2 の後。ハーネスは `windowedStream` / `runPositionProfile`、起動口 `run-variogram-report`
-  - **1 の残り: step を形の説明に (2026-10-14 (6)、user 承認)**: variogram の帰無では step を検定から外し、同じ向きに
-    gate を越えた窓を含むランにだけ付く説明にした (family は窓だけ、`stepSlots` 削除)。走査の模擬 (案 a) は γ̂ 依存で
-    毎回モンテカルロが要るので不採用。independent/overdispersed は不変。探索日で 1 s 窓 5.0〜5.5% → **3.8〜3.9%**、
-    60 分の腕 3.3〜3.5%、10 s 窓は 7〜8% で残る (分布形 = 1b)。浅く長いずれが要るなら、固定の区間集合を対比として数える
-  - **1b (2026-10-14 (7)、user 判断)**: z の分散は 1.03〜1.04 で尺度は合っており、裾は**事象数が平常から外れた窓**に集中
-    (10 s 窓、平常の量 2.2〜3.0‰ = 正規並み、2 倍以上 69〜353‰)。量と率が同時に動く = 構成の変化として**本物の出来事のまま残す**。
-    gate は不変、variogram の spike/dip に `volumeRatio` (事象数 ÷ 参照窓の中央値) と説明文を添える (他の帰無には付けない)。
-    履歴の経験分位点案は 720 窓で 0.08% 分位点が出ないので不採用。次は 2 (比較の `$Q` 宣言)、`volumeRatio` の見せ方もそこで
-  - **2 完了 (2026-10-14 (8)、範囲は user 判断で「宣言と名乗りだけ」)**: `$Q` に 4 つ目の層 `compare:<schema>#<view>`
-    (`reference:"preceding"`・`reference_windows`・`null_model`・`history_ms`、書込時検証)。本番の 4 か所 (ライブ・Brain replay・
-    `/control/replay`・§A ゲート) は `comparison.ts` の `Comparator.compare` 1 つを通り、package が `comparison` (実際に読んだ
-    参照・履歴の区間と帰無) を名乗る。起動時に `compare:test_result:v1` を independent で書くので本番の判定は不変。
-    **variogram は index.ts の書込ゲート (`QRegistry.addWriteGate`) で本番では拒否** — 窓要約の履歴が無いため。窓要約の常設と
-    variogram の本番投入は **2b**。副産物: replay の参照が観測の先頭 1 ms (fromTs の事象) を共有していた重複を解消、
-    これに依存して通っていたテスト固定データ 1 件を修正。span の無い replay 提案は自己参照で採点せず拒否に
-  - **レビュー (2026-10-14 (9))**: 実装順 0〜2 の 5 コミットで 11 件、1〜8 を修正。**表示用の `maxTiles` (12) を §A ゲートと
-    ハーネスが読んでいた** (小さいタイルから落ちる) → ゲートとハーネスは上限なし。測り直すと overdispersed の位置別の勾配は
-    記録より急 (60 s・09-29〜10-02 で 12.1 → 56.1‰、記録 7.6 → 38.0‰)、結論は不変。H2 の報告はバイト一致。ほかに較正器の参照の
-    1 ms 重なり・variogram の格子の前提・履歴なし variogram の拒否・拒否前の `$Q` 書込を修正。9・10 (整理) も後続で対応
-  - **2b 完了 (2026-10-14 (10)、範囲は 2 に倣い opt-in)**: `window-history.ts` の `WindowHistory` が、鮮度ゾーンから押し出される
-    事象を**疎化の前に** (`RetentionBuffer.onEvict`) applyLens で窓要約にし、1 時間 (`HISTORY_WINDOW_MS`) 保持。答えは
-    保存済み要約 + 未要約分の再生で、全事象の replay とビット一致。レンズは初めて問われたときから追跡 (既定の 2 ビューは起動時から)、
-    epoch 格子・decay なし・mean のみ。`Comparator` は履歴をここから読み、package は `comparison.history.source` を名乗る。
-    書込ゲートは「variogram なら `history_ms` 必須・1 時間以内」に。起動時の行は independent のまま。`/control/compare` を新設。
-    **RuleBrain の RC 提案に `align:"epoch"`** (無いと variogram の replay が毎回失敗、しかも `#fine` 行の epoch を消していた)。
-    **較正**: 参照が疎化された replay でも variogram は 3.5% (AR(1))。薄い窓 (25 事象・率 0.95) では疎化参照が全帰無で超過するが
-    (independent 11.5% > variogram 9.8%)、L5 の既知残差で variogram 固有ではない。ライブで RC の agent-C dip を窓要約の履歴で検出
-  - **3 F1 完了 (2026-10-14 (11)、探索)**: ハーネスの対比の採点器 `runContrastDiurnal` (variogram の対比分散・ブロック自由度の Student-t) で
-    直前区間 / 前日の同時刻 / 差の差を同じ窓で比較 (`run-f1-report`)。variogram 下では直前区間でも日周相関は弱く (|r| < 0.25)、
-    **検出力は直前区間が最も高い** (δ 0.2 で 59% 対 25% / 35%)。決まった日周が支配的な合成では逆転 (前日 95%・直前 0%) = 機構は正しく、
-    この実データでは日ごとの揺れの方が大きい。本番の参照は直前区間のまま。第 3 段階の主張は variogram の帰無だけ
-  - **4 第 3 段階 事前登録・収集再開 (2026-10-14 (12)、user 承認)**: 探索 10-15〜10-18・**保留 10-19〜10-21** (全レポートが拒否)。
-    主張 V = variogram の帰無の較正。V-a (60 s 窓・60 分) と V-b (1 s 窓・10 s) の package 警報率がどちらも ≤ 6.05% → 支持、
-    どちらか > 9.1% → 棄却、間 → 保留、盲目 20% 超 → 判定なし。集計は 10-22 以降に
-    `run-variogram-report --from 2026-10-19 --to 2026-10-21 --holdout` を 1 回 (`stage3Verdict`)。H4 は含めない。既存データは報告まで保持
-  - **4 の結果: 主張 V は棄却 (2026-10-22、`--holdout` 使用済み・2 度と走らせない)**: 欠落 0・コード固定 (`f0b338c`)。
-    V-a (60 s 窓・60 分) **14.89%** (376 試行、探索では 3.1〜3.7%)・V-b (1 s 窓・10 s) 4.53% (通過)。
-    10 s 窓の腕 6.56% は探索の範囲内で、V-a だけが動いた。位置別の勾配 (4.79→7.18‰) は variogram でも残る。
-    跳ねた理由は未特定 (保留日は読み直せない)。次は探索日と 10-14 以前で V-a の日による振れ幅を測り、判定の設計の問題か
-    60 s 窓の帰無の過小かを切り分けてから直す。出力は `data/logs/stage3-holdout-20261022.txt`、詳細は ROADMAP_BRIEF.md 2026-10-22
-    **読みは 10-21T15:43Z で切れていた (63.7 h/72 h、日別ファイルは到着日振り分けで後半が翌日ファイルに入っていた。user 判断で注記のみ・棄却は据え置き)**。
-    `loadWikiDir` は後続 2 日のファイルも読むよう修正済み、`--holdout` は常に拒否 (ROADMAP_BRIEF.md 2026-10-22 (2)(3))。
-    10-26〜28 で V-a を測り直す案は下のレビューで中止
-- **物差しの見直し (2026-10-22 (4)〜(7)、user 依頼「進んでいる気がしない」・「do all」)** — 主張 V は帰無の較正ではなく
-  **構成の変化 (bot の一括作業の開始・停止) の回数**を数えていた。落ち度は 5 つ: 対照なしで実データの警報率を設計値に合わせた
-  (規律 4 と 10-14 (7) に反する)・判定規則の検出力分析なし (警報は固まりで出て、設計値ちょうどでも支持 72.5%)・60 窓 Šidák の
-  3.36σ は分散 13% の過小で 9% になる過敏さ・4+3 日の分割が曜日と交絡 (月曜は 3 回とも保留側)・検出力を測っていない
-  - **使用済みの保留期間は判定後は探索データ** (事前登録の改訂 2026-10-22。`HOLDOUTS` / `explorationRangeRefusal` /
-    `spentHoldoutNote`、`--holdout` は使用済みとして拒否、未使用の保留は封印)
-  - **測り直し** (`run-volume-report`、21 日・全履歴、`recordWindowScores` / `runVolumeCalibration` / `runShiftInjection`):
-    variogram は**平常の量の窓で較正済み** (60 s: 分散 0.83・|z|≥2 3.63%・|z|≥3 0.24%、10 s・1 s はやや保守側)。超過は量の外れた窓
-    (60 s で gate 超え 40×) = 構成の変化。保留の 10-19 は出来事 8 のうち 7 が構成の変化。量を変えない変化は bot 比率 0.2 程度で 8 割検出
-  - **H4 の検出消失はレンズ** (payment の 10 s 窓が約 10 スパン)。30 s 窓なら variogram で 17/22 (OFF 1.9%)
-  - **帰無の改良は打ち切り**。第 4 段階 = 主張 C (平常の量での較正、V-a と 10 s 腕) を **10-26 (月)〜11-01 (日)** で確かめる
-    (2026-11-02 に `run-volume-report --from 2026-10-26 --to 2026-11-01 --holdout` を 1 回実行、`stage4Verdict` = **保留**:
-    V-a |z|≥2 1.58%・|z|≥3 0.13%・分散 0.533 は保守的すぎる、10 s 腕 2.09%・0.21%・0.655。棄却線には触れず、判定は受け入れ・帰無は直さない。
-    10-31 (土) だけ V-a が崩れた。保留週は使用済み = 探索データ。詳細は ROADMAP_BRIEF.md 2026-11-02)
-- **F2 `$F` の行 (2026-10-22 (8)、user「do f2」)** — `semivariogramFromWindows` を curator から切り出し (出力はバイト一致を実データで確認)、
-  `forecast.ts` で γ̂ に 2 族 (ナゲット + べき乗 / 指数) を当てて通常 kriging (生の γ̂ のままだと自信過剰)。21 日・平常の量で、
-  60 s 窓の 1 窓先は z の分散 0.85・|z|≥2 3.56% のまま**区間 −23%・誤差 −23%** (持続 = 今の比較の参照の平均 に対し)。遠い先ほど差は縮む。
-  気になる点: 同じ所の |z|≥3 が 0.63% (持続 0.36%)。本番: `$Q[forecast:<schema>#<view>]` (5 層目、書込ゲートで履歴 ≤ 1 時間)・
-  `Forecaster` (窓要約から、origin 以降は読まない)・`GET /forecast?view=`・`GET /control/forecast`。行はすべて `virtual: true`。
-  - **残り 2 件も完了 (2026-10-24)**: `ForecastScore` (`scoreForecast`、実現した窓を予見と比べる。package が `against: "forecast"` と名乗る・`virtual: true`、
-    `GET /forecast` の `scores`。60 s・1 窓先の裾は探索日で |z|≥3 0.36% = 判定に使える) と dashboard の Forecast パネル (破線・斜線で仮想と分かる形、テスト581件)
-  **次**: F3 (仮想ストリームの常設) — ただし 2026-11-17 時点の次は台帳 C16・C17 (公開 CI の試験結果への移行)。F3 は未着手
-- **足りない箇所と次の 3 手 (2026-11-02 (2)、user「推奨通りで do」)** — 足りないのは A 検出力の物差し (誤警報の予算は名乗るが届く範囲を名乗らない)・
-  B 構成の変化が説明止まり・C 予見の読み手がいない・D F3 の前提・E 運用。3 手: **1** 判定を変えずに見えていない所を測る →
-  **2** 1b の結果で分岐 (H-mix 支持なら量と率を分けるチャネル化 = 率の側は帰無の変更なので user 判断、不支持ならレンズで扱う)・どちらでも
-  `ForecastScore` の移動集計で較正の常時監視 → **3** F3。進め方は「誤警報を保留週で 1 回」から「検出力と常時監視」が主軸に
-  - **1a 実装**: `CurationOptions.sensitivityPower` (opt-in) → `SnapshotPackage.sensitivity` / `WindowScore.mde` = 1 窓の潜在の率が Δ 動いたとき
-    gate が確率 power で拾う最小の Δ。gate と同じ物差し (比較 SE・studentize を逆にたどった Šidák 閾値・連続性補正)。**正規近似は薄い窓で楽観的**
-    (p 0.9・1 s 窓で 80% と名乗って 66%) → 厳密な裾を読む 2 値の窓は MDE も厳密に (`exactWindowMde`)。埋め込みの検算 (`runSensitivityCheck`・
-    `flipBinaryWindow`) で合成の全条件 77〜86%。帰無が保守的なところでは検出は名乗りより上に出る (= 保守性の 2 つ目の読み)。既定の出力は HEAD と
-    2160 package でバイト一致。本番のライブ `Comparator` に 0.8、dashboard の snapshot 欄に reach 行 (tile が空でも出す)
-  - **1b 実装**: `runHistoryMixCalibration` (curator は触らない。履歴から量の外れた窓を除いた採点と比べる)。合成で機構は再現
-    (一括作業入りの履歴で平常の var z 0.32 → 除外で 0.94、−0.1 の検出 10 → 43/118)。除外は行き過ぎうるので帰無にはしない (診断専用)。
-    読み方は実データ前に固定 (`historyMixReading`)。**実データの読み (2026-11-02、C2 完了)**: 第 4 段階の週は V-a・10 s とも**支持** (var z 0.533 → 1.101・
-    0.655 → 1.031、V-a は除外版が行き過ぎ)、3 週は V-a が**不明** (+0.132)・10 s 支持 (+0.179)。MDE の検算は V-a・10 s で検出 89〜94% = 名乗り 80% より上
-    (保守性の 2 つ目の読み)。詳細は ROADMAP_BRIEF.md 2026-11-02 (3)
-  - **2 手目 C3 (2026-11-02 (4))**: 量を独立した採点チャネルにした (`CurationOptions.volumeChannel` opt-in → `SnapshotPackage.volume`、率の gate は読まない)。
-    参照の窓の事象数の ln を median/MAD で採点 (MAD の効率 0.37 から df を出し t の裾を通す。参照の窓が 8 未満は盲目)、観測区間に収まらない窓は採点しない
-    (`CurationContext.span`)。既定の出力は HEAD と 360 package・`run-volume-report` 1 日分でバイト一致。**実データの較正は 1 s 窓だけ合う** (var z 0.97)、
-    10 s・60 s 窓は 1.4〜1.8 (第 4 段階の週は 1.6〜4.2) で package の 14〜44% が発火 (見立ては「量の帰無は時間依存を持たない」、未検証)。構成の変化の捕捉は 60 s で
-    73〜91%・10-19 は 3/7。ライブの粗窓は参照 3 窓で盲目
-  - **C7 は保留 (2026-11-02 (7)(8))**: 下調べは「中央値 |z| が参照から遠いほど大きい」を尺度の過小と読み距離で SE を拡大する案を出したが、
-    **物差しが正しく構成の変化だけの合成でほぼ同じ数字が出る** (60 s で 1.12 → 1.36 倍) = 時間依存の証拠にならない。拡大すると構成の変化の捕捉が
-    半分以下 (60 s 48.5% → 15.7%)。新しい物差しは作らず、量チャネルは今のまま「構成の変化の検出器」として捕捉率で読む。封印週 (11-09〜15) は C7 に使わない。
-    C4 は C7 待ちから外した (除外の判定は 1b の量の帯で作れる)。再開は user が「何を出来事と呼ばないか」(例: 日周だけを平常) を決めたとき
-  - **C5 完了 (2026-11-02 (5))**: `$F` の最初の読み手。`ForecastMonitor` (`forecast-monitor.ts`) が view ごとに予見を採点して蓄積 (窓要約は 1 時間しか残らず 24 時間は再計算できない)、
-    1 時間・24 時間 × 地平で z の分散・被覆率を出し、**通常の量の窓だけ**で blind (30 窓未満) / overconfident (var z − 2SE > 1) / conservative (var z + 2SE < 0.7) / healthy を名乗る
-    (`GET /forecast` の `calibration`・dashboard の Forecast パネル)。実サーバで見たのは blind まで、遷移は合成の試験のみ。テスト616件。次は F3
-  - **C4 実装 (opt-in、2026-11-02 (10))**: `$Q[compare]` の `history_clean: "median"` — `Comparator` が variogram の履歴から、系列自身の中央値に対する量の帯 [0.8, 1.25] の外を除いて渡す
-    (curator は不変、除く割合が 0.5 超の系列は除かず `comparison.history.cleaned` に名乗る)。上限つきで平常の量の var z が 0.53〜0.83 → 0.91〜1.04。封印週 (11-09〜11-15) の主張 H-clean は 11-02 に事前登録 (var z ∈ [0.8, 1.25] で判定、|z|≥3 は併記)。集計は 2026-11-17 に 1 回行い **SUPPORTED** (C8 で閉じた。V-a var z 1.044・|z|≥3 0.71%、10 s 腕 1.005・0.45%。V-a は履歴そのままも帯の内 0.882 で、除く優位は主張しない)。`HOLDOUTS` は `spentOn` を持ち `--holdout` は拒否。判定が言うのはハーネスの 24 区間の構成のことで、本番 (履歴 1 時間) の証拠ではない (C10・C14)
-- **予定: 実データ較正期間 (2026-09-27 事前登録・第0段階: Wikimedia 収集器・再生ハーネス/指標 (φ・ラグ1・シャッフル帰無・注入) は実装・合成検算済 2026-09-29、ログオン時起動のタスク登録済。H4 用の OTLP 受け口・真値ログ・p 別の間引き再生も実装済 2026-09-29、OTel Demo の実走は第1段階の1日分)** — 統計層の前提、特に「窓内の事象は独立」
-  が実データで成り立つかを、事前に固定した仮説で検証する (実データで調整する期間ではない)。
-  データ源は Wikimedia EventStreams (無料・認証不要の SSE、value = bot 編集か否か) と
-  OpenTelemetry Demo (障害フラグで真値あり、最小限の OTLP 受け口を灯台側に作る)。
-  仮説は H1 依存 (過分散・自己相関) / H2 group 数の爆発 / H3 日周変動 / H4 サンプリング重み。
-  **5〜7 日目は保留期間、閾値で実データを黙らせない、収集の欠落は盲目として扱う**。
-  すべて灯台側で dcp-core のコアは触らない。詳細は ROADMAP_BRIEF.md 2026-09-27 (3)
-  - **収集の取りこぼしと修正 (2026-09-30)** — OS 再起動後、タスクが出したコンソール窓を閉じて収集器が停止。
-    遡り取得では**静かな方の Kafka トピック (codfw) が先に「今」へ着く**ため、最大時刻基準の欠落検知が
-    偽の穴 7 件を出し、さらに遡り取得中の再接続が `since=最大時刻−60s` で本流 (eqiad) の
-    11:21〜13:18Z を飛ばした (取り直さない判断、gaps.jsonl は書き換えない)。
-    修正: `Last-Event-ID` によるトピック別再開、穴は最下位が `gapSettleMs` 埋まらなかったときに確定、
-    未確定の穴は `collector-state.json` に保存してハーネスも盲目として読む (読めなければ拒否)、
-    タスクは `conhost --headless` 経由。運用手順は skill `wiki-collector-ops`。
-    事前登録の規則 (欠落=盲目) は不変。詳細は ROADMAP_BRIEF.md 2026-09-30
-  - **H4 の整備 (2026-09-30、Demo は未起動)** — Demo では `paymentServiceFailure` が **`paymentFailure`** に改名
-    (失敗率の数値バリアント、`"90%"` の値は 0.95)。フラグ切替器は flagd-ui API 経由で書き flagd で確認
-    (ファイル直書きは flagd-ui のキャッシュに消され、Windows では監視にも届かない)。H4 レポートは
-    ON 区間を帰無から除外し p 別に判定。間引きは**トレース単位** (`thinByTrace`)。レンズ・間引き単位・実施日
-    (探索期間に配線確認の短い通し、判定用の 1 日は保留期間中) は事前登録の改訂履歴 2026-09-30 で確定
-- **予定: 高速分類器 (TypeSafe AI / Jev) の Brain 層配置 (2026-09-17 登録・未着手)** — Jev は waitlist 制の
-  early access でアクセス待ち。型付きの確率つき判定を 70〜500ms で返すので、**毎 tick の一次判定
-  (応答種別とレンズを Choice で選ぶ) + 低確信度で ClaudeBrain に escalate** の二段構えにする案。
-  RuleBrain と cadence が揃うので L3 で見送った per-tick 一致率も測れる。
-  **発火 (いつ異常か) は curator に残す** (毎 tick 判定は誤警報を膨らませる)。Choice の選択肢は
-  プロセス状態から生成する (静的 enum だと 2026-08-25 の median と同じ隙間が戻る)。
-  較正の公開証拠が無いので自領域で測ってから使う。詳細は ROADMAP_BRIEF.md 2026-09-17
-- 常設: 実データ派生 (非公開の姉妹プロジェクト) からの還元フィルタ — 「機構を行使/変更する or ドメイン非依存知見を生む」もののみ灯台の実証に数える
-
----
-
-## ローカル運用メモ
-
-個人環境固有の手順 (絶対パス・ローカル CLI/DB の起動・進行中の測定など) は
-**このファイルに書かない**。`CLAUDE.local.md` (untracked) に置く。
-本ファイルは公開リポジトリの一部なので、パスは常にリポジトリ相対で書くこと。
+- 実データ派生 (非公開の姉妹プロジェクト) からの還元フィルタ: 「機構を行使/変更する or ドメイン非依存知見を生む」ものだけを灯台の実証に数える
+- 作業の単位は台帳 `docs/roadmap.md` に `### C<n>. 題` で起票する。設計書の中に W1・Step n の独自番号を作らない
+- 個人環境固有の手順 (絶対パス・ローカル CLI/DB の起動・進行中の測定) は**このファイルに書かない**。`CLAUDE.local.md` (untracked) に置く。
+  本ファイルは公開リポジトリの一部なので、パスは常にリポジトリ相対で書く
+- 長い経緯・数値の追記は `ROADMAP_BRIEF.md` へ。ここは**現在地・地図・不変条件**だけを短く保つ
 
 @CLAUDE.local.md
-
-
