@@ -6,6 +6,10 @@
 
 ## 閉じた項目
 
+- [x] C34 同時多発の名乗りを、固定の件数ではなく参照に対する多さで出す (2026-11-28、opt-in `relativeFailureBurst` で実装・事前登録 3 基準が未使用の確認範囲で 3/3 成立。記録は ROADMAP_BRIEF の 2026-11-28 （2） の節)
+  - `snapshot-curator.ts` (`CurationOptions.relativeFailureBurst` / `C34_RELATIVE_BURST` / `countRelativeFailureBursts`)・`prow-replay.ts`: 参照 30 窓の上位 10% トリム平均 + 3×scale (`max(1, sqrt(max(mean, var)))`)・最小 3 件・参照 8 窓未満は `blind: true`。既定 (`mock`・`test-stream`) のパッケージはバイト同一。単体試験 +7 件
+  - `run-treeherder-c34-report.ts`: 規則と 3 基準を使用済み探索データ (Treeherder C29 + Prow 89 日) で決め、確認範囲を読む前にコミット (`9950fdb`)
+  - 確認範囲 (Treeherder `2026-10-24〜11-06`・助走 `10-22`〜・回帰 161 件 + Prow 89 日): Treeherder 回帰なし失敗窓 4.6% (`fixed10` 61.1% から −56.5 pt、基準 i 成立)・回帰窓との差 +16.9 pt (基準 ii 成立)・Prow `>=10` 10/10 かつ単発 0/379 (基準 iii 成立)。出力は `data/logs/c34-treeherder-20261128.txt`
 - [x] C36 本番の `/persistence` の名乗りに flaky の履歴を載せる (2026-11-27、user 決定: 環境変数で opt-in・未測定と名乗る。記録は ROADMAP_BRIEF の 2026-11-27 （4） の節)
   - `LIGHTHOUSE_PERSIST_HISTORY=N` (`parsePersistHistory`、`prow` 以外・正の整数以外は起動時に拒否) → `ProwPersistenceFeed` に `flakyHistory`。`/persistence` に `flakyHistory`、SSE に `persistenceHistory` (N・F=10%・「C35 は Treeherder で決めて確かめた値で、この流れでは未測定」)、dashboard の各名乗りに quiet / flaky / short の札
   - 未設定なら `/persistence`・SSE・起動ログは従来のまま (C22 の試験は無修正で通る)。試験 761 件 (+4)
@@ -160,15 +164,4 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-25 の方針決定 (2 段構えの 2 段目)。C29 で本物の回帰に対する検証フェーズを閉じたあと、普段の開発 (`node --test` の JSON/TAP 出力や JUnit XML、マルチエージェント開発のテスト実行) を HTTP 経由で灯台サーバにリアルタイム投入し、`RetentionBuffer`・`PersistenceDetector`・`Dashboard` で監視できるようにする。
 
 - user が決めること (C29 は 2026-11-27 に閉じた): 投入形式 (ビルド単位 JSON / JUnit XML)、不定期なローカル実行に対して時間窓のままにするか実行単位の窓 (C17 案 c) を併設するか
-- 決定になったら完了条件を付ける
-
-### C34. 同時多発の名乗りを、固定の件数ではなく参照に対する多さで出す
-状態: 提案
-
-設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-27 (2)。C19 の同時多発は「窓に 10 件以上の失敗」という固定の件数で、Prow (失敗は 1 万件に 1 件) では固まりだけを拾ったが、Treeherder では窓の失敗が中央値 33 件あり、回帰の無い失敗窓の 57%・intermittent だけの窓の 39% でも発火する。件数は流れの規模に依存し、流れを替えると意味が変わる。
-
-- user が決めること: 同時多発を参照 (30 窓) の失敗数の分布に対する外れとして名乗る形に替えるか、固定の件数を残して別の欄を足すか。既定 (`mock`・`test-stream` の出力) はバイト同一に保つ opt-in にするか
-- 先に測ること: 替えた名乗りの、回帰の無い窓での発火率 (C29 の出力と同じ対照) と、Prow の 89 日で C19 の 10/10 を保つか
-- 規則は測る前に固定する。C29 の 14 日は使用済みの探索データとして扱い、確認には別の範囲を取り込む。C35 の確認に使った 10-24〜11-06 も持続については使用済み (同時多発はまだ読んでいない)
-- グループ別 replay の鍵 (C29 で exact 11/163) の見直しが要るかは、この項目の後に決める (C35・C36 は持続だけを扱い、鍵については何も分かっていない)
 - 決定になったら完了条件を付ける

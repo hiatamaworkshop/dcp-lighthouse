@@ -7328,3 +7328,31 @@ Prow の 89 日 (全取り込み) の名乗り 2 件に札を当てると: C13 �
   - **C29 (11-09〜22, 156 件)**: 捕捉 **129/156 (82.7%)** (報告 140 = 89.7%)、quiet 精度 **56.2%** (報告 70.6%)、札の差 (i) **+22.7 pt**、quiet+short 保持率 (ii) **119/129 = 92.2%**。
   - **C35 確認 (10-24〜11-06, 161 件)**: 捕捉 **130/161 (80.7%)** (報告 144 = 89.4%)、quiet 精度 **44.6%** (報告 60.3%)、札の差 (i) **+27.5 pt** (≥ 15 で頑健に成立)、quiet+short 保持率 (ii) **115/130 = 88.5%** (90% の境界付近)。
 - **小修正**: (1) `run-treeherder-c35-report.ts` の `C35_HISTORY_RUNS` / `C35_QUIET_MAX` / `tagOf` を `prow-persist.ts` の `C35_FLAKY_HISTORY` / `flakyTag` 参照に統一、(2) `PersistenceDetector` の `passedOn` をテストあたり既定 256 commit (`DEFAULT_MAX_PASSED_COMMITS`) の FIFO に有界化し常駐サーバでの無制限増加を防止、(3) `dashboard/index.html` に `.persist-short` の明示スタイルを追加、(4) `CLAUDE.md` の見出し日付を更新。
+
+## 2026-11-28 (2) — C34: 参照 30 窓に対する相対的な同時多発検出 (opt-in) と未使用範囲での確認
+
+固定件数 10 (`CurationOptions.failureCount`, C19) は Prow (失敗 1 万件に 1 件) では固まりだけを拾ったが、Treeherder (窓の失敗中央値 33 件) では回帰の無い失敗窓の 57%・intermittent だけの窓の 39% でも発火していた (C29)。これを参照窓 (`reference.windows`) の失敗数分布に対する外れとして測る opt-in チャネル `CurationOptions.relativeFailureBurst` (`SnapshotPackage.relativeFailures`) を実装し、事前登録した 3 基準を未使用の確認範囲で 1 回だけ検証した。
+
+**規則 (`C34_RELATIVE_BURST`、`snapshot-curator.ts`)** — 使用済み探索データ (Treeherder C29 `2026-11-09..11-22` + Prow 89 日) のみで決定し、確認範囲を読む前にコミット (`9950fdb`):
+- 参照窓のうち非加重かつ二値 (0/1) の窓数 `M` を数える。`M < 8` のときは `blind: true`・`bursts: []` を返し、沈黙と盲目を混同しない。
+- 上位 10% をトリム (`trimTop = 0.1`、30 窓なら下位 27 窓) した平均 `refMean`・標本分散 `refVar` から `refScale = max(1, sqrt(max(refMean, refVar)))`、`threshold = refMean + 3 * refScale` を算出。上位トリムを外すと Prow 09-06〜07 の連続バースト 5 件で直前のバーストが参照の広がりを膨らませ 2〜5 件目を隠す (5/10 しか拾えない)。
+- 観測窓が `failed >= 3` かつ `failed > threshold` なら `bursts` に載せる (全 pass 参照でも `refScale = 1`・`threshold = 3` で 4 件以上を拾い、1〜2 件の孤立失敗では鳴らない)。
+- 既定 (`relativeFailureBurst` 未指定 / `false`) は `relativeFailures` 自体を出力せず、`mock`・`test-stream` の既定パッケージとバイト同一。単体試験 +7 件 (`snapshot-curator.test.ts`)。
+
+**探索範囲での基準確認 (使用済みデータ、`data/logs/c34-explore-c29range-20261128.txt`)**:
+- Treeherder C29 (`11-09..11-22`、助走 `11-07`〜、333 package・盲目 0): 回帰あり窓 31/171 (18.1%、`fixed10` 95.3%)・回帰なし失敗窓 **7/139 (5.0%**、`fixed10` 56.8%、−51.8 pt)・intermittent のみ 2/89 (2.2%、`fixed10` 39.3%)・incident 捕捉 53/156 (34.0%)。
+
+**未使用の確認範囲での 1 回実行 (`data/logs/c34-treeherder-20261128.txt`、コミット `9950fdb` の固定規則のまま再調整なし)**:
+- Treeherder `2026-10-24..11-06` (助走 `10-22`〜、2,220 push・欠落 0・768,847 事象・324 package・盲目 0・回帰 161 件):
+  - 回帰あり窓 (`158`): `fixed10` 154/158 (97.5%) → `relative` **34/158 (21.5%)**
+  - 回帰なし失敗窓 (`131`): `fixed10` 80/131 (61.1%) → `relative` **6/131 (4.6%)** (−56.5 pt)
+  - intermittent のみ失敗窓 (`76`): `fixed10` 29/76 (38.2%) → `relative` **5/76 (6.6%)**
+  - incident 捕捉 (`161`): `fixed10` 160/161 (99.4%) → `relative` **64/161 (39.8%)**
+- Prow 89 日 (`2026-08-19..11-15`、`test-stream` 配線、2,134 package・盲目 8):
+  - `>=10` 失敗 (`10`): `relative` **10/10** (C19 を完全保持)
+  - `3–9` 失敗 (`6`): `relative` **3/6** / `2` 失敗 (`39`): **0/39** / `1` 失敗 (`379`): **0/379**
+- **事前登録した 3 基準の判定**:
+  - (i) Treeherder 回帰なし失敗窓 ≤ 15% かつ `fixed10` 比 −30 pt 以上: **4.6% (−56.5 pt) → PASS**
+  - (ii) Treeherder 回帰あり窓 − 回帰なし失敗窓 ≥ 8 pt: **+16.9 pt (21.5% − 4.6%) → PASS**
+  - (iii) Prow 89 日 `>=10` で 10/10 かつ単発失敗で 0/379: **10/10・0/379 → PASS**
+  - **総合: PASS (3/3)**。C34 は opt-in (`relativeFailureBurst`) のまま閉じた (`test-stream` の既定や固定 `failures` は不変)。
