@@ -35,6 +35,14 @@
  * regression is announced (a pass on the same code later would make it flaky,
  * and C13 reads the whole record), and what it announces beyond that is the
  * flaky length-2 episodes whose same-commit pass had not yet happened.
+ *
+ * FLAKY HISTORY (ROADMAP C35, opt-in; without it every announcement is byte
+ * for byte what it was). With `{ runs: N }` each announcement carries
+ * `history`: the test's outcomes in the last ≤ N builds that had it BEFORE the
+ * run's first failing build — how often it failed while nothing was being
+ * announced. It annotates; it never withholds an announcement (a test that
+ * fails often can still break for real), and a history shorter than N is
+ * stated as such (`runs` < N), not read as a quiet one.
  */
 
 import { buildToEvents, type ProwEventOptions } from "./prow-events.js";
@@ -51,6 +59,20 @@ export interface Announcement {
   atMs: number;
   /** Scheduling instant of the first failing build. */
   firstMs: number;
+  /** Only with the `flakyHistory` option (C35): outcomes of the ≤ N builds before the run's first failing build. */
+  history?: FlakyHistory;
+}
+
+export interface FlakyHistory {
+  /** Builds read (< the option's N when the test has not been seen N times yet). */
+  runs: number;
+  /** Of those, builds where the test failed. */
+  fails: number;
+}
+
+export interface FlakyHistoryOptions {
+  /** How many of the test's most recent builds to remember. */
+  runs: number;
 }
 
 interface TestState {
@@ -59,13 +81,22 @@ interface TestState {
   /** Commits on which some build passed the test outright. */
   passedOn: Set<string>;
   /** The run's first failing build, while a run is on. */
-  runStart?: { buildId: string; scheduledMs: number };
+  runStart?: { buildId: string; scheduledMs: number; history?: FlakyHistory };
+  /** With flakyHistory: the last ≤ N outcomes (true = fail), oldest first. */
+  recent?: boolean[];
 }
 
 export class PersistenceDetector {
   private readonly perJob = new Map<string, { lastMs: number; tests: Map<string, TestState> }>();
 
-  constructor(private readonly opts: ProwEventOptions = {}) {}
+  constructor(
+    private readonly opts: ProwEventOptions = {},
+    private readonly flakyHistory?: FlakyHistoryOptions,
+  ) {
+    if (flakyHistory !== undefined && !(Number.isInteger(flakyHistory.runs) && flakyHistory.runs >= 1)) {
+      throw new RangeError(`PersistenceDetector: flakyHistory.runs must be a positive integer, got ${flakyHistory.runs}`);
+    }
+  }
 
   /** Feeds one build (each job's builds in time order) and returns what it announces. */
   add(b: ProwBuild): Announcement[] {
@@ -95,11 +126,22 @@ export class PersistenceDetector {
           // B is the 2nd build of the run.
           const split = mixed || prev.mixed || (b.commit !== undefined && st.passedOn.has(b.commit)) || (prev.commit !== undefined && st.passedOn.has(prev.commit));
           if (!split) {
-            out.push({ job: b.job, testId, buildId: b.id, firstBuildId: st.runStart.buildId, atMs: b.finishedMs, firstMs: st.runStart.scheduledMs });
+            const a: Announcement = { job: b.job, testId, buildId: b.id, firstBuildId: st.runStart.buildId, atMs: b.finishedMs, firstMs: st.runStart.scheduledMs };
+            if (st.runStart.history !== undefined) a.history = st.runStart.history;
+            out.push(a);
           }
         } else if (prev === undefined || !prev.fail) {
           st.runStart = { buildId: b.id, scheduledMs: b.scheduledMs };
+          if (this.flakyHistory !== undefined) {
+            const r = st.recent ?? [];
+            st.runStart.history = { runs: r.length, fails: r.filter((x) => x).length };
+          }
         }
+      }
+      if (this.flakyHistory !== undefined) {
+        const r = (st.recent ??= []);
+        r.push(fail);
+        if (r.length > this.flakyHistory.runs) r.shift();
       }
       st.last = { fail, buildId: b.id, scheduledMs: b.scheduledMs, commit: b.commit, mixed };
     }
@@ -108,8 +150,8 @@ export class PersistenceDetector {
 }
 
 /** Announcements over `builds` (any order; each job is read in time order). */
-export function detectPersistence(builds: readonly ProwBuild[], opts: ProwEventOptions = {}): Announcement[] {
-  const d = new PersistenceDetector(opts);
+export function detectPersistence(builds: readonly ProwBuild[], opts: ProwEventOptions = {}, flakyHistory?: FlakyHistoryOptions): Announcement[] {
+  const d = new PersistenceDetector(opts, flakyHistory);
   const out: Announcement[] = [];
   for (const b of [...builds].sort((a, b) => a.scheduledMs - b.scheduledMs)) out.push(...d.add(b));
   return out;

@@ -73,6 +73,30 @@ describe("detectPersistence — the rule fixed on 2026-11-17 (C21)", () => {
     assert.deepEqual(ann(builds).map((x) => [x.job, x.buildId, x.firstBuildId]), [["ci-job", "1001", "1000"], ["ci-job", "1004", "1003"]]);
   });
 
+  it("C35 flakyHistory: absent unless asked, and never changes what is announced", () => {
+    const builds = [build(0, "a", { t: "failed" }), build(1, "b", { t: "passed" }), build(2, "c", { t: "failed" }), build(3, "d", { t: "failed" }), build(4, "e", { t: "passed" }), build(5, "f", { t: "failed" }), build(6, "g", { t: "failed" })];
+    const plain = detectPersistence(builds);
+    assert.ok(plain.every((a) => !("history" in a)), "no history field without the option");
+    const withHist = detectPersistence(builds, {}, { runs: 3 });
+    assert.deepEqual(withHist.map(({ history: _h, ...rest }) => rest), plain, "same announcements, same fields otherwise");
+  });
+
+  it("C35 flakyHistory: the ≤ N builds before the run's first failing build, short histories stated", () => {
+    const builds = [build(0, "a", { t: "failed" }), build(1, "b", { t: "passed" }), build(2, "c", { t: "failed" }), build(3, "d", { t: "failed" }), build(4, "e", { t: "passed" }), build(5, "f", { t: "failed" }), build(6, "g", { t: "failed" })];
+    const a = detectPersistence(builds, {}, { runs: 3 }).filter((x) => x.testId === "c::t");
+    assert.deepEqual(a.map((x) => [x.buildId, x.history]), [
+      ["1003", { runs: 2, fails: 1 }], // before build 2: [fail, pass] — shorter than 3, stated
+      ["1006", { runs: 3, fails: 2 }], // before build 5: last 3 of [f, p, f, f, p] = [f, f, p]; the run's own failures are not counted
+    ]);
+  });
+
+  it("C35 flakyHistory: a first-ever failing run has an empty history, and runs must be a positive integer", () => {
+    const a = detectPersistence([build(0, "a", { t: "failed" }), build(1, "b", { t: "failed" })], {}, { runs: 20 });
+    assert.deepEqual(a[0]!.history, { runs: 0, fails: 0 });
+    assert.throws(() => detectPersistence([], {}, { runs: 0 }), RangeError);
+    assert.throws(() => detectPersistence([], {}, { runs: 2.5 }), RangeError);
+  });
+
   it("everything C13 calls regression is announced", () => {
     const builds = [build(0, "a", { t: "passed" }), build(1, "b", { t: "failed" }), build(2, "c", { t: "failed" }), build(3, "d", { t: "failed" }), build(4, "e", { t: "passed" })];
     const eps = deriveEpisodes(builds).filter((e) => e.class === "regression");
