@@ -1763,3 +1763,98 @@ describe("failureCount (ROADMAP C19)", () => {
     for (const bad of [0, -1, 2.5, NaN]) assert.throws(() => new SnapshotCurator({ failureCount: bad }), RangeError);
   });
 });
+
+describe("relativeFailureBurst (ROADMAP C34)", () => {
+  const HOUR = 3_600_000;
+  const hour = (i: number, n: number, fails: number): LensEvent[] =>
+    Array.from({ length: n }, (_, k) => ev(i * HOUR + k * 1000, k < fails ? 0 : 1));
+  const lens = { window_ms: HOUR, align: "epoch" as const };
+
+  it("changes nothing when off: default package omits relativeFailures and is byte-identical", () => {
+    const ref = applyLens(Array.from({ length: 12 }, (_, i) => hour(i, 200, 1)).flat(), lens);
+    const obs = applyLens([...hour(12, 200, 0), ...hour(13, 200, 12)], lens);
+    const off = new SnapshotCurator({}).curate(obs, ref);
+    const on = new SnapshotCurator({ relativeFailureBurst: true }).curate(obs, ref);
+    assert.equal("relativeFailures" in off, false);
+    const { relativeFailures, generatedAt: _on, ...rest } = on;
+    const { generatedAt: _off, ...offRest } = off;
+    assert.ok(relativeFailures !== undefined);
+    assert.deepEqual(rest, offRest);
+  });
+
+  it("on a sparse all-pass reference (Prow-like), catches bursts >= 4 and stays quiet on 1–2", () => {
+    const ref = applyLens(Array.from({ length: 30 }, (_, i) => hour(i, 200, 0)).flat(), lens);
+    const obs = applyLens([...hour(30, 200, 1), ...hour(31, 200, 2), ...hour(32, 200, 4), ...hour(33, 200, 12)], lens);
+    const pkg = new SnapshotCurator({ relativeFailureBurst: true }).curate(obs, ref);
+    const rf = pkg.relativeFailures!;
+    assert.equal(rf.blind, false);
+    assert.equal(rf.refWindows, 30);
+    assert.equal(rf.refTrimmedWindows, 27);
+    assert.equal(rf.refMean, 0);
+    assert.equal(rf.refScale, 1);
+    assert.equal(rf.threshold, 3);
+    assert.deepEqual(rf.bursts.map((b) => [b.windowStart / HOUR, b.failed]), [[32, 4], [33, 12]]);
+  });
+
+  it("on a dense reference (Treeherder-like), stays quiet on ordinary 30–50 and catches a large spike", () => {
+    // 30 reference hours oscillating between 25 and 40 failures (mean ~32.5, sd ~5.3)
+    const refCounts = Array.from({ length: 30 }, (_, i) => 25 + (i % 4) * 5);
+    const ref = applyLens(refCounts.flatMap((c, i) => hour(i, 500, c)), lens);
+    const obs = applyLens([...hour(30, 500, 35), ...hour(31, 500, 48), ...hour(32, 500, 120)], lens);
+    const pkg = new SnapshotCurator({ relativeFailureBurst: true }).curate(obs, ref);
+    const rf = pkg.relativeFailures!;
+    assert.equal(rf.blind, false);
+    assert.deepEqual(rf.bursts.map((b) => [b.windowStart / HOUR, b.failed]), [[32, 120]]);
+    assert.ok(rf.bursts[0]!.score > 3);
+  });
+
+  it("upper trimming keeps 1–2 prior bursts inside the reference from masking the next burst", () => {
+    // 28 quiet hours (0 fails) + 2 huge prior bursts (50 fails each) in a 30-hour reference
+    const refCounts = [...Array.from({ length: 28 }, () => 0), 50, 50];
+    const ref = applyLens(refCounts.flatMap((c, i) => hour(i, 200, c)), lens);
+    const obs = applyLens(hour(30, 200, 12), lens);
+    const trimmed = new SnapshotCurator({ relativeFailureBurst: true }).curate(obs, ref).relativeFailures!;
+    const untrimmed = new SnapshotCurator({ relativeFailureBurst: { trimTop: 0 } }).curate(obs, ref).relativeFailures!;
+    assert.deepEqual(trimmed.bursts.map((b) => b.failed), [12], "top-10% trim drops the two 50-fail windows");
+    assert.deepEqual(untrimmed.bursts, [], "without trimming, prior bursts inflate spread and mask 12");
+  });
+
+  it("distinguishes blindness from silence when fewer than minRefWindows judged reference windows exist", () => {
+    const shortRef = applyLens(Array.from({ length: 5 }, (_, i) => hour(i, 200, 0)).flat(), lens);
+    const obs = applyLens(hour(10, 200, 25), lens);
+    const pkg = new SnapshotCurator({ relativeFailureBurst: true }).curate(obs, shortRef);
+    const rf = pkg.relativeFailures!;
+    assert.equal(rf.blind, true);
+    assert.equal(rf.refWindows, 5);
+    assert.deepEqual(rf.bursts, []);
+    assert.deepEqual(rf.windows.map((w) => w.failed), [25]);
+  });
+
+  it("counts flaky (0.5) windows as unjudged rather than zero failures", () => {
+    const ref = applyLens([
+      ...Array.from({ length: 7 }, (_, i) => hour(i, 200, 0)).flat(),
+      ev(7 * HOUR, 0.5),
+    ], lens);
+    const obs = applyLens([ev(10 * HOUR, 0.5), ...hour(11, 200, 12)], lens);
+    const rf = new SnapshotCurator({ relativeFailureBurst: true }).curate(obs, ref).relativeFailures!;
+    assert.equal(rf.blind, true, "only 7 judged ref windows remain after excluding the flaky window");
+    assert.equal(rf.unjudgedRefWindows, 1);
+    assert.equal(rf.unjudgedWindows, 1);
+  });
+
+  it("rejects out-of-range relativeFailureBurst options", () => {
+    for (const bad of [
+      { zThreshold: 0 },
+      { zThreshold: -1 },
+      { zThreshold: NaN },
+      { trimTop: -0.1 },
+      { trimTop: 0.5 },
+      { minFailures: 0 },
+      { minFailures: 1.5 },
+      { minRefWindows: 1 },
+      { minRefWindows: 2.5 },
+    ]) {
+      assert.throws(() => new SnapshotCurator({ relativeFailureBurst: bad }), RangeError);
+    }
+  });
+});

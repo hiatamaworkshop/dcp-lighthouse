@@ -324,6 +324,13 @@ export interface SnapshotPackage {
    * a `burst` names no cause (ROADMAP C19).
    */
   failures?: FailureCount;
+  /**
+   * Present only with `CurationOptions.relativeFailureBurst`: observed windows
+   * whose failure count exceeds the reference windows' upper-trimmed failure
+   * distribution. Measures bursts relative to the stream's own ordinary failure
+   * count without changing the rate gate or `failures` (ROADMAP C34).
+   */
+  relativeFailures?: RelativeFailureBurst;
   /** The curated tiles, sorted by regionStart ascending. */
   tiles: SnapshotTile[];
 }
@@ -366,6 +373,73 @@ export interface FailureCount {
    * (a partial `flaky` result). They are not counted as quiet.
    */
   unjudgedWindows: number;
+}
+
+/**
+ * Default parameters for `CurationOptions.relativeFailureBurst` (ROADMAP C34),
+ * fixed on 2026-11-28 on spent exploratory data (Treeherder C29 2026-11-09…
+ * 11-22 and Prow 89d) before reading the Treeherder confirmation range
+ * (2026-10-24…11-06).
+ */
+export const C34_RELATIVE_BURST = {
+  /** Number of reference scales above the trimmed reference mean (`failed > refMean + zThreshold * refScale`). */
+  zThreshold: 3,
+  /** Upper fraction of reference windows trimmed before estimating the baseline, so 1–2 prior bursts in the reference do not mask the next burst. */
+  trimTop: 0.1,
+  /** Minimum failures in one window to be called a burst, even when the reference was all-pass. */
+  minFailures: 3,
+  /** Minimum judged reference windows required; fewer leaves `blind: true` with `bursts: []`. */
+  minRefWindows: 8,
+} as const;
+
+export interface RelativeFailureBurstOptions {
+  zThreshold?: number;
+  trimTop?: number;
+  minFailures?: number;
+  minRefWindows?: number;
+}
+
+/** One observed window that crossed the relative failure-burst threshold. */
+export interface RelativeFailureBurstWindow extends FailureWindow {
+  /** `(failed - refMean) / refScale`. */
+  score: number;
+}
+
+/**
+ * SnapshotPackage.relativeFailures (ROADMAP C34): observed windows whose
+ * failure count exceeds the reference windows' upper-trimmed failure
+ * distribution (`failed >= minFailures && failed > refMean + zThreshold * refScale`,
+ * where `refScale = max(1, sqrt(max(refMean, refVar)))`).
+ *
+ * A burst names a count anomaly against the reference, not a cause. When fewer
+ * than `minRefWindows` judged (unweighted 0/1) reference windows exist,
+ * `blind: true` and `bursts` is empty — never read as quiet.
+ */
+export interface RelativeFailureBurst {
+  zThreshold: number;
+  trimTop: number;
+  minFailures: number;
+  minRefWindows: number;
+  /** True when judged reference windows < `minRefWindows`; `bursts` is empty and must not be read as quiet. */
+  blind: boolean;
+  /** Number of judged (unweighted 0/1) reference windows. */
+  refWindows: number;
+  /** Reference windows kept after trimming the upper `trimTop` fraction (0 when `blind`). */
+  refTrimmedWindows: number;
+  /** Mean failures per window over the trimmed reference (0 when `blind`). */
+  refMean: number;
+  /** Scale `max(1, sqrt(max(refMean, refVar)))` over the trimmed reference (0 when `blind`). */
+  refScale: number;
+  /** Burst threshold `refMean + zThreshold * refScale` (0 when `blind`). */
+  threshold: number;
+  /** Every observed window that held at least one failure, by windowStart. */
+  windows: FailureWindow[];
+  /** Observed windows with `failed >= minFailures && failed > threshold` (empty when `blind`). */
+  bursts: RelativeFailureBurstWindow[];
+  /** Observed windows whose failures could not be counted (weighted or non-0/1). */
+  unjudgedWindows: number;
+  /** Reference windows whose failures could not be counted (weighted or non-0/1). */
+  unjudgedRefWindows: number;
 }
 
 /** SnapshotPackage.sensitivity: the smallest one-window shift the gate would catch, per scoring unit. */
@@ -701,6 +775,13 @@ export interface CurationOptions {
    * and writes nothing it reads: no score, threshold or tile changes.
    */
   failureCount?: number;
+  /**
+   * Opt-in relative failure-burst channel (ROADMAP C34). Absent / `false` (default):
+   * omitted and the package is byte-identical. `true` uses `C34_RELATIVE_BURST`;
+   * an object overrides individual parameters. Reads only observation & reference
+   * window summaries and changes nothing in the rate gate or `failures`.
+   */
+  relativeFailureBurst?: boolean | RelativeFailureBurstOptions;
 }
 
 /** CurationOptions.nullModel's values — also what $Q[compare]'s `null_model` names. */
@@ -732,6 +813,7 @@ export interface CurationContext {
 
 export class SnapshotCurator {
   private readonly opts: Required<CurationOptions>;
+  private readonly relativeBurst: Required<RelativeFailureBurstOptions> | null;
 
   constructor(opts: CurationOptions = {}) {
     this.opts = {
@@ -747,6 +829,7 @@ export class SnapshotCurator {
       sensitivityPower: opts.sensitivityPower ?? 0,
       volumeChannel: opts.volumeChannel ?? false,
       failureCount: opts.failureCount ?? 0,
+      relativeFailureBurst: opts.relativeFailureBurst ?? false,
     };
     const fc = opts.failureCount;
     if (fc !== undefined && !(Number.isInteger(fc) && fc >= 1)) {
@@ -755,6 +838,30 @@ export class SnapshotCurator {
     const p = opts.sensitivityPower;
     if (p !== undefined && !(p > 0 && p < 1)) {
       throw new RangeError(`sensitivityPower must lie strictly between 0 and 1 (a detection probability), got ${p}`);
+    }
+    if (opts.relativeFailureBurst === undefined || opts.relativeFailureBurst === false) {
+      this.relativeBurst = null;
+    } else {
+      const rb = opts.relativeFailureBurst === true ? {} : opts.relativeFailureBurst;
+      const resolved: Required<RelativeFailureBurstOptions> = {
+        zThreshold: rb.zThreshold ?? C34_RELATIVE_BURST.zThreshold,
+        trimTop: rb.trimTop ?? C34_RELATIVE_BURST.trimTop,
+        minFailures: rb.minFailures ?? C34_RELATIVE_BURST.minFailures,
+        minRefWindows: rb.minRefWindows ?? C34_RELATIVE_BURST.minRefWindows,
+      };
+      if (!(Number.isFinite(resolved.zThreshold) && resolved.zThreshold > 0)) {
+        throw new RangeError(`relativeFailureBurst.zThreshold must be a finite positive number, got ${resolved.zThreshold}`);
+      }
+      if (!(Number.isFinite(resolved.trimTop) && resolved.trimTop >= 0 && resolved.trimTop < 0.5)) {
+        throw new RangeError(`relativeFailureBurst.trimTop must lie in [0, 0.5), got ${resolved.trimTop}`);
+      }
+      if (!(Number.isInteger(resolved.minFailures) && resolved.minFailures >= 1)) {
+        throw new RangeError(`relativeFailureBurst.minFailures must be a positive integer, got ${resolved.minFailures}`);
+      }
+      if (!(Number.isInteger(resolved.minRefWindows) && resolved.minRefWindows >= 2)) {
+        throw new RangeError(`relativeFailureBurst.minRefWindows must be an integer >= 2, got ${resolved.minRefWindows}`);
+      }
+      this.relativeBurst = resolved;
     }
   }
 
@@ -1069,6 +1176,10 @@ export class SnapshotCurator {
       ? scoreVolume(units, this.opts.spikeZThreshold, this.opts.recordWindowScores, context.span)
       : undefined;
     const failures = this.opts.failureCount > 0 ? countFailures(windows, this.opts.failureCount) : undefined;
+    const relativeFailures =
+      this.relativeBurst !== null
+        ? countRelativeFailureBursts(windows, reference.windows, this.relativeBurst)
+        : undefined;
 
     // ── 4. Divergence vs an explicit reference ─────────────────
     // Only meaningful when reference is a genuinely different lens output —
@@ -1149,35 +1260,134 @@ export class SnapshotCurator {
       ...(sensitivityUnits !== undefined ? { sensitivity: { power, units: sensitivityUnits } } : {}),
       ...(volume !== undefined ? { volume } : {}),
       ...(failures !== undefined ? { failures } : {}),
+      ...(relativeFailures !== undefined ? { relativeFailures } : {}),
       tiles: capped,
     };
   }
 }
 
-// ── Failure count (CurationOptions.failureCount) ─────────────────────────────
+// ── Failure count (CurationOptions.failureCount & relativeFailureBurst) ──────
 
 /**
- * Failed tests per observed window, from the window summaries alone.
+ * Exact count of 0-valued (failing) events in one unweighted binary window
+ * summary, or null when the window is weighted or carries non-0/1 values.
  *
  * A value is 0 (fail), 1 (pass) or, in the mock stream, 0.5 (flaky): all in
  * [0, 1]. For such values Σv² ≤ Σv with equality only when every value is 0 or
  * 1 (v² ≤ v on [0, 1], with equality exactly at 0 and 1), so `sumSq === count ×
- * mean` is a test that the count of zeros is exactly count × (1 − mean). A
- * window that fails it, or that carries weights, is not counted from here.
+ * mean` is a test that the count of zeros is exactly count × (1 − mean).
  */
+function windowFailureCount(w: WindowStat): number | null {
+  const sum = w.count * w.mean;
+  if (w.weights !== undefined || Math.abs(w.sumSq - sum) > 1e-9 * Math.max(1, w.count)) {
+    return null;
+  }
+  return Math.round(w.count - sum);
+}
+
 function countFailures(windows: readonly WindowStat[], burstAt: number): FailureCount {
   const counted: FailureWindow[] = [];
   let unjudged = 0;
   for (const w of windows) {
-    const sum = w.count * w.mean;
-    if (w.weights !== undefined || Math.abs(w.sumSq - sum) > 1e-9 * Math.max(1, w.count)) {
+    const failed = windowFailureCount(w);
+    if (failed === null) {
       unjudged++;
       continue;
     }
-    const failed = Math.round(w.count - sum);
     if (failed > 0) counted.push({ windowStart: w.windowStart, windowEnd: w.windowEnd, failed, total: w.count });
   }
   return { burstAt, windows: counted, bursts: counted.filter((x) => x.failed >= burstAt), unjudgedWindows: unjudged };
+}
+
+/**
+ * Relative failure-burst detector (ROADMAP C34).
+ *
+ * Compares each observed window's failure count against the upper-trimmed
+ * distribution of failure counts in the reference windows (`reference.windows`).
+ * Upper trimming drops the top `trimTop` fraction of reference windows so a
+ * recent burst already inside the reference span does not inflate the spread
+ * and mask consecutive bursts. The scale `max(1, sqrt(max(refMean, refVar)))`
+ * combines a Poisson floor, empirical spread, and discrete floor 1 so an
+ * all-pass reference stays usable (`threshold = zThreshold`, catching `>= 4`
+ * at default `zThreshold = 3`) while a dense stream adapts to its baseline.
+ */
+export function countRelativeFailureBursts(
+  obsWindows: readonly WindowStat[],
+  refWindows: readonly WindowStat[],
+  opts: Required<RelativeFailureBurstOptions> = C34_RELATIVE_BURST,
+): RelativeFailureBurst {
+  const counted: FailureWindow[] = [];
+  let unjudgedObs = 0;
+  for (const w of obsWindows) {
+    const failed = windowFailureCount(w);
+    if (failed === null) {
+      unjudgedObs++;
+      continue;
+    }
+    if (failed > 0) counted.push({ windowStart: w.windowStart, windowEnd: w.windowEnd, failed, total: w.count });
+  }
+
+  const refCounts: number[] = [];
+  let unjudgedRef = 0;
+  for (const w of refWindows) {
+    const failed = windowFailureCount(w);
+    if (failed === null) {
+      unjudgedRef++;
+      continue;
+    }
+    refCounts.push(failed);
+  }
+
+  if (refCounts.length < opts.minRefWindows) {
+    return {
+      ...opts,
+      blind: true,
+      refWindows: refCounts.length,
+      refTrimmedWindows: 0,
+      refMean: 0,
+      refScale: 0,
+      threshold: 0,
+      windows: counted,
+      bursts: [],
+      unjudgedWindows: unjudgedObs,
+      unjudgedRefWindows: unjudgedRef,
+    };
+  }
+
+  refCounts.sort((a, b) => a - b);
+  const trimN = Math.max(1, Math.floor(refCounts.length * (1 - opts.trimTop)));
+  let sum = 0;
+  for (let i = 0; i < trimN; i++) sum += refCounts[i]!;
+  const refMean = sum / trimN;
+  let sq = 0;
+  for (let i = 0; i < trimN; i++) {
+    const d = refCounts[i]! - refMean;
+    sq += d * d;
+  }
+  const refVar = trimN > 1 ? sq / (trimN - 1) : 0;
+  const refScale = Math.max(1, Math.sqrt(Math.max(refMean, refVar)));
+  const threshold = refMean + opts.zThreshold * refScale;
+
+  const bursts: RelativeFailureBurstWindow[] = [];
+  for (const w of counted) {
+    if (w.failed >= opts.minFailures && w.failed > threshold) {
+      bursts.push({ ...w, score: (w.failed - refMean) / refScale });
+    }
+  }
+
+  return {
+    ...opts,
+    blind: false,
+    refWindows: refCounts.length,
+    refTrimmedWindows: trimN,
+    refMean,
+    refScale,
+    threshold,
+    windows: counted,
+    bursts,
+    unjudgedWindows: unjudgedObs,
+    unjudgedRefWindows: unjudgedRef,
+  };
 }
 
 // ── Sensitivity (CurationOptions.sensitivityPower) ───────────────────────────

@@ -33,7 +33,7 @@ import { liveSpans } from "./dashboard.js";
 import type { LensEvent } from "./lens.js";
 import type { QCompareParams, QObserveParams } from "./q-registry.js";
 import { RetentionBuffer } from "./retention-buffer.js";
-import type { NullModel, ShapeTag, SnapshotPackage } from "./snapshot-curator.js";
+import type { NullModel, RelativeFailureBurstOptions, ShapeTag, SnapshotPackage } from "./snapshot-curator.js";
 import { WindowHistory } from "./window-history.js";
 import { TEST_STREAM_PROFILE, type StreamProfile } from "./stream-profile.js";
 
@@ -64,6 +64,8 @@ export interface ReplayWiring {
   nullModel?: NullModel;
   /** `CurationOptions.failureCount`: failures in one window that make a burst. Counts only; no score moves. */
   failureCount?: number;
+  /** `CurationOptions.relativeFailureBurst` (ROADMAP C34): relative burst detection against reference windows. */
+  relativeFailureBurst?: boolean | RelativeFailureBurstOptions;
 }
 
 /**
@@ -215,6 +217,7 @@ export function replayThroughShippedWiring(
   const comparator = new Comparator({
     spikeZThreshold: 2.0, includeBaseline: true, sensitivityPower: 0.8, maxTiles: Infinity,
     ...(wiring.failureCount !== undefined ? { failureCount: wiring.failureCount } : {}),
+    ...(wiring.relativeFailureBurst !== undefined ? { relativeFailureBurst: wiring.relativeFailureBurst } : {}),
   }, history);
   const decl: QCompareParams = {
     reference: "preceding",
