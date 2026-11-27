@@ -25,7 +25,7 @@ import { Comparator, assertComparable } from "./comparison.js";
 import { WindowHistory } from "./window-history.js";
 import { resolveStreamProfile } from "./stream-profile.js";
 import { CoarseReplayTrigger, COARSE_REPLAY_VIEW } from "./coarse-replay-trigger.js";
-import { loadProwLive, maxReplaySpeed, parsePersistHistory, prowEventExtractor, type ProwLiveSource, type ProwPersistenceFeed } from "./prow-live.js";
+import { checkSourceProfile, loadProwLive, maxReplaySpeed, parsePersistHistory, prowEventExtractor, type ProwLiveSource, type ProwPersistenceFeed } from "./prow-live.js";
 import { LiveBuildIngestor } from "./ingest-build.js";
 import { describeFlakyHistory, flakyTag, type FlakyHistoryDescription } from "./prow-persist.js";
 import { DEFAULT_PROW_JOBS } from "./prow-import.js";
@@ -76,10 +76,8 @@ const persistHistory: FlakyHistoryDescription | undefined =
   persistHistoryRuns !== undefined
     ? describeFlakyHistory(persistHistoryRuns, LIGHTHOUSE_SOURCE === "ingest" ? "the ingested build stream" : "the recorded Prow stream")
     : undefined;
+checkSourceProfile(LIGHTHOUSE_SOURCE, profile.name);
 if (LIGHTHOUSE_SOURCE === "prow") {
-  if (profile.name !== "test-stream") {
-    throw new Error(`LIGHTHOUSE_SOURCE=prow needs LIGHTHOUSE_PROFILE=test-stream (the "${profile.name}" views cannot score this stream)`);
-  }
   const fromDay = process.env.PROW_REPLAY_FROM;
   const toDay = process.env.PROW_REPLAY_TO;
   if (fromDay === undefined || toDay === undefined) {

@@ -39,7 +39,7 @@ import type { BrainDecision } from "./brain-adapter.js";
 import type { SnapshotPackage } from "./snapshot-curator.js";
 import type { ProwLiveStatus } from "./prow-live.js";
 import type { Announcement, FlakyHistoryDescription } from "./prow-persist.js";
-import { MAX_INGEST_BODY_BYTES, type IngestBuildResult, type IngestJunitMeta, type IngestStatus } from "./ingest-build.js";
+import { DuplicateBuildError, MAX_INGEST_BODY_BYTES, type IngestBuildResult, type IngestJunitMeta, type IngestStatus } from "./ingest-build.js";
 
 /** Surface DashboardServer needs for POST /ingest/build (ROADMAP C30). */
 export interface IngestHandler {
@@ -646,7 +646,7 @@ export class DashboardServer {
       return;
     }
 
-    if (url.startsWith("/ingest/build")) {
+    if (url === "/ingest/build" || url.startsWith("/ingest/build?")) {
       if (req.method === "OPTIONS") {
         res.writeHead(204, {
           "Access-Control-Allow-Origin": "*",
@@ -729,8 +729,9 @@ export class DashboardServer {
           res.end(JSON.stringify(result));
         } catch (err) {
           const validation = err instanceof RangeError;
-          if (!validation) console.error("[dashboard] POST /ingest/build failed:", err);
-          jsonHeaders(res, validation ? 400 : 500);
+          const duplicate = err instanceof DuplicateBuildError;
+          if (!validation && !duplicate) console.error("[dashboard] POST /ingest/build failed:", err);
+          jsonHeaders(res, duplicate ? 409 : validation ? 400 : 500);
           res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
         }
       });

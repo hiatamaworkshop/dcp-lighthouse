@@ -219,6 +219,17 @@ export function parsePersistHistory(raw: string | undefined, source: string): nu
   return n;
 }
 
+/**
+ * LIGHTHOUSE_SOURCE × LIGHTHOUSE_PROFILE (ROADMAP C23 / C30): a test-result stream (`prow`, `ingest`) is
+ * scored only by the "test-stream" profile — the mock profile's 10 s / 1 s views are blind to it (C12), so
+ * the pair would run and say nothing. Refused at boot instead of running blind.
+ */
+export function checkSourceProfile(source: string, profileName: string): void {
+  if ((source === "prow" || source === "ingest") && profileName !== "test-stream") {
+    throw new Error(`LIGHTHOUSE_SOURCE=${source} needs LIGHTHOUSE_PROFILE=test-stream (the "${profileName}" views cannot score this stream)`);
+  }
+}
+
 export function loadProwLive(opts: { dir: string; jobs: readonly string[]; fromDay: string; toDay: string; speed: number; startedAtMs?: number; flakyHistory?: FlakyHistoryOptions }): { source: ProwLiveSource; persistence: ProwPersistenceFeed; builds: number; missing: number } {
   const builds: ProwBuild[] = [];
   let missing = 0;

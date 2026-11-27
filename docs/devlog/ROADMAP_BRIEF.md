@@ -7372,3 +7372,13 @@ Prow の 89 日 (全取り込み) の名乗り 2 件に札を当てると: C13 �
 - 単体・HTTP・SSE 試験 (`server/src/ingest-build.test.ts`、+9 件): JSON / JUnit XML 投入、2 ビルド連続失敗での持続名乗り (`/persistence`・SSE・`flakyHistory`)、`409` / `405` / `400` / `413` ガード、`mock` 不変を固定。
 - 実サーバのスモーク検証 (`LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=ingest LIGHTHOUSE_PERSIST_HISTORY=10 PORT=3099 node dist/index.js`): JUnit XML + JSON の 2 ビルド投入で `events=4`・`failed=2`・`/persistence` 名乗り 1 件 (`flakyHistory.runs=10`)・`/status` 集計・`/demo/start` の `409` を確認。
 - 全テストスイート: **778 / 778 件通過** (0 件失敗)。
+
+## 2026-11-28 (4) — C30 の後追い fix (`ingest` の盲目起動・再送の二重計上・経路の前方一致)
+
+C30 のコードを読み直して 3 点を直した。既定の `mock`・`prow` の出力は不変。
+
+- **`ingest` を `test-stream` 以外で起動できた**: `prow` は起動時に拒否していたが、`ingest` は既定の `mock` プロファイル (10 秒 / 1 秒の窓) でも黙って動き、窓は採点できないまま (C12) 何も言わなかった。「沈黙と盲目を区別する」に反する。判定を `prow-live.ts` の `checkSourceProfile(source, profileName)` に切り出し、`prow` と `ingest` の両方で起動時に落とす。実際に `LIGHTHOUSE_SOURCE=ingest` だけで起動して拒否されることを確認した。
+- **同じビルドの再送を二重に数えた**: `PersistenceDetector` は `scheduledMs` が同じなら順序どおりとして受けるため、CI のリトライが同じ結果を送り直すと事象も失敗も 2 倍になり、1 ビルドの失敗が「連続失敗」として名乗られうる。`LiveBuildIngestor` が `(job, buildId)` を FIFO で記憶し (既定 1 万件、`maxSeenBuilds`)、再送は何も触らずに `DuplicateBuildError` → HTTP `409`。同じ `buildId` でも別ジョブは別のビルドとして受ける。
+- **経路の前方一致**: `url.startsWith("/ingest/build")` が `/ingest/buildX` も受けていたので、`/ingest/build` と `/ingest/build?…` の完全一致に。
+
+試験 781 件 (+3: 再送の拒否・記憶の FIFO・`checkSourceProfile`。HTTP 試験に `409` 再送と `404` を追加)、全 green。

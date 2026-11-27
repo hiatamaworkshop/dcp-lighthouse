@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
 
 import {
+  DuplicateBuildError,
   LiveBuildIngestor,
   MAX_INGEST_BODY_BYTES,
   parseIngestBuildJson,
   parseIngestBuildJunit,
 } from "./ingest-build.js";
-import { parsePersistHistory, prowEventExtractor } from "./prow-live.js";
+import { checkSourceProfile, parsePersistHistory, prowEventExtractor } from "./prow-live.js";
 import { describeFlakyHistory } from "./prow-persist.js";
 import { DashboardServer } from "./dashboard.js";
 import { MockStreamGenerator, type TestEvent } from "./mock-stream-generator.js";
@@ -210,10 +211,46 @@ describe("LiveBuildIngestor (ROADMAP C30)", () => {
     assert.deepEqual(ing.announcements().map((a) => a.testId), ["::b", "::c"]);
   });
 
+  it("refuses a resent (job, buildId) without emitting events or touching counters", () => {
+    const events: ProwEvent[] = [];
+    const ing = new LiveBuildIngestor((e) => events.push(e));
+    const build = { job: "j", buildId: "b1", scheduledMs: 1000, cases: [{ name: "a", status: "failed" }] };
+    ing.ingestJson(build);
+    assert.throws(() => ing.ingestJson(build), DuplicateBuildError);
+    // A CI retry with the same id but a later timestamp is still the same build.
+    assert.throws(() => ing.ingestJson({ ...build, scheduledMs: 2000 }), DuplicateBuildError);
+    assert.equal(events.length, 1);
+    assert.equal(ing.status().builds, 1);
+    assert.equal(ing.status().failed, 1);
+    assert.equal(ing.announcements().length, 0, "a resend must not fake a consecutive failure");
+    // The same id under another job is a different build.
+    ing.ingestJson({ ...build, job: "k" });
+    assert.equal(ing.status().builds, 2);
+  });
+
+  it("forgets the oldest seen build past maxSeenBuilds (FIFO)", () => {
+    const ing = new LiveBuildIngestor(() => {}, { maxSeenBuilds: 2 });
+    for (const [id, ms] of [["b1", 1000], ["b2", 2000], ["b3", 3000]] as const) {
+      ing.ingestJson({ job: "j", buildId: id, scheduledMs: ms, cases: [{ name: "a", status: "passed" }] });
+    }
+    assert.throws(() => ing.ingestJson({ job: "j", buildId: "b3", scheduledMs: 4000, cases: [] }), DuplicateBuildError);
+    ing.ingestJson({ job: "j", buildId: "b1", scheduledMs: 4000, cases: [{ name: "a", status: "passed" }] });
+    assert.equal(ing.status().builds, 4);
+    assert.throws(() => new LiveBuildIngestor(() => {}, { maxSeenBuilds: 0 }), RangeError);
+  });
+
   it("parsePersistHistory accepts ingest alongside prow and still refuses mock", () => {
     assert.equal(parsePersistHistory("10", "ingest"), 10);
     assert.equal(parsePersistHistory("10", "prow"), 10);
     assert.throws(() => parsePersistHistory("10", "mock"), /LIGHTHOUSE_SOURCE=prow/);
+  });
+
+  it("checkSourceProfile refuses prow and ingest without the test-stream profile", () => {
+    assert.throws(() => checkSourceProfile("ingest", "mock"), /LIGHTHOUSE_SOURCE=ingest needs LIGHTHOUSE_PROFILE=test-stream/);
+    assert.throws(() => checkSourceProfile("prow", "mock"), /LIGHTHOUSE_SOURCE=prow needs LIGHTHOUSE_PROFILE=test-stream/);
+    assert.doesNotThrow(() => checkSourceProfile("ingest", "test-stream"));
+    assert.doesNotThrow(() => checkSourceProfile("prow", "test-stream"));
+    assert.doesNotThrow(() => checkSourceProfile("mock", "mock"));
   });
 });
 
@@ -315,7 +352,7 @@ describe("DashboardServer POST /ingest/build (ROADMAP C30)", () => {
     }
   });
 
-  it("enforces HTTP error codes: 409 when inactive, 405 on GET, 400 on bad payloads, 413 on oversize", async () => {
+  it("enforces HTTP error codes: 409 when inactive or resent, 405 on GET, 400 on bad payloads, 404 off-route, 413 on oversize", async () => {
     const inactive = startTestDashboard({ withIngest: false });
     try {
       const r = await fetch(`${inactive.baseUrl}/ingest/build`, {
@@ -357,6 +394,16 @@ describe("DashboardServer POST /ingest/build (ROADMAP C30)", () => {
           })
         ).status,
         400,
+      );
+      const once = JSON.stringify({ job: "dup", buildId: "d1", cases: [{ name: "a", status: "failed" }] });
+      const post = () =>
+        fetch(`${active.baseUrl}/ingest/build`, { method: "POST", headers: { "Content-Type": "application/json" }, body: once });
+      assert.equal((await post()).status, 200);
+      assert.equal((await post()).status, 409, "a resent (job, buildId) returns 409");
+      assert.equal(
+        (await fetch(`${active.baseUrl}/ingest/buildX`, { method: "POST", body: once })).status,
+        404,
+        "only /ingest/build itself is the ingest route",
       );
       const huge = "x".repeat(MAX_INGEST_BODY_BYTES + 1024);
       const bigRes = await fetch(`${active.baseUrl}/ingest/build`, {

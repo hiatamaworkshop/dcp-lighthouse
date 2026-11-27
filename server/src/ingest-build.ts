@@ -20,6 +20,19 @@ import { PersistenceDetector, type Announcement, type FlakyHistoryOptions } from
 export const MAX_INGEST_BODY_BYTES = 10 * 1024 * 1024;
 /** Maximum announcements kept in memory by LiveBuildIngestor (FIFO cap). */
 export const DEFAULT_MAX_INGEST_ANNOUNCEMENTS = 1000;
+/** Maximum (job, buildId) pairs remembered to refuse a resent build (FIFO cap). */
+export const DEFAULT_MAX_SEEN_BUILDS = 10_000;
+
+/**
+ * A build whose (job, buildId) was already ingested — e.g. a CI retry resending the same results.
+ * Counting it again would double the events and could fake a consecutive failure. HTTP maps it to 409.
+ */
+export class DuplicateBuildError extends Error {
+  constructor(readonly job: string, readonly buildId: string) {
+    super(`build ${buildId} of job ${job} was already ingested`);
+    this.name = "DuplicateBuildError";
+  }
+}
 
 export interface IngestCaseInput {
   name: string;
@@ -231,6 +244,7 @@ export interface LiveBuildIngestorOptions {
   flakyHistory?: FlakyHistoryOptions;
   maxPassedCommits?: number;
   maxAnnouncements?: number;
+  maxSeenBuilds?: number;
   now?: () => number;
   onAnnouncement?: (a: Announcement) => void;
 }
@@ -250,6 +264,9 @@ export class LiveBuildIngestor {
   private readonly now: () => number;
   private readonly onAnnouncement?: (a: Announcement) => void;
   private readonly surfaced: Announcement[] = [];
+  private readonly maxSeenBuilds: number;
+  /** (job, buildId) keys in arrival order; a Set keeps insertion order, so the oldest is evicted first. */
+  private readonly seenBuilds = new Set<string>();
   private seq = 0;
   private lastScheduledMs = -Infinity;
   private builds = 0;
@@ -269,6 +286,11 @@ export class LiveBuildIngestor {
       throw new RangeError(`maxAnnouncements must be a positive integer, got ${maxAnn}`);
     }
     this.maxAnnouncements = maxAnn;
+    const maxSeen = opts.maxSeenBuilds ?? DEFAULT_MAX_SEEN_BUILDS;
+    if (!(Number.isInteger(maxSeen) && maxSeen >= 1)) {
+      throw new RangeError(`maxSeenBuilds must be a positive integer, got ${maxSeen}`);
+    }
+    this.maxSeenBuilds = maxSeen;
     this.eventOpts = opts.eventOpts ?? {};
     this.now = opts.now ?? (() => Date.now());
     this.onAnnouncement = opts.onAnnouncement;
@@ -295,10 +317,19 @@ export class LiveBuildIngestor {
   }
 
   ingestBuild(build: ProwBuild): IngestBuildResult {
+    // A resent build is refused before anything is touched: the detector would take an equal
+    // scheduledMs as in order and count its failures a second time.
+    const key = `${build.job}\u0000${build.id}`;
+    if (this.seenBuilds.has(key)) throw new DuplicateBuildError(build.job, build.id);
+
     // Run PersistenceDetector FIRST so an out-of-order scheduledMs throws
     // RangeError before mutating downstream buffers or counters.
     const announcements = this.detector.add(build);
     this.lastScheduledMs = build.scheduledMs;
+    this.seenBuilds.add(key);
+    if (this.seenBuilds.size > this.maxSeenBuilds) {
+      this.seenBuilds.delete(this.seenBuilds.values().next().value!);
+    }
 
     const batch = buildToEvents(build, this.eventOpts);
     let failed = 0;

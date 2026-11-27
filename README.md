@@ -414,7 +414,7 @@ curl -s http://localhost:3001/brain
 |---|---|---|
 | `BRAIN_MODE` | `rule` | `rule` \| `claude` |
 | `LIGHTHOUSE_PROFILE` | `mock` | `mock` \| `test-stream`。`test-stream` は CI の試験結果向け (1 時間窓・参照 30 窓・鮮度ゾーン 34 時間・package に失敗数と同時多発)。モックの 50 件/秒を流すと 34 時間分を保持するのでメモリが要る。未知の名前は起動時に落ちる (`stream-profile.ts`) |
-| `LIGHTHOUSE_SOURCE` | `mock` | `mock` \| `prow` \| `ingest`。`prow` は `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可 (`PROW_REPLAY_FROM` / `PROW_REPLAY_TO` 必須、`PROW_REPLAY_SPEED` 既定 `3600`・上限 `7200`・C26、`PROW_DIR` / `PROW_JOBS` 任意、`prow-live.ts`)。`ingest` は `POST /ingest/build` (JSON または `Content-Type: application/xml` で JUnit XML + `?job=...&commit=...`) を有効化し `RetentionBuffer` と `/persistence` へ流す (C30、`ingest-build.ts`) |
+| `LIGHTHOUSE_SOURCE` | `mock` | `mock` \| `prow` \| `ingest`。`prow` は `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可 (`PROW_REPLAY_FROM` / `PROW_REPLAY_TO` 必須、`PROW_REPLAY_SPEED` 既定 `3600`・上限 `7200`・C26、`PROW_DIR` / `PROW_JOBS` 任意、`prow-live.ts`)。`ingest` も `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可で、`POST /ingest/build` (JSON または `Content-Type: application/xml` で JUnit XML + `?job=...&commit=...`) を有効化し `RetentionBuffer` と `/persistence` へ流す (C30、`ingest-build.ts`)。同じ `job` + `buildId` の再送は `409` |
 | `LIGHTHOUSE_PERSIST_HISTORY` | (未設定) | 正の整数 N。`LIGHTHOUSE_SOURCE=prow` または `ingest` のとき指定可 (それ以外・正の整数以外は起動時に落ちる)。持続の名乗りに試験の直近 N ビルドの失敗数 (`history`) を添え、`/persistence` の `flakyHistory`・SSE の `persistenceHistory` に読み方 (quiet = 失敗 ≤ 10%) と「Treeherder で決めた値で、この流れでは未測定」を載せる (C36)。未設定なら出力は従来のまま |
 | `PORT` | `3001` | ダッシュボード / HTTP API の待受ポート (0〜65535 の整数) |
 | `CLAUDE_BRAIN_MODEL` | `claude-sonnet-5` | 実測済みは `claude-sonnet-5` / `claude-sonnet-4-6` |
