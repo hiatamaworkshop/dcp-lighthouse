@@ -7195,3 +7195,47 @@ user「新しく出した項目を先に評価して」→「yes continue」。C
 - **C33 の起票文の検算**: README 315 行目 (「判断待ち C25」)・350 行目 (「次は C16・C17」) は事実どおり。`run-prow-attribution-report`・`PROW_REPLAY_SPEED`・`/persistence` は状態の行には出ていたので、「抜け」はコマンド一覧と環境変数の表に限った話だった。skill 2 件の指摘は事実どおり
 - **実施**: README の上記 4 か所、`wiki-collector-ops` の description と冒頭を「停止済み・参照専用・OS 再起動の後に再起動しない」に (旧 description は「OS 再起動の後に使う」で、停止済みの収集器を再開させる方向に発動しえた)、`run-lighthouse` に `test-stream` + `prow` の節 (起動・速度の上限 7200 = (観測 3 窓 − 1) × 1 時間 ÷ 1 秒 tick・`/status`・`/persistence`・SSE の `replay`/`persistence`/`failures` 欄・自動 replay と `#regroup`)
 - **`data/` は消さない**: `data/wikimedia/` (4.4 GB) と `data/otel*` (約 2.2 GB) は第 1〜5 段階の判定の生データで、EventStreams は数日しか遡れず再取得できない。空きは 211 GB で C6 の「100 GiB 未満で古い日から」にも当たらない。`server/strategy-b-*` (33 KB) は対策B (2026-08-17) の課金実測の生出力で残骸ではない。古い `*.pid`・空の `collector.err*.log` は影響が無いのでそのまま
+
+## 2026-11-27 — C25: 本物の回帰がある流れを 2 候補で確かめた。データ源は Treeherder `autoland`
+
+user「ok c25 に進んでくれ」。2026-11-25 の方針どおり、2 候補を小標本で取得して比べた (User-Agent は一般名、認証なし)。標本は `data/ci-samples/` (gitignore 済み)。
+
+**1-A Prow の非ゲート定期ジョブ** — ジョブはビルドの頻度だけを見て選んだ (失敗数は選んだ後に初めて見た): `ci-kubernetes-e2e-gci-gce-slow` (26.6 ビルド/日)・`-alpha-features` (13.3)・`-serial` (5.4)。
+2026-11-19〜11-25 の 7 日を既存の `run-prow-import` で `data/ci-samples/prow-nongating/` に取り込み (欠落 0)、`run-prow-truth-report` (C13 の規則のまま) を流した。出力は `data/logs/c25-prow-nongating-truth-20261127.txt`。
+
+| ジョブ | ビルド | 間隔 (中央値) | 実行された試験/ビルド | commit (数ビルドごとに更新) | 失敗 (試験, ビルド) | regression | isolated | flaky |
+|---|---|---|---|---|---|---|---|---|
+| slow | 184 | 0.9 h | 494 | 28 種 | 3 | 0 | 0 | 3 |
+| alpha-features | 93 | 1.9 h | 120 | 26 種 | 0 | 0 | 0 | 0 |
+| serial | 38 | 4.4 h | 318 | 16 種 | 3 | 0 | 1 | 2 |
+
+- 7 日・315 ビルドで失敗は 6 件、回帰は 0。ゲートの 3 ジョブ (C13: 89 日で回帰 1) よりさらに静か。e2e は試験の大半が skipped (slow で 85%) で、1 ビルドに走る試験も少ない
+- 「非ゲートなら回帰が残る」という見込みは外れた。C29 の母数 (本物の回帰) が 2〜4 週間で数件にも届かない見込み
+
+**1-B Mozilla Treeherder `autoland`** — 2026-11-24〜11-25 の 2 日を取得 (`data/ci-samples/treeherder/c25/`、取得 `th-sample.mjs`・集計 `th-analyze.mjs` も同じ場所)。push の `author`・ジョブの `who`・コミットメッセージは**保存の前に落とし**、push には backout かどうかの真偽だけを残した (保存物にメールアドレスの形が 0 件であることを確認)。出力は `data/logs/c25-treeherder-autoland-20261127.txt`。
+
+- 量: push 495 (212・283/日、間隔の中央値 2 分)・revision 1,040・backout の push 53。ジョブ 178,404 (push あたり中央値 129・p90 425・最大 4,632)、tier 1 が 140,552
+- 失敗したジョブ (testfailed・busted・exception) 3,431、うち tier 1 は 2,488。人 (と自動分類) の分類: **fixed by commit 804** (tier 1 は 700)・intermittent 2,137・expected fail 217・infra 5・未分類 (1・6) 258
+- fixed by commit は 185 push・294 ジョブ種に付き、3 push 以内で続くものをまとめると **2 日で 26 の固まり** (まとめ方は集計の後に決めた記述用)。どの固まりも 1〜25 push 後 (多くは 10 以内) に backout の push がある
+- 試験名: tier 1 の testfailed 2,151 件すべての `bug_suggestions` を取り、1,754 件で `TEST-UNEXPECTED-… | <試験のパス>` が取れた (fixed by commit は 621/658)。fixed by commit の試験は 74 種、1 試験あたり失敗したジョブ 中央値 9・push 中央値 3
+- **pass した試験は取れない**。試験単位の名前は失敗の行にしか出ず、ジョブの success は「そのジョブの試験が全部通った」としか言えない (どの試験がそのジョブで走ったかは API に無い。`group_results` は試した push で空)
+- **同じジョブが毎 push 走らない**。tier 1 の試験ジョブ 3,251 種は、それぞれ push の中央値 5% (p90 7%) でしか走らず、同じジョブ種の次の実行は中央値 20 push 後 (試験の選び出し。走らなかった push は「通った」ではなく盲目)
+- 分類の遅れ: 未分類の割合は 11-24 の push で 60/1,408、11-25 で 198/2,023 (取得は 11-27)。2 日経っても 1 割近く残る
+- 過去分: 09-01・09-29・10-13・10-27・11-10 の各日で push とジョブが取れた (C16 では 4-28 の push が空)。2 週間以上は遡って取れる
+- 取得の落とし穴: push の一覧は `count` 1000 が上限 (2000 は HTTP 400)。backout は git 移行後 `Revert "Bug …" for causing …` と書かれ、`Backed out` では 0 件になる (直近 200 push で 13/331 revision が `Revert`)
+
+**選択: Treeherder `autoland`**。理由: 本物の回帰が 2 日で 26 の固まり (1-A は 7 日で 0) あり、人の付けた分類 (fixed by commit / intermittent / infra) が導出に頼らない真値になる。1 本の統合ブランチで push が時系列に並び、backout が回帰の終わりを示す。
+弱点は粒度 (ジョブ単位。試験単位は失敗だけ) と、ジョブが push ごとに飛び飛びにしか走らないこと。Prow (定期 3 ジョブ・非ゲート 3 ジョブ) は回帰の無い流れとして、植え込みの対照に残す。
+
+**C29 の完了条件はこの選択で成り立つか** — 行ごとに確かめた:
+1. 2 週間以上の取り込み・欠落の記録: 成り立つ (過去分あり)。ただし Prow の `days.jsonl` に相当する取り込み器 (取れなかった push を盲目として残す) を `server/src` に作る必要がある。分類の遅れがあるので、取り込む日は数日おいて決着してから (Prow の `PROW_SETTLE_MS` に当たる)
+2. 本番と同じ配線に流す: **そのままでは一部が成り立たない**
+   - C19 (1 時間粗窓 + 同時多発): 成り立つ。事象 = ジョブの結果 (testId = ジョブ種、agentId・area はジョブの platform / group)。1 時間に約 10 push・数千ジョブ
+   - C21/C22 (持続): 規則の「同じ commit で pass が無い」は試験単位では確かめられない (pass が取れない)。ジョブ種単位なら「同じジョブ種の連続する 2 回の実行で落ちる」として測れるが、次の実行が中央値 20 push 後なので遅れの物差しが Prow と違う
+   - C24/C28 (粗窓からの自動グループ別 replay): グループの鍵 (platform か job group か) を測る前に決める必要がある
+   - 真値: 人の分類を使う (fixed by commit = 回帰、intermittent = flaky、infra は別)。未分類は真値なしとして数え、静穏に入れない
+3. 植え込みとの違いの記録: 成り立つ
+
+直しの提案 (C29 の完了条件、user の判断待ち): (a) 事象の単位をジョブにし、試験単位は失敗の名前の補助に留める、(b) 持続の検出はジョブ種単位で「同じジョブ種の連続する実行」に読み替え、遅れは時間と push 数の両方で書く、(c) replay のグループの鍵と真値の対応 (fixed by commit の付いた push・ジョブ種) を計測の前に頭書きに固定する、(d) 取り込み器は Treeherder 用に新設し、tier 1 だけを対象にする。
+
+試験: 742 件 (`snapshot-curator.test.ts` の 1 件が 2 回の `curate()` の `generatedAt` (実時刻) まで比べていて 1 ms ずれると落ちていたので、比較から外した)。

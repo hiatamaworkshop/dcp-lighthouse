@@ -1737,9 +1737,11 @@ describe("failureCount (ROADMAP C19)", () => {
   it("changes nothing else: the package is the one built without the option, plus `failures`", () => {
     const off = new SnapshotCurator({}).curate(observation, reference);
     const on = new SnapshotCurator({ failureCount: 10 }).curate(observation, reference);
-    const { failures, ...rest } = on;
+    // generatedAt is the wall clock of each curate() call: two calls a millisecond apart differ (flaked 2026-11-27).
+    const { failures, generatedAt: _on, ...rest } = on;
+    const { generatedAt: _off, ...offRest } = off;
     assert.ok(failures !== undefined);
-    assert.deepEqual(rest, off);
+    assert.deepEqual(rest, offRest);
     assert.equal("failures" in off, false, "off = byte-identical to a package built before the option existed");
   });
 

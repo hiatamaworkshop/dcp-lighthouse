@@ -25,7 +25,9 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 - **実データ較正期間 (Wikimedia / OTel、第 1〜5 段階) は完了**。収集は 2026-11-17 に停止 (タスク無効化・データ保持)。未使用の保留期間は無い
 - **いまの実データは公開 CI の試験結果 (Kubernetes Prow、`data/prow/`)**。1 時間窓 × 参照 30 窓の構成 (`LIGHTHOUSE_PROFILE=test-stream`)・
   持続の名乗り (`/persistence`)・粗窓発火からのグループ別自動 replay まで本番配線済み (C12〜C28)。`mock` が既定で従来のまま
-- **次**: C25 (本物の回帰があるデータ源を 1 本に決める) → C29 (その流れで名乗りを測る) → C30 (自前テスト用 `POST /ingest/build`、保留)。
+- **C25 (2026-11-27)**: 本物の回帰がある流れは **Mozilla Treeherder `autoland`** に決定 (人の分類 fixed by commit つき、2 日で回帰 26 塊。Prow の非ゲート定期ジョブは 7 日で回帰 0)。
+  ジョブ単位・同じジョブ種は push の約 5% でしか走らない、という制約がある
+- **次**: C29 (Treeherder で名乗りを測る。完了条件の直し 4 点が user の判断待ち) → C30 (自前テスト用 `POST /ingest/build`、保留)。
   整備項目 C31〜C33 は 2026-11-25 に閉じた (C32 は見送り、`data/` は判定の生データとして残す)。詳細は `docs/roadmap.md`
 - 数値・日付つきの経緯を知りたいときは `grep -n "^## " docs/devlog/ROADMAP_BRIEF.md` で見出しを引き、該当節だけ `Read` する (全文は 600 KB 超)
 
