@@ -26,6 +26,7 @@ import { WindowHistory } from "./window-history.js";
 import { resolveStreamProfile } from "./stream-profile.js";
 import { CoarseReplayTrigger, COARSE_REPLAY_VIEW } from "./coarse-replay-trigger.js";
 import { loadProwLive, maxReplaySpeed, parsePersistHistory, prowEventExtractor, type ProwLiveSource, type ProwPersistenceFeed } from "./prow-live.js";
+import { LiveBuildIngestor } from "./ingest-build.js";
 import { describeFlakyHistory, flakyTag, type FlakyHistoryDescription } from "./prow-persist.js";
 import { DEFAULT_PROW_JOBS } from "./prow-import.js";
 import { resolve as resolvePath } from "node:path";
@@ -72,7 +73,9 @@ let prowLive: ProwLiveSource | undefined;
 let prowPersistence: ProwPersistenceFeed | undefined;
 const persistHistoryRuns = parsePersistHistory(process.env.LIGHTHOUSE_PERSIST_HISTORY, LIGHTHOUSE_SOURCE);
 const persistHistory: FlakyHistoryDescription | undefined =
-  persistHistoryRuns !== undefined ? describeFlakyHistory(persistHistoryRuns, "the recorded Prow stream") : undefined;
+  persistHistoryRuns !== undefined
+    ? describeFlakyHistory(persistHistoryRuns, LIGHTHOUSE_SOURCE === "ingest" ? "the ingested build stream" : "the recorded Prow stream")
+    : undefined;
 if (LIGHTHOUSE_SOURCE === "prow") {
   if (profile.name !== "test-stream") {
     throw new Error(`LIGHTHOUSE_SOURCE=prow needs LIGHTHOUSE_PROFILE=test-stream (the "${profile.name}" views cannot score this stream)`);
@@ -99,8 +102,10 @@ if (LIGHTHOUSE_SOURCE === "prow") {
   prowPersistence = loaded.persistence;
   const st = prowLive.status();
   console.log(`[lighthouse] LIGHTHOUSE_SOURCE=prow — ${fromDay}…${toDay}, ${jobs.join(", ")}: ${loaded.builds} builds (${loaded.missing} could not be read), ${st.total} events, ${speed}x`);
+} else if (LIGHTHOUSE_SOURCE === "ingest") {
+  console.log(`[lighthouse] LIGHTHOUSE_SOURCE=ingest — POST /ingest/build (JSON or JUnit XML), profile: ${profile.name}`);
 } else if (LIGHTHOUSE_SOURCE !== "mock") {
-  throw new Error(`LIGHTHOUSE_SOURCE must be "mock" or "prow", got "${LIGHTHOUSE_SOURCE}"`);
+  throw new Error(`LIGHTHOUSE_SOURCE must be "mock", "prow", or "ingest", got "${LIGHTHOUSE_SOURCE}"`);
 }
 
 /**
@@ -219,7 +224,7 @@ if (profile.forecast) {
 
 const generator  = new MockStreamGenerator();
 const adapter    = new TestorAdapter({ windowMs: 5_000 });
-const buffer     = new RetentionBuffer<TestEvent>(prowLive !== undefined ? prowEventExtractor : testEventExtractor, {
+const buffer     = new RetentionBuffer<TestEvent>(LIGHTHOUSE_SOURCE !== "mock" ? prowEventExtractor : testEventExtractor, {
   retentionWindowMs: RETENTION_WINDOW_MS,
   ...(REFERENCE_WINDOW_MS !== undefined ? { referenceWindowMs: REFERENCE_WINDOW_MS } : {}),
   ...(REFERENCE_THINNING_RATIO !== undefined ? { thinningRatio: REFERENCE_THINNING_RATIO } : {}),
@@ -408,17 +413,43 @@ if (BRAIN_MODE === "claude") {
 } else if (BRAIN_MODE !== "rule") {
   throw new Error(`BRAIN_MODE must be "rule" or "claude", got "${BRAIN_MODE}"`);
 }
-// A recorded stream has no per-agent ticks for a Brain to read (that is ROADMAP C24); an LLM deliberating
-// over empty snapshots would only spend.
-if (prowLive !== undefined && BRAIN_MODE !== "rule") {
-  throw new Error(`LIGHTHOUSE_SOURCE=prow runs with BRAIN_MODE=rule only, got "${BRAIN_MODE}"`);
+// A recorded or ingested stream has no per-agent mock ticks for an LLM Brain to read;
+// an LLM deliberating over empty snapshots would only spend.
+if (LIGHTHOUSE_SOURCE !== "mock" && BRAIN_MODE !== "rule") {
+  throw new Error(`LIGHTHOUSE_SOURCE=${LIGHTHOUSE_SOURCE} runs with BRAIN_MODE=rule only, got "${BRAIN_MODE}"`);
 }
+
+const liveIngestor =
+  LIGHTHOUSE_SOURCE === "ingest"
+    ? new LiveBuildIngestor(
+        (ev) => {
+          const lensEv = prowEventExtractor(ev, "test_result:v1");
+          if (lensEv !== null) overlay.push("test_result:v1", lensEv);
+          buffer.observe(ev, "test_result:v1");
+        },
+        {
+          ...(persistHistoryRuns !== undefined ? { flakyHistory: { runs: persistHistoryRuns } } : {}),
+          onAnnouncement: (a) => {
+            const h =
+              a.history !== undefined && persistHistory !== undefined
+                ? ` · history ${a.history.fails}/${a.history.runs} failed (${flakyTag(a.history, persistHistory.runs, persistHistory.quietMax)})`
+                : "";
+            console.log(`[persistence] ${a.job} · ${a.testId} (builds ${a.firstBuildId} → ${a.buildId} at ${new Date(a.atMs).toISOString()})${h}`);
+          },
+        },
+      )
+    : undefined;
 
 const dashboard  = new DashboardServer(
   generator, adapter, brain, registry, comparator, overlay, buffer, brainDiagnostics, forecaster, forecastMonitor,
   prowLive !== undefined ? () => prowLive!.status() : undefined,
-  prowPersistence !== undefined ? () => prowPersistence!.announcements() : undefined,
+  prowPersistence !== undefined
+    ? () => prowPersistence!.announcements()
+    : liveIngestor !== undefined
+      ? () => liveIngestor!.announcements()
+      : undefined,
   persistHistory,
+  liveIngestor,
 );
 
 // Two parallel observation views
@@ -432,8 +463,8 @@ bindPipelineRetention(registry, buffer);
 
 // ── Wire event flow ───────────────────────────────────────────────────────────
 
-// A recorded stream is fed from the tick loop below, on its virtual clock; the mock generator is not the source.
-if (prowLive === undefined) generator.onEvent((event) => {
+// Only mock mode wires the mock generator; prow feeds on a virtual clock and ingest feeds via POST /ingest/build.
+if (LIGHTHOUSE_SOURCE === "mock") generator.onEvent((event) => {
   // Domain adapter
   adapter.push(event);
 
@@ -483,6 +514,8 @@ setInterval(() => {
       console.log(`[persistence] ${a.job} · ${a.testId} (builds ${a.firstBuildId} → ${a.buildId} at ${new Date(a.atMs).toISOString()})${h}`);
     }
     snapshot = { ts: vnow, agents: [], domains: [], touchedBitsThisTick: [] };
+  } else if (liveIngestor !== undefined) {
+    snapshot = { ts: Date.now(), agents: [], domains: [], touchedBitsThisTick: [] };
   } else {
     snapshot = adapter.snapshot();
   }
@@ -666,8 +699,18 @@ setInterval(() => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
-if (prowLive === undefined) generator.start({ rate: 50 });
-dashboard.start({ port: 3001 });
+const PORT = process.env.PORT !== undefined ? Number(process.env.PORT) : 3001;
+if (!(Number.isInteger(PORT) && PORT >= 0 && PORT <= 65535)) {
+  throw new Error(`PORT must be an integer in 0..65535, got "${process.env.PORT}"`);
+}
+if (LIGHTHOUSE_SOURCE === "mock") generator.start({ rate: 50 });
+dashboard.start({ port: PORT });
 
-console.log(`[lighthouse] Phase 1 pilot running. ${prowLive === undefined ? "Generator: 50 evt/s" : "Source: recorded Prow stream"}, profile: ${profile.name}`);
-if (prowLive === undefined) console.log("[lighthouse] POST /demo/start?scenario=AR|CG|RC to run a scenario");
+const sourceLabel =
+  LIGHTHOUSE_SOURCE === "mock"
+    ? "Generator: 50 evt/s"
+    : LIGHTHOUSE_SOURCE === "prow"
+      ? "Source: recorded Prow stream"
+      : "Source: live build ingest (POST /ingest/build)";
+console.log(`[lighthouse] Phase 1 pilot running. ${sourceLabel}, profile: ${profile.name}`);
+if (LIGHTHOUSE_SOURCE === "mock") console.log("[lighthouse] POST /demo/start?scenario=AR|CG|RC to run a scenario");

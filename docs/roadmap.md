@@ -6,6 +6,10 @@
 
 ## 閉じた項目
 
+- [x] C30 自前の試験実行・CI 結果をリアルタイム投入できる入口 (`POST /ingest/build`) を作る (2026-11-28、opt-in `LIGHTHOUSE_SOURCE=ingest` で JSON / JUnit XML 両対応を実装・実サーバで 2 ビルド連続失敗の持続名乗りまで確認。記録は ROADMAP_BRIEF の 2026-11-28 （3） の節)
+  - `ingest-build.ts` (`parseIngestBuildJson`・`parseIngestBuildJunit`・`LiveBuildIngestor`): JSON ビルド形式と JUnit XML (`prow-import.ts` の `parseJunit` を再利用、`node --test --test-reporter=junit` 対応) を `ProwBuild` へ正規化し、`PersistenceDetector` (FIFO 有界 `passedOn`・FIFO 上限 1000 名乗り・任意 `flakyHistory`) と `RetentionBuffer` / `ObservationOverlay` へ供給
+  - `dashboard.ts`・`index.ts`・`prow-live.ts`・`dashboard/app.js`: `POST /ingest/build` (上限 10 MiB・`400`/`405`/`409`/`413` ガード)、`LIGHTHOUSE_PERSIST_HISTORY` の `ingest` 対応、`PORT` 環境変数、`/status`・SSE・バッジの `ingest` 表示。`mock`・`prow` の既定出力は不変
+  - 試験 778 件 (+9、全 green)。実サーバ (`LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=ingest LIGHTHOUSE_PERSIST_HISTORY=10`) で JUnit XML + JSON 2 ビルド投入 → `/persistence` 名乗り・`/status`・`/demo/start` 409 を確認 (ブラウザ描画は `app.js` 構文検査まで)
 - [x] C34 同時多発の名乗りを、固定の件数ではなく参照に対する多さで出す (2026-11-28、opt-in `relativeFailureBurst` で実装・事前登録 3 基準が未使用の確認範囲で 3/3 成立。記録は ROADMAP_BRIEF の 2026-11-28 （2） の節)
   - `snapshot-curator.ts` (`CurationOptions.relativeFailureBurst` / `C34_RELATIVE_BURST` / `countRelativeFailureBursts`)・`prow-replay.ts`: 参照 30 窓の上位 10% トリム平均 + 3×scale (`max(1, sqrt(max(mean, var)))`)・最小 3 件・参照 8 窓未満は `blind: true`。既定 (`mock`・`test-stream`) のパッケージはバイト同一。単体試験 +7 件
   - `run-treeherder-c34-report.ts`: 規則と 3 基準を使用済み探索データ (Treeherder C29 + Prow 89 日) で決め、確認範囲を読む前にコミット (`9950fdb`)
@@ -156,12 +160,4 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 - 案: 参照が全 pass のとき、「n 件中 0 件」から失敗率の上限を持つ帰無で採点する。2 値の窓の厳密な裾 (事前分布つき) の経路が近い形を持つ
 - 先に測ること: その帰無で、平常の flaky (1 万 3 千件に 1 件) が毎回発火しないか。発火するなら、失敗 1 件ではなく「同じ試験が続けて落ちる」を拾う統計が要る
 - C12 の結果 (2026-11-17 (5)): 1 時間窓 × 参照 30 窓では盲目は 1.2% で、この帰無が無くても動く。要るのは短い窓 (10 分以下) を使うときで、急がない
-- 決定になったら完了条件を付ける
-
-### C30. 自前の試験実行・CI 結果をリアルタイム投入できる入口 (`POST /ingest/build`) を作る
-状態: 提案
-
-設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-25 の方針決定 (2 段構えの 2 段目)。C29 で本物の回帰に対する検証フェーズを閉じたあと、普段の開発 (`node --test` の JSON/TAP 出力や JUnit XML、マルチエージェント開発のテスト実行) を HTTP 経由で灯台サーバにリアルタイム投入し、`RetentionBuffer`・`PersistenceDetector`・`Dashboard` で監視できるようにする。
-
-- user が決めること (C29 は 2026-11-27 に閉じた): 投入形式 (ビルド単位 JSON / JUnit XML)、不定期なローカル実行に対して時間窓のままにするか実行単位の窓 (C17 案 c) を併設するか
 - 決定になったら完了条件を付ける

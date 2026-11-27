@@ -45,10 +45,12 @@ connect();
 // ── Render snapshot ─────────────────────────────────────────────────────────
 
 function renderSnapshot(data) {
-  // A recorded stream is being played (ROADMAP C23): the badge says where in the recording it is.
+  // A recorded stream (C23) or live build ingest (C30): the badge says where events come from.
   replayLabel = data.replay
     ? ` · replay ${new Date(data.replay.virtualNow).toISOString().substr(0, 16).replace("T", " ")}Z (${Math.round(100 * data.replay.progress)}%${data.replay.finished ? ", finished" : ""})`
-    : "";
+    : data.ingest
+      ? ` · ingest ${data.ingest.builds} builds (${data.ingest.failed} failed)`
+      : "";
   renderAgents(data.agents ?? []);
   renderDomains(data.domains ?? []);
   renderTiles(data.snapshot);

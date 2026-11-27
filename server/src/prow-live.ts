@@ -211,7 +211,9 @@ export class ProwPersistenceFeed {
  */
 export function parsePersistHistory(raw: string | undefined, source: string): number | undefined {
   if (raw === undefined || raw === "") return undefined;
-  if (source !== "prow") throw new Error(`LIGHTHOUSE_PERSIST_HISTORY needs LIGHTHOUSE_SOURCE=prow (no persistence feed under "${source}")`);
+  if (source !== "prow" && source !== "ingest") {
+    throw new Error(`LIGHTHOUSE_PERSIST_HISTORY needs LIGHTHOUSE_SOURCE=prow or LIGHTHOUSE_SOURCE=ingest (no persistence feed under "${source}")`);
+  }
   const n = Number(raw);
   if (!(Number.isInteger(n) && n >= 1)) throw new Error(`LIGHTHOUSE_PERSIST_HISTORY must be a positive integer (builds of the test to remember), got "${raw}"`);
   return n;

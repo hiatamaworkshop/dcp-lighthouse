@@ -39,6 +39,14 @@ import type { BrainDecision } from "./brain-adapter.js";
 import type { SnapshotPackage } from "./snapshot-curator.js";
 import type { ProwLiveStatus } from "./prow-live.js";
 import type { Announcement, FlakyHistoryDescription } from "./prow-persist.js";
+import { MAX_INGEST_BODY_BYTES, type IngestBuildResult, type IngestJunitMeta, type IngestStatus } from "./ingest-build.js";
+
+/** Surface DashboardServer needs for POST /ingest/build (ROADMAP C30). */
+export interface IngestHandler {
+  ingestJson(body: unknown): IngestBuildResult;
+  ingestJunit(xml: string, meta: IngestJunitMeta): IngestBuildResult;
+  status(): IngestStatus;
+}
 
 export interface DashboardOptions {
   port?: number;
@@ -334,6 +342,11 @@ export class DashboardServer {
      * and that its values were not measured on this stream. Absent: /persistence and SSE are unchanged.
      */
     private readonly persistenceHistory?: FlakyHistoryDescription,
+    /**
+     * Only with LIGHTHOUSE_SOURCE=ingest (ROADMAP C30): real-time build ingestion handler for
+     * POST /ingest/build. Absent under mock and prow, leaving their routes and payloads unchanged.
+     */
+    private readonly ingest?: IngestHandler,
   ) {}
 
   /**
@@ -429,8 +442,9 @@ export class DashboardServer {
     // rather than read back off the LensResult.
     const snapshotPkg = this.livePackage(snapshot.ts);
 
-    // A recorded stream (ROADMAP C23) has no generator to ask: it is flowing until the playback ends.
+    // A recorded stream (ROADMAP C23) or live ingest (ROADMAP C30) has no generator to ask.
     const replay = this.replayStatus?.();
+    const ingest = this.ingest?.status();
     const persistence = this.persistence?.();
     const payload = {
       ts: snapshot.ts,
@@ -438,14 +452,16 @@ export class DashboardServer {
       domains: snapshot.domains,
       snapshot: snapshotPkg,
       qHistory: this.registry.rows().slice(-20),
-      activeScenario: replay !== undefined ? null : this.generator.getCurrentLoad().activeScenario,
+      activeScenario: replay !== undefined || ingest !== undefined ? null : this.generator.getCurrentLoad().activeScenario,
       // Whether events are flowing at all. /demo/stop halts the baseline too,
       // and the dashboard has no other way to tell a stopped stream from a
       // quiet one (2026-09-27 review, finding 3).
-      streamRunning: replay !== undefined ? !replay.finished : this.generator.getCurrentLoad().running,
+      streamRunning: replay !== undefined ? !replay.finished : ingest !== undefined ? true : this.generator.getCurrentLoad().running,
       // Only when a recorded stream is played: where the playback is. Absent otherwise, so the payload of
       // a process that does not select one is unchanged.
       ...(replay !== undefined ? { replay } : {}),
+      // Only when live build ingestion is active (ROADMAP C30). Absent otherwise.
+      ...(ingest !== undefined ? { ingest } : {}),
       // Domain-layer per-test persistence announcements (ROADMAP C22). Absent when not active, so
       // mock payloads are byte-for-byte unchanged.
       ...(persistence !== undefined ? { persistence } : {}),
@@ -630,11 +646,107 @@ export class DashboardServer {
       return;
     }
 
+    if (url.startsWith("/ingest/build")) {
+      if (req.method === "OPTIONS") {
+        res.writeHead(204, {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type",
+        });
+        res.end();
+        return;
+      }
+      if (req.method !== "POST") {
+        jsonHeaders(res, 405);
+        res.end(JSON.stringify({ error: "POST /ingest/build requires HTTP POST" }));
+        return;
+      }
+      if (this.ingest === undefined) {
+        jsonHeaders(res, 409);
+        res.end(JSON.stringify({ error: "build ingestion is not active (start with LIGHTHOUSE_SOURCE=ingest)" }));
+        return;
+      }
+      const handler = this.ingest;
+      const chunks: Buffer[] = [];
+      let totalBytes = 0;
+      let tooLarge = false;
+      req.on("data", (chunk: Buffer | string) => {
+        if (tooLarge) return;
+        const buf = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+        totalBytes += buf.length;
+        if (totalBytes > MAX_INGEST_BODY_BYTES) {
+          tooLarge = true;
+          jsonHeaders(res, 413);
+          res.end(JSON.stringify({ error: `request body exceeds ${MAX_INGEST_BODY_BYTES} bytes` }));
+          req.resume();
+          return;
+        }
+        chunks.push(buf);
+      });
+      req.on("error", (err) => {
+        if (res.headersSent) {
+          res.destroy();
+          return;
+        }
+        jsonHeaders(res, 400);
+        res.end(JSON.stringify({ error: err.message }));
+      });
+      req.on("end", () => {
+        if (tooLarge || res.headersSent) return;
+        const text = Buffer.concat(chunks).toString("utf-8");
+        const q = parseQuery(url);
+        const contentType = String(req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+        const isXml =
+          q.get("format") === "junit" ||
+          contentType === "application/xml" ||
+          contentType === "text/xml" ||
+          contentType === "application/junit+xml";
+        try {
+          let result: IngestBuildResult;
+          if (isXml) {
+            const numParam = (k: string): number | undefined => {
+              const raw = q.get(k);
+              return raw === null || raw === "" ? undefined : Number(raw);
+            };
+            result = handler.ingestJunit(text, {
+              job: q.get("job") ?? "",
+              ...(q.get("buildId") ? { buildId: q.get("buildId")! } : {}),
+              ...(q.get("commit") ? { commit: q.get("commit")! } : {}),
+              ...(numParam("scheduledMs") !== undefined ? { scheduledMs: numParam("scheduledMs") } : {}),
+              ...(numParam("startedMs") !== undefined ? { startedMs: numParam("startedMs") } : {}),
+              ...(numParam("finishedMs") !== undefined ? { finishedMs: numParam("finishedMs") } : {}),
+            });
+          } else {
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(text);
+            } catch (parseErr) {
+              throw new RangeError(`invalid JSON body: ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`);
+            }
+            result = handler.ingestJson(parsed);
+          }
+          jsonHeaders(res, 200);
+          res.end(JSON.stringify(result));
+        } catch (err) {
+          const validation = err instanceof RangeError;
+          if (!validation) console.error("[dashboard] POST /ingest/build failed:", err);
+          jsonHeaders(res, validation ? 400 : 500);
+          res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+        }
+      });
+      return;
+    }
+
     if (url.startsWith("/demo/start")) {
-      // A recorded stream is the source: the scenarios drive the mock generator, which is not running here.
+      // A recorded stream or live ingest is the source: scenarios drive the mock generator, which is not running here.
       if (this.replayStatus?.() !== undefined) {
         jsonHeaders(res, 409);
         res.end(JSON.stringify({ error: "a recorded stream is being played (LIGHTHOUSE_SOURCE=prow); scenarios drive the mock generator" }));
+        return;
+      }
+      if (this.ingest !== undefined) {
+        jsonHeaders(res, 409);
+        res.end(JSON.stringify({ error: "live build ingestion is active (LIGHTHOUSE_SOURCE=ingest); scenarios drive the mock generator" }));
         return;
       }
       const scenario = parseQuery(url).get("scenario") as "AR" | "CG" | "RC" | null;
@@ -880,7 +992,14 @@ export class DashboardServer {
       // to destroy the socket, which reaches the caller as a connection error
       // rather than a 500.
       const replay = this.replayStatus?.();
-      const body = JSON.stringify(replay !== undefined ? { ...this.generator.getCurrentLoad(), running: !replay.finished, replay } : this.generator.getCurrentLoad());
+      const ingest = this.ingest?.status();
+      const body = JSON.stringify(
+        replay !== undefined
+          ? { ...this.generator.getCurrentLoad(), running: !replay.finished, replay }
+          : ingest !== undefined
+            ? { ...this.generator.getCurrentLoad(), running: true, ingest }
+            : this.generator.getCurrentLoad(),
+      );
       jsonHeaders(res);
       res.end(body);
       return;

@@ -21,7 +21,7 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 
 ## 現在地 (2026-11-28)
 
-- **Phase 0 + Phase 1 完了**。L1〜L5 (足場・Brain write surface・ClaudeBrain・レンズチェーン・参照ゾーン) 完了。テスト 761 件
+- **Phase 0 + Phase 1 完了**。L1〜L5 (足場・Brain write surface・ClaudeBrain・レンズチェーン・参照ゾーン) 完了。テスト 778 件
 - **実データ較正期間 (Wikimedia / OTel、第 1〜5 段階) は完了**。収集は 2026-11-17 に停止 (タスク無効化・データ保持)。未使用の保留期間は無い
 - **いまの実データは公開 CI の試験結果 (Kubernetes Prow、`data/prow/`)**。1 時間窓 × 参照 30 窓の構成 (`LIGHTHOUSE_PROFILE=test-stream`)・
   持続の名乗り (`/persistence`)・粗窓発火からのグループ別自動 replay まで本番配線済み (C12〜C28)。`mock` が既定で従来のまま
@@ -32,7 +32,8 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 - **C35 (2026-11-27)**: 持続の名乗りに opt-in の flaky の履歴 (直近 10 回の失敗の割合) を添える。名乗りは落とさない。別の 14 日 (10-24〜11-06) で読む前に固定した 2 判定が成立 (札の差 31 ポイント・quiet の精度 60% 対 全体 48%)
 - **C36 (2026-11-27)**: その履歴を本番の `/persistence`・SSE・dashboard に `LIGHTHOUSE_PERSIST_HISTORY=N` の opt-in で載せた (値は Treeherder で決めたもので Prow では未測定と応答が名乗る)
 - **C34 (2026-11-28)**: 参照 30 窓の失敗数分布に対する相対的な同時多発検出 (`relativeFailureBurst`, opt-in)。上位 10% トリム平均 + 3×scale・最小 3 件・参照 8 窓未満は盲目。確認範囲 (Treeherder 10-24〜11-06 + Prow 89 日) で事前登録した 3 基準が 3/3 成立 (回帰なし失敗窓 4.6% 対 `fixed10` 61.1%、回帰窓との差 +16.9 pt、Prow 10/10・単発 0/379)
-- **次**: 実装中 C30 (自前テスト用 `POST /ingest/build`)。整備項目 C31〜C33 は 2026-11-25 に閉じた (C32 は見送り、`data/` は判定の生データとして残す)。詳細は `docs/roadmap.md`
+- **C30 (2026-11-28)**: 自前の試験結果・CI をリアルタイム投入する `POST /ingest/build` (`LIGHTHOUSE_SOURCE=ingest`, opt-in)。JSON と JUnit XML (`node --test --test-reporter=junit` 対応) を受け取り `RetentionBuffer`・`PersistenceDetector` (`/persistence`・SSE・任意 `LIGHTHOUSE_PERSIST_HISTORY=N`) へ供給
+- **次**: 台帳 `## 予定` は空。未完は条件付きの保留・提案のみ (C7 量チャネル・C11 履歴窓数上限・C18 全 pass 帰無)。整備項目 C31〜C33 は 2026-11-25 に閉じた。詳細は `docs/roadmap.md`
 - 数値・日付つきの経緯を知りたいときは `grep -n "^## " docs/devlog/ROADMAP_BRIEF.md` で見出しを引き、該当節だけ `Read` する (全文は 600 KB 超)
 
 | | dcp-minecraft | dcp-lighthouse |
@@ -53,7 +54,7 @@ npm test                          # tsc && node --test "dist/*.test.js"
 
 - `npm test` は **`dist/*.test.js` を指定**する。ディレクトリ指定だと `dist/index.js` (実サーバ) が起動して `EADDRINUSE` になる
 - `BRAIN_MODE=claude` は **実課金の API 呼び出し**が走る (既定は `rule`)。配線確認は `ANTHROPIC_BASE_URL` のスタブで課金ゼロにできる
-- 環境変数: `LIGHTHOUSE_PROFILE=mock|test-stream` / `LIGHTHOUSE_SOURCE=prow` (記録済み Prow を仮想時計で再生、`PROW_REPLAY_SPEED` は起動時に上限で拒否) / `LIGHTHOUSE_PERSIST_HISTORY=N` (持続の名乗りに flaky の履歴、C36・opt-in)
+- 環境変数: `LIGHTHOUSE_PROFILE=mock|test-stream` / `LIGHTHOUSE_SOURCE=mock|prow|ingest` (`prow` は記録済み Prow を仮想時計再生、`ingest` は `POST /ingest/build` で JSON / JUnit XML 投入) / `LIGHTHOUSE_PERSIST_HISTORY=N` (持続の名乗りに flaky の履歴、C36・opt-in) / `PORT` (既定 3001)
 - ブラウザでの実地確認は skill `run-lighthouse`、Wikimedia 収集器の運用は skill `wiki-collector-ops`
 
 ---
@@ -97,7 +98,7 @@ server/src/      Node.js / TypeScript
   ── ドメイン (Phase 1) ──
   mock-stream-generator.ts / testor-adapter.ts / bitpos.ts
   brain-adapter.ts (interface) / rule-brain.ts (primary) / claude-brain.ts (LLM) / shadow-brain.ts (併走)
-  dashboard.ts (SSE bridge・制御 API) / index.ts (起動) / prow-live.ts (記録流の再生口・持続の名乗り)
+  dashboard.ts (SSE bridge・制御 API・POST /ingest/build) / index.ts (起動) / prow-live.ts (記録流の再生口) / ingest-build.ts (C30 リアルタイム投入)
   ── 実データ (検証ハーネス・レポート。起動口は run-*.ts) ──
   wikimedia-collector.ts / otlp-receiver.ts / otel-flag-schedule.ts / real-data-harness.ts / range-coverage.ts
   prow-{import,events,replay,truth,persist,plant,shape,attribution}.ts   Prow の取り込み・再生・真値導出・植え込み・帰属

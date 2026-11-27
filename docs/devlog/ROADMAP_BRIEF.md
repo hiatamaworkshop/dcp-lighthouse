@@ -7356,3 +7356,19 @@ Prow の 89 日 (全取り込み) の名乗り 2 件に札を当てると: C13 �
   - (ii) Treeherder 回帰あり窓 − 回帰なし失敗窓 ≥ 8 pt: **+16.9 pt (21.5% − 4.6%) → PASS**
   - (iii) Prow 89 日 `>=10` で 10/10 かつ単発失敗で 0/379: **10/10・0/379 → PASS**
   - **総合: PASS (3/3)**。C34 は opt-in (`relativeFailureBurst`) のまま閉じた (`test-stream` の既定や固定 `failures` は不変)。
+
+## 2026-11-28 (3) — C30: 自前の試験実行・CI 結果をリアルタイム投入できる入口 (`POST /ingest/build`・`LIGHTHOUSE_SOURCE=ingest`)
+
+検証フェーズ (C25・C29・C34〜C36) に続き、普段の開発 (`node --test --test-reporter=junit` 等) や CI のテスト結果を HTTP 経由で灯台サーバへリアルタイム投入し、`RetentionBuffer`・`ObservationOverlay`・`PersistenceDetector`・`Dashboard` で監視できる入口を opt-in (`LIGHTHOUSE_SOURCE=ingest`) で実装した。
+
+**構成 (`server/src/ingest-build.ts`・`prow-live.ts`・`dashboard.ts`・`index.ts`・`dashboard/app.js`)**:
+- `parseIngestBuildJson` / `parseIngestBuildJunit`: ビルド単位の JSON (`job`・`cases` 必須、`buildId`・`commit`・`startedMs`・`finishedMs` 任意) と JUnit XML (`prow-import.ts` の `parseJunit` を再利用し Node 24 の `node --test --test-reporter=junit` 出力にも対応) の両方を `ProwBuild` へ正規化。不正形式は `RangeError` (HTTP 400)。
+- `LiveBuildIngestor`: `PersistenceDetector` (FIFO 有界 `passedOn`・任意 `flakyHistory`) を先に評価して順序違反 (`scheduledMs` 逆行) を下流へ流さず拒否し、`buildToEvents` で `test_result:v1` (`ProwEvent`) を `RetentionBuffer` と `ObservationOverlay` へ供給。保持する名乗りも FIFO 上限 (`DEFAULT_MAX_INGEST_ANNOUNCEMENTS = 1000`) で有界化。
+- `POST /ingest/build`: `Content-Type: application/xml` / `text/xml` (または `?format=junit`) で JUnit XML (`?job=...&commit=...&buildId=...`)、それ以外で JSON を受理。上限 10 MiB (`413`)、非稼働時は `409`、`GET` 等は `405`。`LIGHTHOUSE_SOURCE=ingest` 時は `/demo/start` を `409` で拒否し、`/status` と SSE に `ingest` 集計を載せる。`mock`・`prow` 時は出力・挙動とも不変。
+- `parsePersistHistory` (`prow-live.ts`): `LIGHTHOUSE_PERSIST_HISTORY=N` を `prow` に加えて `ingest` でも許可 (説明 `basis` は `"the ingested build stream"` で未測定と明記)。`index.ts` は `PORT` 環境変数にも対応。
+- `dashboard/app.js`: 接続バッジに `ingest <builds> builds (<failed> failed)` を表示 (`node --check` 通過、ブラウザ描画は未確認)。
+
+**検証**:
+- 単体・HTTP・SSE 試験 (`server/src/ingest-build.test.ts`、+9 件): JSON / JUnit XML 投入、2 ビルド連続失敗での持続名乗り (`/persistence`・SSE・`flakyHistory`)、`409` / `405` / `400` / `413` ガード、`mock` 不変を固定。
+- 実サーバのスモーク検証 (`LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=ingest LIGHTHOUSE_PERSIST_HISTORY=10 PORT=3099 node dist/index.js`): JUnit XML + JSON の 2 ビルド投入で `events=4`・`failed=2`・`/persistence` 名乗り 1 件 (`flakyHistory.runs=10`)・`/status` 集計・`/demo/start` の `409` を確認。
+- 全テストスイート: **778 / 778 件通過** (0 件失敗)。

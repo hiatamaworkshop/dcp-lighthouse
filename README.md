@@ -320,9 +320,10 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       回帰を名乗らない名乗りの 52% に flaky の札が付き、回帰を名乗るものには 21%。札が quiet の名乗りの精度は 60% (全体 48%)、quiet か履歴不足の名乗りだけで回帰の捕捉 134/144。読む前に書いた 2 つの判定はどちらも成り立った。詳細は ROADMAP_BRIEF.md 2026-11-27 (3)
 - [x] **本番の持続の名乗りに flaky の履歴** (2026-11-27、C36) — `LIGHTHOUSE_PERSIST_HISTORY=N` の opt-in で `/persistence`・SSE・dashboard に `history` と読み方を載せる。未設定なら出力は従来のまま。値は Treeherder で決めたもので、Prow では未測定と応答に書く
 - [x] **参照に対する相対的な同時多発検出** (2026-11-28、C34) — `CurationOptions.relativeFailureBurst` (opt-in、`SnapshotPackage.relativeFailures`)。参照 30 窓の上位 10% トリム平均 + 3×scale (最小 3 件、参照 8 窓未満は盲目) で流れの規模に依らず外れを拾う。事前登録 3 基準が未使用の確認範囲 (Treeherder 10-24〜11-06 + Prow 89 日) で 3/3 成立 (回帰なし失敗窓 61.1%→4.6%、回帰窓との差 +16.9 pt、Prow `>=10` 10/10・単発 0/379)。既定出力はバイト同一。詳細は ROADMAP_BRIEF.md 2026-11-28 (2)
-- [ ] **次**: C30 (自前の試験結果を流し込む `POST /ingest/build`)。全 pass の参照の帰無 (C18)・量チャネル (C7) は保留。仮想ストリームの常設 (F3) は未着手
+- [x] **自前の試験実行・CI のリアルタイム投入** (2026-11-28、C30) — `LIGHTHOUSE_SOURCE=ingest` (opt-in) で `POST /ingest/build` を有効化 (`ingest-build.ts`)。JSON ビルド形式と JUnit XML (`node --test --test-reporter=junit` 対応) を受け取り、`RetentionBuffer`・`ObservationOverlay`・`PersistenceDetector` (`/persistence`・SSE・任意 `LIGHTHOUSE_PERSIST_HISTORY=N`) へ供給。`mock`・`prow` の既定出力は不変。詳細は ROADMAP_BRIEF.md 2026-11-28 (3)
+- [ ] **次**: 未完は条件付きの保留・提案のみ — 全 pass の参照の帰無 (C18)・量チャネル (C7)・窓要約履歴の窓数上限 (C11)。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 754 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 778 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 
@@ -413,8 +414,9 @@ curl -s http://localhost:3001/brain
 |---|---|---|
 | `BRAIN_MODE` | `rule` | `rule` \| `claude` |
 | `LIGHTHOUSE_PROFILE` | `mock` | `mock` \| `test-stream`。`test-stream` は CI の試験結果向け (1 時間窓・参照 30 窓・鮮度ゾーン 34 時間・package に失敗数と同時多発)。モックの 50 件/秒を流すと 34 時間分を保持するのでメモリが要る。未知の名前は起動時に落ちる (`stream-profile.ts`) |
-| `LIGHTHOUSE_SOURCE` | `mock` | `mock` \| `prow`。`prow` は `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可。取り込み済みの `data/prow/` を仮想時計で本番配線に流す (`PROW_REPLAY_FROM` / `PROW_REPLAY_TO` 必須、`PROW_REPLAY_SPEED` 既定 `3600` = 1 時間/秒、上限はライブの粗窓が窓を飛ばさない速さ (1 時間窓で `7200`、超えると起動時に落ちる・C26)、`PROW_DIR` / `PROW_JOBS` 任意、`prow-live.ts`) |
-| `LIGHTHOUSE_PERSIST_HISTORY` | (未設定) | 正の整数 N。`LIGHTHOUSE_SOURCE=prow` のときのみ指定可 (それ以外・正の整数以外は起動時に落ちる)。持続の名乗りに試験の直近 N ビルドの失敗数 (`history`) を添え、`/persistence` の `flakyHistory`・SSE の `persistenceHistory` に読み方 (quiet = 失敗 ≤ 10%) と「Treeherder で決めた値で、この流れでは未測定」を載せる (C36)。未設定なら出力は従来のまま |
+| `LIGHTHOUSE_SOURCE` | `mock` | `mock` \| `prow` \| `ingest`。`prow` は `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可 (`PROW_REPLAY_FROM` / `PROW_REPLAY_TO` 必須、`PROW_REPLAY_SPEED` 既定 `3600`・上限 `7200`・C26、`PROW_DIR` / `PROW_JOBS` 任意、`prow-live.ts`)。`ingest` は `POST /ingest/build` (JSON または `Content-Type: application/xml` で JUnit XML + `?job=...&commit=...`) を有効化し `RetentionBuffer` と `/persistence` へ流す (C30、`ingest-build.ts`) |
+| `LIGHTHOUSE_PERSIST_HISTORY` | (未設定) | 正の整数 N。`LIGHTHOUSE_SOURCE=prow` または `ingest` のとき指定可 (それ以外・正の整数以外は起動時に落ちる)。持続の名乗りに試験の直近 N ビルドの失敗数 (`history`) を添え、`/persistence` の `flakyHistory`・SSE の `persistenceHistory` に読み方 (quiet = 失敗 ≤ 10%) と「Treeherder で決めた値で、この流れでは未測定」を載せる (C36)。未設定なら出力は従来のまま |
+| `PORT` | `3001` | ダッシュボード / HTTP API の待受ポート (0〜65535 の整数) |
 | `CLAUDE_BRAIN_MODEL` | `claude-sonnet-5` | 実測済みは `claude-sonnet-5` / `claude-sonnet-4-6` |
 | `CLAUDE_BRAIN_INTERVAL_MS` | `15000` | 審議の下限間隔 (支出ガード) |
 
