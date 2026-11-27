@@ -1,9 +1,9 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { ProwLiveSource, ProwPersistenceFeed, maxReplaySpeed, prowEventExtractor } from "./prow-live.js";
+import { ProwLiveSource, ProwPersistenceFeed, maxReplaySpeed, parsePersistHistory, prowEventExtractor } from "./prow-live.js";
 import type { ProwEvent } from "./prow-events.js";
 import type { ProwBuild } from "./prow-import.js";
-import { detectPersistence, type Announcement } from "./prow-persist.js";
+import { describeFlakyHistory, detectPersistence, type Announcement, type FlakyHistoryDescription } from "./prow-persist.js";
 import { SHIPPED_WIRING, replayThroughShippedWiring, wiringFromProfile, type ReplayEvaluation } from "./prow-replay.js";
 import { TEST_STREAM_PROFILE } from "./stream-profile.js";
 import { prowLensEvent } from "./prow-events.js";
@@ -278,6 +278,54 @@ describe("per-test persistence output (ROADMAP C22)", () => {
     } finally {
       await new Promise<void>((resolve) => mockServer.close(() => resolve()));
     }
+  });
+
+  it("C36: without LIGHTHOUSE_PERSIST_HISTORY nothing carries a history (the C22 payloads above are unchanged)", () => {
+    const feed = new ProwPersistenceFeed(builds);
+    feed.advanceTo(T0 + 10 * HOUR);
+    assert.ok(feed.announcements().length > 0 && feed.announcements().every((a) => !("history" in a)));
+  });
+
+  it("C36: with a history the feed matches detectPersistence with it, and /persistence and SSE say how to read it", async () => {
+    const feed = new ProwPersistenceFeed(builds, {}, { runs: 10 });
+    feed.advanceTo(T0 + 10 * HOUR);
+    const expected = detectPersistence(builds, {}, { runs: 10 });
+    assert.deepEqual(feed.announcements(), expected);
+    assert.deepEqual(expected[0]!.history, { runs: 1, fails: 0 }, "T1 passed once on b1 before failing on b2");
+    const desc = describeFlakyHistory(10, "the recorded Prow stream");
+    assert.match(desc.basis, /not measured on the recorded Prow stream/);
+
+    const registry = new QRegistry();
+    const generator = { getCurrentLoad: () => ({ eventsPerSec: 0, running: false, activeScenario: null }) };
+    const buf = { replay: () => ({ window_ms: 1000, windows: [] }), getRetentionWindowMs: () => 120_000 };
+    const dash = new DashboardServer(generator as never, null as never, { reset: () => {} } as never, registry, null as never, new ObservationOverlay(registry), buf, undefined, undefined, undefined, undefined, () => feed.announcements(), desc);
+    const server = dash.start({ port: 0 });
+    await new Promise<void>((resolve) => server.once("listening", resolve));
+    const addr = server.address();
+    const base = `http://127.0.0.1:${typeof addr === "object" && addr !== null ? addr.port : 0}`;
+    try {
+      const res = (await (await fetch(`${base}/persistence`)).json()) as { active: boolean; announcements: Announcement[]; flakyHistory?: FlakyHistoryDescription };
+      assert.deepEqual(res, { active: true, announcements: expected, flakyHistory: desc });
+      const ac = new AbortController();
+      const reader = (await fetch(`${base}/events/snapshot`, { signal: ac.signal })).body!.getReader();
+      await new Promise((r) => setTimeout(r, 20));
+      dash.broadcast({ ts: T0 + 10 * HOUR, agents: [], domains: [], touchedBitsThisTick: [] }, []);
+      const chunk = await reader.read();
+      ac.abort();
+      const payload = JSON.parse(new TextDecoder().decode(chunk.value).split("\n\n")[0]!.replace(/^data: /, "")) as { persistence?: Announcement[]; persistenceHistory?: FlakyHistoryDescription };
+      assert.deepEqual(payload.persistence, expected);
+      assert.deepEqual(payload.persistenceHistory, desc);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("C36: LIGHTHOUSE_PERSIST_HISTORY is refused at boot unless it is a positive integer on the recorded stream", () => {
+    assert.equal(parsePersistHistory(undefined, "mock"), undefined);
+    assert.equal(parsePersistHistory("", "prow"), undefined);
+    assert.equal(parsePersistHistory("10", "prow"), 10);
+    assert.throws(() => parsePersistHistory("10", "mock"), /needs LIGHTHOUSE_SOURCE=prow/);
+    for (const bad of ["0", "-3", "2.5", "ten"]) assert.throws(() => parsePersistHistory(bad, "prow"), /positive integer/);
   });
 });
 

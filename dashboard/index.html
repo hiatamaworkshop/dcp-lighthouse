@@ -112,6 +112,10 @@
     .persist-row { background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--fail); border-radius: 4px; padding: 6px 10px; margin-bottom: 6px; font-size: 11px; }
     .persist-head { font-weight: bold; color: var(--text); overflow-wrap: anywhere; }
     .persist-meta { color: var(--muted); margin-top: 2px; font-size: 10px; }
+    /* Flaky history (ROADMAP C36, opt-in) */
+    .persist-basis { color: var(--muted); font-size: 10px; margin-bottom: 6px; }
+    .persist-history.persist-quiet { color: var(--text); }
+    .persist-history.persist-flaky { color: var(--muted); font-style: italic; }
   </style>
 </head>
 <body>

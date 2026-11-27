@@ -75,6 +75,40 @@ export interface FlakyHistoryOptions {
   runs: number;
 }
 
+/**
+ * C35's reading of a history, chosen on Treeherder autoland's spent C29 range
+ * and confirmed on 2026-10-24…11-06 (ROADMAP_BRIEF.md 2026-11-27 (3)). Not
+ * measured on any other stream: a reader that shows the tag elsewhere says so.
+ */
+export const C35_FLAKY_HISTORY = { runs: 10, quietMax: 0.1 } as const;
+
+export type FlakyTag = "quiet" | "flaky" | "short";
+
+/** quiet = a full history (`runs` builds) failing in ≤ `quietMax` of them · flaky = more · short = fewer than `runs` seen. */
+export function flakyTag(h: FlakyHistory | undefined, runs: number, quietMax: number): FlakyTag {
+  if (h === undefined || h.runs < runs) return "short";
+  return h.fails / h.runs <= quietMax ? "quiet" : "flaky";
+}
+
+/** What a live reader is told about the history it is shown (ROADMAP C36). */
+export interface FlakyHistoryDescription {
+  runs: number;
+  quietMax: number;
+  /** Where these values were chosen and confirmed, and whether this stream was measured. */
+  basis: string;
+}
+
+export function describeFlakyHistory(runs: number, stream: string): FlakyHistoryDescription {
+  const same = runs === C35_FLAKY_HISTORY.runs;
+  return {
+    runs,
+    quietMax: C35_FLAKY_HISTORY.quietMax,
+    basis:
+      `C35 chose and confirmed N=${C35_FLAKY_HISTORY.runs}, F=${C35_FLAKY_HISTORY.quietMax * 100}% on Treeherder autoland; ` +
+      `not measured on ${stream}${same ? "" : `, and N=${runs} was not measured anywhere`}. The tag annotates; no announcement is withheld.`,
+  };
+}
+
 interface TestState {
   /** Outcome of the last build that had this test. */
   last?: { fail: boolean; buildId: string; scheduledMs: number; commit: string | undefined; mixed: boolean };

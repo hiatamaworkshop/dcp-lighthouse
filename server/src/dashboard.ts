@@ -38,7 +38,7 @@ import { floorToWindow, resolveAlign, type LensResult } from "./lens.js";
 import type { BrainDecision } from "./brain-adapter.js";
 import type { SnapshotPackage } from "./snapshot-curator.js";
 import type { ProwLiveStatus } from "./prow-live.js";
-import type { Announcement } from "./prow-persist.js";
+import type { Announcement, FlakyHistoryDescription } from "./prow-persist.js";
 
 export interface DashboardOptions {
   port?: number;
@@ -329,6 +329,11 @@ export class DashboardServer {
      * so mock SSE payloads remain unchanged and GET /persistence reports `active: false`.
      */
     private readonly persistence?: () => readonly Announcement[] | undefined,
+    /**
+     * Only with LIGHTHOUSE_PERSIST_HISTORY (ROADMAP C36): how the announcements' `history` is to be read,
+     * and that its values were not measured on this stream. Absent: /persistence and SSE are unchanged.
+     */
+    private readonly persistenceHistory?: FlakyHistoryDescription,
   ) {}
 
   /**
@@ -444,6 +449,8 @@ export class DashboardServer {
       // Domain-layer per-test persistence announcements (ROADMAP C22). Absent when not active, so
       // mock payloads are byte-for-byte unchanged.
       ...(persistence !== undefined ? { persistence } : {}),
+      // How to read the announcements' `history` (ROADMAP C36). Absent unless LIGHTHOUSE_PERSIST_HISTORY is set.
+      ...(persistence !== undefined && this.persistenceHistory !== undefined ? { persistenceHistory: this.persistenceHistory } : {}),
     };
 
     for (const res of this.snapshotSubs) sseWrite(res, payload);
@@ -856,7 +863,11 @@ export class DashboardServer {
       // Domain-layer per-test persistence announcements (ROADMAP C22). Same
       // convention as /brain: `active: false` rather than 404 when inactive.
       const list = this.persistence?.();
-      const body = JSON.stringify({ active: list !== undefined, announcements: list ?? [] });
+      const body = JSON.stringify({
+        active: list !== undefined,
+        announcements: list ?? [],
+        ...(list !== undefined && this.persistenceHistory !== undefined ? { flakyHistory: this.persistenceHistory } : {}),
+      });
       jsonHeaders(res);
       res.end(body);
       return;

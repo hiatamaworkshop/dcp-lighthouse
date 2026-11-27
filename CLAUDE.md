@@ -21,7 +21,7 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 
 ## 現在地 (2026-11-25)
 
-- **Phase 0 + Phase 1 完了**。L1〜L5 (足場・Brain write surface・ClaudeBrain・レンズチェーン・参照ゾーン) 完了。テスト 757 件
+- **Phase 0 + Phase 1 完了**。L1〜L5 (足場・Brain write surface・ClaudeBrain・レンズチェーン・参照ゾーン) 完了。テスト 761 件
 - **実データ較正期間 (Wikimedia / OTel、第 1〜5 段階) は完了**。収集は 2026-11-17 に停止 (タスク無効化・データ保持)。未使用の保留期間は無い
 - **いまの実データは公開 CI の試験結果 (Kubernetes Prow、`data/prow/`)**。1 時間窓 × 参照 30 窓の構成 (`LIGHTHOUSE_PROFILE=test-stream`)・
   持続の名乗り (`/persistence`)・粗窓発火からのグループ別自動 replay まで本番配線済み (C12〜C28)。`mock` が既定で従来のまま
@@ -30,7 +30,8 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 - **C29 (2026-11-27)**: Treeherder 14 日の本物の回帰 156 件で本番の配線を測った (`data/treeherder/`、`run-treeherder-c29-report`)。ジョブ種の持続が 90% を拾い 3/4 は修正の push より先、ただし名乗りの 4 割は flaky。
   粗窓の下向きタイルは 37%、固定 10 件の同時多発はこの流れでは「忙しい時間」を拾うだけ、OS 系統での帰属は弱い
 - **C35 (2026-11-27)**: 持続の名乗りに opt-in の flaky の履歴 (直近 10 回の失敗の割合) を添える。名乗りは落とさない。別の 14 日 (10-24〜11-06) で読む前に固定した 2 判定が成立 (札の差 31 ポイント・quiet の精度 60% 対 全体 48%)
-- **次**: 判断待ちの提案 C36 (本番の `/persistence` に履歴を載せる)・C34 (同時多発を参照に対する多さで)・C30 (自前テスト用 `POST /ingest/build`)。
+- **C36 (2026-11-27)**: その履歴を本番の `/persistence`・SSE・dashboard に `LIGHTHOUSE_PERSIST_HISTORY=N` の opt-in で載せた (値は Treeherder で決めたもので Prow では未測定と応答が名乗る)
+- **次**: 判断待ちの提案 C34 (同時多発を参照に対する多さで)・C30 (自前テスト用 `POST /ingest/build`)。
   整備項目 C31〜C33 は 2026-11-25 に閉じた (C32 は見送り、`data/` は判定の生データとして残す)。詳細は `docs/roadmap.md`
 - 数値・日付つきの経緯を知りたいときは `grep -n "^## " docs/devlog/ROADMAP_BRIEF.md` で見出しを引き、該当節だけ `Read` する (全文は 600 KB 超)
 
@@ -52,7 +53,7 @@ npm test                          # tsc && node --test "dist/*.test.js"
 
 - `npm test` は **`dist/*.test.js` を指定**する。ディレクトリ指定だと `dist/index.js` (実サーバ) が起動して `EADDRINUSE` になる
 - `BRAIN_MODE=claude` は **実課金の API 呼び出し**が走る (既定は `rule`)。配線確認は `ANTHROPIC_BASE_URL` のスタブで課金ゼロにできる
-- 環境変数: `LIGHTHOUSE_PROFILE=mock|test-stream` / `LIGHTHOUSE_SOURCE=prow` (記録済み Prow を仮想時計で再生、`PROW_REPLAY_SPEED` は起動時に上限で拒否)
+- 環境変数: `LIGHTHOUSE_PROFILE=mock|test-stream` / `LIGHTHOUSE_SOURCE=prow` (記録済み Prow を仮想時計で再生、`PROW_REPLAY_SPEED` は起動時に上限で拒否) / `LIGHTHOUSE_PERSIST_HISTORY=N` (持続の名乗りに flaky の履歴、C36・opt-in)
 - ブラウザでの実地確認は skill `run-lighthouse`、Wikimedia 収集器の運用は skill `wiki-collector-ops`
 
 ---

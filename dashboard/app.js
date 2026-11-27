@@ -52,7 +52,7 @@ function renderSnapshot(data) {
   renderAgents(data.agents ?? []);
   renderDomains(data.domains ?? []);
   renderTiles(data.snapshot);
-  renderPersistence(data.persistence);
+  renderPersistence(data.persistence, data.persistenceHistory);
   renderQHistory(data.qHistory ?? []);
   renderActiveScenario(data.activeScenario ?? null);
   // `=== false`, not falsy: a server that predates the field sends nothing,
@@ -216,8 +216,23 @@ function renderFailures(noteId, gridId, pkg) {
 // Separate from SnapshotPackage: this detector reads build boundaries and
 // commits (prow-persist.ts). Absent under the mock profile, so the panel stays
 // hidden there.
+//
+// With LIGHTHOUSE_PERSIST_HISTORY (ROADMAP C36) each announcement carries the
+// test's recent failure history and the payload says how to read it (and that
+// its values were not measured on this stream). Without it, nothing changes.
 
-function renderPersistence(announcements) {
+function historyTag(h, desc) {
+  if (!h || h.runs < desc.runs) return "short";
+  return h.fails / h.runs <= desc.quietMax ? "quiet" : "flaky";
+}
+
+function historyHtml(a, desc) {
+  if (!desc || !a.history) return "";
+  const tag = historyTag(a.history, desc);
+  return `<div class="persist-meta persist-history persist-${tag}">${tag} · failed in ${a.history.fails} of the last ${a.history.runs} build(s) before this run${tag === "short" ? ` (fewer than ${desc.runs}: no history to read)` : ""}</div>`;
+}
+
+function renderPersistence(announcements, historyDesc) {
   const panel = document.getElementById("panel-persistence");
   const list = document.getElementById("persistence-list");
   if (!panel || !list) return;
@@ -227,14 +242,18 @@ function renderPersistence(announcements) {
     return;
   }
   panel.hidden = false;
+  const basis = historyDesc
+    ? `<div class="persist-basis">flaky history: quiet = the last ${historyDesc.runs} builds failed in ≤ ${Math.round(historyDesc.quietMax * 100)}% · ${esc(historyDesc.basis)}</div>`
+    : "";
   if (announcements.length === 0) {
-    list.innerHTML = '<span style="color:var(--muted);font-size:11px">No persistent per-test failure announced yet.</span>';
+    list.innerHTML = basis + '<span style="color:var(--muted);font-size:11px">No persistent per-test failure announced yet.</span>';
     return;
   }
-  list.innerHTML = [...announcements].reverse().map((a) => `
+  list.innerHTML = basis + [...announcements].reverse().map((a) => `
     <div class="persist-row">
       <div class="persist-head">${esc(a.job)} · ${esc(a.testId)}</div>
       <div class="persist-meta">announced ${esc(utcClock(a.atMs))} UTC (build ${esc(a.buildId)}) · first failure ${esc(utcClock(a.firstMs))} UTC (build ${esc(a.firstBuildId)})</div>
+      ${historyHtml(a, historyDesc)}
     </div>`).join("");
 }
 

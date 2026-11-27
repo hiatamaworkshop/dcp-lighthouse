@@ -25,7 +25,8 @@ import { Comparator, assertComparable } from "./comparison.js";
 import { WindowHistory } from "./window-history.js";
 import { resolveStreamProfile } from "./stream-profile.js";
 import { CoarseReplayTrigger, COARSE_REPLAY_VIEW } from "./coarse-replay-trigger.js";
-import { loadProwLive, maxReplaySpeed, prowEventExtractor, type ProwLiveSource, type ProwPersistenceFeed } from "./prow-live.js";
+import { loadProwLive, maxReplaySpeed, parsePersistHistory, prowEventExtractor, type ProwLiveSource, type ProwPersistenceFeed } from "./prow-live.js";
+import { describeFlakyHistory, flakyTag, type FlakyHistoryDescription } from "./prow-persist.js";
 import { DEFAULT_PROW_JOBS } from "./prow-import.js";
 import { resolve as resolvePath } from "node:path";
 import { Forecaster } from "./forecast.js";
@@ -59,6 +60,9 @@ const profile = resolveStreamProfile(process.env.LIGHTHOUSE_PROFILE);
  *
  * PROW_REPLAY_SPEED: virtual seconds per real second (default 3600 = an hour of the recording per second).
  * PROW_DIR: where the days were imported (default ../data/prow); PROW_JOBS: comma-separated (default the three C17 jobs).
+ * LIGHTHOUSE_PERSIST_HISTORY=N (ROADMAP C36, opt-in): each persistence announcement carries the test's last N
+ * outcomes before its failing run, and /persistence and SSE say how to read it — with values chosen on
+ * Treeherder (C35), not measured on Prow. Unset: the announcements and payloads are exactly as before.
  * Every misconfiguration throws here, at boot, as an unknown profile does.
  */
 /** Real ms between ticks of the loop below (Brain, dashboard broadcast, recorded-stream feed). */
@@ -66,6 +70,9 @@ const TICK_MS = 1000;
 const LIGHTHOUSE_SOURCE = process.env.LIGHTHOUSE_SOURCE ?? "mock";
 let prowLive: ProwLiveSource | undefined;
 let prowPersistence: ProwPersistenceFeed | undefined;
+const persistHistoryRuns = parsePersistHistory(process.env.LIGHTHOUSE_PERSIST_HISTORY, LIGHTHOUSE_SOURCE);
+const persistHistory: FlakyHistoryDescription | undefined =
+  persistHistoryRuns !== undefined ? describeFlakyHistory(persistHistoryRuns, "the recorded Prow stream") : undefined;
 if (LIGHTHOUSE_SOURCE === "prow") {
   if (profile.name !== "test-stream") {
     throw new Error(`LIGHTHOUSE_SOURCE=prow needs LIGHTHOUSE_PROFILE=test-stream (the "${profile.name}" views cannot score this stream)`);
@@ -87,7 +94,7 @@ if (LIGHTHOUSE_SOURCE === "prow") {
     );
   }
   const jobs = (process.env.PROW_JOBS ?? DEFAULT_PROW_JOBS.join(",")).split(",").filter((j) => j !== "");
-  const loaded = loadProwLive({ dir: resolvePath(process.env.PROW_DIR ?? "../data/prow"), jobs, fromDay, toDay, speed });
+  const loaded = loadProwLive({ dir: resolvePath(process.env.PROW_DIR ?? "../data/prow"), jobs, fromDay, toDay, speed, ...(persistHistoryRuns !== undefined ? { flakyHistory: { runs: persistHistoryRuns } } : {}) });
   prowLive = loaded.source;
   prowPersistence = loaded.persistence;
   const st = prowLive.status();
@@ -411,6 +418,7 @@ const dashboard  = new DashboardServer(
   generator, adapter, brain, registry, comparator, overlay, buffer, brainDiagnostics, forecaster, forecastMonitor,
   prowLive !== undefined ? () => prowLive!.status() : undefined,
   prowPersistence !== undefined ? () => prowPersistence!.announcements() : undefined,
+  persistHistory,
 );
 
 // Two parallel observation views
@@ -471,7 +479,8 @@ setInterval(() => {
     prowLive.advanceTo(vnow, (e) => buffer.observe(e, "test_result:v1"));
     const newly = prowPersistence?.advanceTo(vnow) ?? [];
     for (const a of newly) {
-      console.log(`[persistence] ${a.job} · ${a.testId} (builds ${a.firstBuildId} → ${a.buildId} at ${new Date(a.atMs).toISOString()})`);
+      const h = a.history !== undefined && persistHistory !== undefined ? ` · history ${a.history.fails}/${a.history.runs} failed (${flakyTag(a.history, persistHistory.runs, persistHistory.quietMax)})` : "";
+      console.log(`[persistence] ${a.job} · ${a.testId} (builds ${a.firstBuildId} → ${a.buildId} at ${new Date(a.atMs).toISOString()})${h}`);
     }
     snapshot = { ts: vnow, agents: [], domains: [], touchedBitsThisTick: [] };
   } else {

@@ -318,7 +318,8 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
       粗窓の下向きタイルは 37% (参照の窓の半分に回帰が混ざり物差しが鈍る)、固定 10 件の同時多発は回帰の無い失敗窓の 57% でも発火、OS 系統での自動 replay の帰属は exact 11/163。詳細は ROADMAP_BRIEF.md 2026-11-27 (2)
 - [x] **持続の名乗りに flaky の履歴を添える** (2026-11-27、C35) — 名乗りは落とさず、そのジョブ種の直近 10 回の失敗の割合を添える (opt-in)。値は使用済みの C29 範囲で決めて固定し、別の 14 日 (10-24〜11-06・回帰 161 件) で 1 回だけ確認。
       回帰を名乗らない名乗りの 52% に flaky の札が付き、回帰を名乗るものには 21%。札が quiet の名乗りの精度は 60% (全体 48%)、quiet か履歴不足の名乗りだけで回帰の捕捉 134/144。読む前に書いた 2 つの判定はどちらも成り立った。詳細は ROADMAP_BRIEF.md 2026-11-27 (3)
-- [ ] **次**: 判断待ちの提案 — C36 (本番の `/persistence` に flaky の履歴を載せる)・C34 (同時多発を参照に対する多さで名乗る)・C30 (自前の試験結果を流し込む `POST /ingest/build`)。全 pass の参照の帰無 (C18)・量チャネル (C7) は保留。仮想ストリームの常設 (F3) は未着手
+- [x] **本番の持続の名乗りに flaky の履歴** (2026-11-27、C36) — `LIGHTHOUSE_PERSIST_HISTORY=N` の opt-in で `/persistence`・SSE・dashboard に `history` と読み方を載せる。未設定なら出力は従来のまま。値は Treeherder で決めたもので、Prow では未測定と応答に書く
+- [ ] **次**: 判断待ちの提案 — C34 (同時多発を参照に対する多さで名乗る)・C30 (自前の試験結果を流し込む `POST /ingest/build`)。全 pass の参照の帰無 (C18)・量チャネル (C7) は保留。仮想ストリームの常設 (F3) は未着手
 
 現在テスト計 754 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
@@ -411,6 +412,7 @@ curl -s http://localhost:3001/brain
 | `BRAIN_MODE` | `rule` | `rule` \| `claude` |
 | `LIGHTHOUSE_PROFILE` | `mock` | `mock` \| `test-stream`。`test-stream` は CI の試験結果向け (1 時間窓・参照 30 窓・鮮度ゾーン 34 時間・package に失敗数と同時多発)。モックの 50 件/秒を流すと 34 時間分を保持するのでメモリが要る。未知の名前は起動時に落ちる (`stream-profile.ts`) |
 | `LIGHTHOUSE_SOURCE` | `mock` | `mock` \| `prow`。`prow` は `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可。取り込み済みの `data/prow/` を仮想時計で本番配線に流す (`PROW_REPLAY_FROM` / `PROW_REPLAY_TO` 必須、`PROW_REPLAY_SPEED` 既定 `3600` = 1 時間/秒、上限はライブの粗窓が窓を飛ばさない速さ (1 時間窓で `7200`、超えると起動時に落ちる・C26)、`PROW_DIR` / `PROW_JOBS` 任意、`prow-live.ts`) |
+| `LIGHTHOUSE_PERSIST_HISTORY` | (未設定) | 正の整数 N。`LIGHTHOUSE_SOURCE=prow` のときのみ指定可 (それ以外・正の整数以外は起動時に落ちる)。持続の名乗りに試験の直近 N ビルドの失敗数 (`history`) を添え、`/persistence` の `flakyHistory`・SSE の `persistenceHistory` に読み方 (quiet = 失敗 ≤ 10%) と「Treeherder で決めた値で、この流れでは未測定」を載せる (C36)。未設定なら出力は従来のまま |
 | `CLAUDE_BRAIN_MODEL` | `claude-sonnet-5` | 実測済みは `claude-sonnet-5` / `claude-sonnet-4-6` |
 | `CLAUDE_BRAIN_INTERVAL_MS` | `15000` | 審議の下限間隔 (支出ガード) |
 

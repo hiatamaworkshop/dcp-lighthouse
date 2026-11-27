@@ -134,6 +134,9 @@ LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=prow \
   3600 で 1 秒 = 記録の 1 時間。3 週分なら約 8 分で流れ切る
 - `test-stream` は鮮度ゾーン 34 時間なのでメモリを食う。89 日を一度に流すより 1〜3 週に分ける
 - `LIGHTHOUSE_SOURCE=prow` は `LIGHTHOUSE_PROFILE=test-stream` 無しでは起動時に落ちる (mock の 10 s / 1 s 窓はこの流れに盲目、C12)
+- `LIGHTHOUSE_PERSIST_HISTORY=10` (C36、任意): 持続の名乗りに直近 10 ビルドの失敗数 (`history`) を添え、`/persistence` に `flakyHistory`・SSE に
+  `persistenceHistory` (読み方と「Treeherder で決めた値で Prow では未測定」) が載る。未設定なら従来どおり。`prow` 以外や正の整数以外は起動時に落ちる。
+  名乗りが出る範囲の例: `PROW_REPLAY_FROM=2026-11-02 PROW_REPLAY_TO=2026-11-04` (11-04 14:14Z に e2e の 1 件、history 2/10 = flaky)
 
 確かめる点 (`/demo/start` は使わない):
 

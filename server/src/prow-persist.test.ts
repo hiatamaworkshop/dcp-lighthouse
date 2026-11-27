@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { ProwBuild } from "./prow-import.js";
-import { detectPersistence } from "./prow-persist.js";
+import { C35_FLAKY_HISTORY, describeFlakyHistory, detectPersistence, flakyTag } from "./prow-persist.js";
 import { deriveEpisodes } from "./prow-truth.js";
 
 const T0 = Date.parse("2026-11-01T00:00:00Z");
@@ -95,6 +95,16 @@ describe("detectPersistence — the rule fixed on 2026-11-17 (C21)", () => {
     assert.deepEqual(a[0]!.history, { runs: 0, fails: 0 });
     assert.throws(() => detectPersistence([], {}, { runs: 0 }), RangeError);
     assert.throws(() => detectPersistence([], {}, { runs: 2.5 }), RangeError);
+  });
+
+  it("C35/C36 flakyTag: short below N runs, quiet at ≤ F, flaky above; the description names where it was measured", () => {
+    const { runs, quietMax } = C35_FLAKY_HISTORY;
+    assert.equal(flakyTag(undefined, runs, quietMax), "short");
+    assert.equal(flakyTag({ runs: 9, fails: 0 }, runs, quietMax), "short");
+    assert.equal(flakyTag({ runs: 10, fails: 1 }, runs, quietMax), "quiet");
+    assert.equal(flakyTag({ runs: 10, fails: 2 }, runs, quietMax), "flaky");
+    assert.match(describeFlakyHistory(10, "X").basis, /Treeherder autoland; not measured on X\. /);
+    assert.match(describeFlakyHistory(20, "X").basis, /N=20 was not measured anywhere/);
   });
 
   it("everything C13 calls regression is announced", () => {

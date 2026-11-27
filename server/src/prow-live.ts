@@ -17,7 +17,7 @@
 
 import { loadProwRange, type ProwBuild } from "./prow-import.js";
 import { buildsToEvents, prowLensEvent, type ProwEvent, type ProwEventOptions } from "./prow-events.js";
-import { PersistenceDetector, type Announcement } from "./prow-persist.js";
+import { PersistenceDetector, type Announcement, type FlakyHistoryOptions } from "./prow-persist.js";
 import type { EventExtractor } from "./retention-buffer.js";
 import type { TestEvent } from "./mock-stream-generator.js";
 
@@ -165,9 +165,9 @@ export class ProwPersistenceFeed {
   private pending: Announcement[] = [];
   private readonly surfaced: Announcement[] = [];
 
-  constructor(builds: readonly ProwBuild[], opts: ProwEventOptions = {}) {
+  constructor(builds: readonly ProwBuild[], opts: ProwEventOptions = {}, flakyHistory?: FlakyHistoryOptions) {
     this.builds = [...builds].sort((a, b) => a.scheduledMs - b.scheduledMs);
-    this.detector = new PersistenceDetector(opts);
+    this.detector = new PersistenceDetector(opts, flakyHistory);
   }
 
   /**
@@ -204,7 +204,20 @@ export class ProwPersistenceFeed {
  * The events of imported days, ready to play. Refuses what loadProwRange refuses (a day never imported
  * would read as a day without tests), and a range that holds no event.
  */
-export function loadProwLive(opts: { dir: string; jobs: readonly string[]; fromDay: string; toDay: string; speed: number; startedAtMs?: number }): { source: ProwLiveSource; persistence: ProwPersistenceFeed; builds: number; missing: number } {
+/**
+ * LIGHTHOUSE_PERSIST_HISTORY (ROADMAP C36): unset → undefined (announcements exactly as before). Set → the
+ * history length N for the recorded stream's persistence feed. Refused at boot when it is not a positive
+ * integer, or when no recorded stream is played (there is no persistence feed to carry it).
+ */
+export function parsePersistHistory(raw: string | undefined, source: string): number | undefined {
+  if (raw === undefined || raw === "") return undefined;
+  if (source !== "prow") throw new Error(`LIGHTHOUSE_PERSIST_HISTORY needs LIGHTHOUSE_SOURCE=prow (no persistence feed under "${source}")`);
+  const n = Number(raw);
+  if (!(Number.isInteger(n) && n >= 1)) throw new Error(`LIGHTHOUSE_PERSIST_HISTORY must be a positive integer (builds of the test to remember), got "${raw}"`);
+  return n;
+}
+
+export function loadProwLive(opts: { dir: string; jobs: readonly string[]; fromDay: string; toDay: string; speed: number; startedAtMs?: number; flakyHistory?: FlakyHistoryOptions }): { source: ProwLiveSource; persistence: ProwPersistenceFeed; builds: number; missing: number } {
   const builds: ProwBuild[] = [];
   let missing = 0;
   for (const job of opts.jobs) {
@@ -217,6 +230,6 @@ export function loadProwLive(opts: { dir: string; jobs: readonly string[]; fromD
   const fromMs = dayStartMs(opts.fromDay);
   const toMs = dayStartMs(opts.toDay) + 86_400_000;
   const source = new ProwLiveSource({ events, fromMs, toMs, speed: opts.speed, ...(opts.startedAtMs !== undefined ? { startedAtMs: opts.startedAtMs } : {}) });
-  const persistence = new ProwPersistenceFeed(builds);
+  const persistence = new ProwPersistenceFeed(builds, {}, opts.flakyHistory);
   return { source, persistence, builds: builds.length, missing };
 }

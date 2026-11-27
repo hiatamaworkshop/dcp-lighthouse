@@ -6,6 +6,11 @@
 
 ## 閉じた項目
 
+- [x] C36 本番の `/persistence` の名乗りに flaky の履歴を載せる (2026-11-27、user 決定: 環境変数で opt-in・未測定と名乗る。記録は ROADMAP_BRIEF の 2026-11-27 （4） の節)
+  - `LIGHTHOUSE_PERSIST_HISTORY=N` (`parsePersistHistory`、`prow` 以外・正の整数以外は起動時に拒否) → `ProwPersistenceFeed` に `flakyHistory`。`/persistence` に `flakyHistory`、SSE に `persistenceHistory` (N・F=10%・「C35 は Treeherder で決めて確かめた値で、この流れでは未測定」)、dashboard の各名乗りに quiet / flaky / short の札
+  - 未設定なら `/persistence`・SSE・起動ログは従来のまま (C22 の試験は無修正で通る)。試験 761 件 (+4)
+  - 実サーバ (Prow 11-02〜11-04、7200 倍): 付けたとき e2e の 1 件に `history` 2/10 (flaky)、付けないとき従来の形。Prow の 89 日の名乗り 2 件は、C13 の回帰 = 2/10 (flaky)・C13 の flaky = 1/10 (quiet) で札と真値が逆 (2 件なので何も言えない)
+  - dashboard の描画はブラウザでは見ていない (app.js の構文と SSE の中身まで)
 - [x] C35 持続の名乗りに、ジョブ種 (試験) ごとの flaky の履歴を持たせる (2026-11-27、user 決定: 名乗りは落とさず度合いを添える。確認範囲で読む前の 2 判定はどちらも成り立った。記録は ROADMAP_BRIEF の 2026-11-27 （3） の節)
   - `prow-persist.ts`: `PersistenceDetector` の opt-in `flakyHistory: { runs: N }`。名乗りに、連続失敗が始まる前の直近 ≤ N 回の結果 (`history: { runs, fails }`) を添える。N 未満は `runs` < N のまま名乗る。オプション無しの出力は C29 のレポートの再実行でバイト一致。試験 757 件 (+3)
   - `run-treeherder-c35-report.ts`: quiet (直近 10 回の失敗 ≤ 10%)・flaky・short に分けた精度と回帰の捕捉。N・F と判定の線は使用済みの C29 範囲で決め、確認範囲を読む前にコミット (`e2fc395`)
@@ -164,15 +169,6 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 
 - user が決めること: 同時多発を参照 (30 窓) の失敗数の分布に対する外れとして名乗る形に替えるか、固定の件数を残して別の欄を足すか。既定 (`mock`・`test-stream` の出力) はバイト同一に保つ opt-in にするか
 - 先に測ること: 替えた名乗りの、回帰の無い窓での発火率 (C29 の出力と同じ対照) と、Prow の 89 日で C19 の 10/10 を保つか
-- 規則は測る前に固定する。C29 の 14 日は使用済みの探索データとして扱い、確認には別の範囲を取り込む
-- 決定になったら完了条件を付ける
-
-### C36. 本番の `/persistence` の名乗りに flaky の履歴を載せる
-状態: 提案
-
-設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-27 (3)。C35 で、名乗りに添えた「直近 10 回の失敗の割合」の札が、確認範囲でも回帰と intermittent の連続を分けた (札の差 31 ポイント・quiet か short で捕捉の 93%)。読む前に決めた手順どおり、本番の出力に載せることを提案する。
-
-- user が決めること: `test-stream` の `ProwPersistenceFeed`・`GET /persistence`・SSE の `persistence` 欄・dashboard パネルに `history` を載せるか。既定の出力をバイト同一に保つため、プロファイルの別名 (または環境変数) で opt-in にするか
-- 注意: Prow の 3 ジョブは 1 時間ごとで、10 回 = 約 10 時間。Treeherder で決めた N=10・F=10% をそのまま使うか、Prow では測っていないことを名乗るか
-- グループ別 replay の鍵 (C29 で exact 11/163) の見直し: C35 は持続 (ジョブ種単位の名乗りで、帰属を使わない) だけを扱い、鍵については何も分かっていない。要るかは C34 の後に決める
+- 規則は測る前に固定する。C29 の 14 日は使用済みの探索データとして扱い、確認には別の範囲を取り込む。C35 の確認に使った 10-24〜11-06 も持続については使用済み (同時多発はまだ読んでいない)
+- グループ別 replay の鍵 (C29 で exact 11/163) の見直しが要るかは、この項目の後に決める (C35・C36 は持続だけを扱い、鍵については何も分かっていない)
 - 決定になったら完了条件を付ける

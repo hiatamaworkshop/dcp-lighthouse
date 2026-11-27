@@ -7303,3 +7303,17 @@ user の決定 (選択肢から): C35 を先に・名乗りは落とさず度合
 - 遅れは変わらない: quiet か short で拾う回帰も、最初の失敗から中央値 0.2 時間・9 push。修正の push より先は 96/131
 
 次: 頭書きで決めたとおり、本番の `/persistence` に `history` を載せる項目を C36 として起票した (提案・opt-in)。Prow (1 時間ごと) では N=10 は約 10 時間で、そこでは測っていない。
+
+## 2026-11-27 (4) — C36: 持続の名乗りの flaky の履歴を、本番の `/persistence`・SSE・dashboard に opt-in で載せた
+
+user の決定 (選択肢から): C36 を次に・環境変数で opt-in・値はこの流れで未測定と名乗る。
+
+- `LIGHTHOUSE_PERSIST_HISTORY=N` (`prow-live.ts` の `parsePersistHistory`): `LIGHTHOUSE_SOURCE=prow` 以外・正の整数以外は起動時に拒否 (誤設定を黙って無視しない)。`loadProwLive` → `ProwPersistenceFeed` → `PersistenceDetector` の `flakyHistory` (C35)
+- `prow-persist.ts`: C35 の値 `C35_FLAKY_HISTORY` (N=10・F=10%)・札 `flakyTag` (quiet / flaky / short)・説明 `describeFlakyHistory`。説明の `basis` は「C35 が Treeherder autoland で決めて確かめた値で、<流れ> では測っていない」を必ず含み、N が 10 以外なら「その N はどこでも測っていない」も足す
+- `dashboard.ts`: `/persistence` に `flakyHistory`、SSE に `persistenceHistory` (どちらも設定したときだけ)。`dashboard/app.js`: 各名乗りの下に札と「直近 N ビルドのうち何回落ちたか」、パネルの先頭に読み方と `basis`。札は名乗りを隠さない
+- 起動ログの `[persistence]` 行にも `history f/N failed (札)` を足す (設定したときだけ)
+- 試験 761 件 (+4): 未設定では `history` が無いこと (C22 の試験は無修正で通る)・設定時に feed が `detectPersistence` と一致し `/persistence`・SSE が説明を運ぶこと・起動時の拒否・札の境目
+
+実サーバ (`test-stream`・`prow`・11-02〜11-04・7200 倍、確認用スクリプトで起動 → 再生終了を待って取得 → 停止): 付けたとき `/persistence` の 1 件 (e2e・KubeProxy CLOSE_WAIT、11-04 14:14Z) に `history: {runs: 10, fails: 2}` と `flakyHistory`、SSE に `persistenceHistory`。付けないとき従来の形 (キーも同じ)。dashboard の描画はブラウザでは見ていない (app.js の構文検査と SSE の中身まで)。
+
+Prow の 89 日 (全取り込み) の名乗り 2 件に札を当てると: C13 が回帰と呼ぶ e2e の 1 件は 2/10 = flaky、C13 が flaky と呼ぶ integration の 1 件は 1/10 = quiet。札と真値が逆向きだが、2 件では何も言えない。Prow で札を読めるかは未測定のまま (応答の `basis` もそう名乗る)。
