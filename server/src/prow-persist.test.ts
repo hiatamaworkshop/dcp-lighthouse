@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { ProwBuild } from "./prow-import.js";
-import { C35_FLAKY_HISTORY, describeFlakyHistory, detectPersistence, flakyTag } from "./prow-persist.js";
+import { C35_FLAKY_HISTORY, PersistenceDetector, describeFlakyHistory, detectPersistence, flakyTag } from "./prow-persist.js";
 import { deriveEpisodes } from "./prow-truth.js";
 
 const T0 = Date.parse("2026-11-01T00:00:00Z");
@@ -105,6 +105,22 @@ describe("detectPersistence — the rule fixed on 2026-11-17 (C21)", () => {
     assert.equal(flakyTag({ runs: 10, fails: 2 }, runs, quietMax), "flaky");
     assert.match(describeFlakyHistory(10, "X").basis, /Treeherder autoland; not measured on X\. /);
     assert.match(describeFlakyHistory(20, "X").basis, /N=20 was not measured anywhere/);
+  });
+
+  it("bounds remembered passing commits per test (FIFO) so long-running processes do not grow unbounded", () => {
+    const det = new PersistenceDetector({}, undefined, 2);
+    det.add(build(0, "c0", { t: "passed" }));
+    det.add(build(1, "c1", { t: "passed" }));
+    det.add(build(2, "c2", { t: "passed" })); // evicts c0; remembers c1, c2
+    // c1 is still remembered → split, no announcement
+    det.add(build(3, "c1", { t: "failed" }));
+    assert.deepEqual(det.add(build(4, "c3", { t: "failed" })), []);
+    // Reset run with a pass on c4 (evicts c1; remembers c2, c4)
+    det.add(build(5, "c4", { t: "passed" }));
+    // c0 was evicted earlier → consecutive failures on c0 and c5 announce
+    det.add(build(6, "c0", { t: "failed" }));
+    assert.equal(det.add(build(7, "c5", { t: "failed" })).length, 1);
+    assert.throws(() => new PersistenceDetector({}, undefined, 0), RangeError);
   });
 
   it("everything C13 calls regression is announced", () => {

@@ -49,15 +49,15 @@
  */
 
 import { resolve } from "node:path";
-import { PersistenceDetector, type Announcement } from "./prow-persist.js";
+import { C35_FLAKY_HISTORY, PersistenceDetector, flakyTag, type Announcement, type FlakyTag } from "./prow-persist.js";
 import { loadTreeherderRange } from "./treeherder-import.js";
 import { eventAsBuild, incidentsOf, pushesBetween, pushesToStream, type Incident, type THEvent } from "./treeherder-stream.js";
 
 const HOUR = 3_600_000;
 const DAY = 86_400_000;
-/** Fixed 2026-11-27 on the C29 range (see the header). */
-const C35_HISTORY_RUNS = 10;
-const C35_QUIET_MAX = 0.1;
+/** Fixed 2026-11-27 on the C29 range (see the header); shared with prow-persist.ts. */
+const C35_HISTORY_RUNS = C35_FLAKY_HISTORY.runs;
+const C35_QUIET_MAX = C35_FLAKY_HISTORY.quietMax;
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -78,12 +78,7 @@ const tally = <T>(xs: readonly T[], f: (x: T) => string): Map<string, number> =>
 };
 const fmt = (m: Map<string, number>): string => [...m].sort((a, b) => b[1] - a[1]).map(([k, n]) => `${k} ${n}`).join(" · ");
 
-type Tag = "quiet" | "flaky" | "short";
-function tagOf(a: Announcement, runs: number, quietMax: number): Tag {
-  const h = a.history;
-  if (h === undefined || h.runs < runs) return "short";
-  return h.fails / h.runs <= quietMax ? "quiet" : "flaky";
-}
+const tagOf = (a: Announcement, runs: number, quietMax: number): FlakyTag => flakyTag(a.history, runs, quietMax);
 
 function main(): void {
   const fromDay = arg("--from");
@@ -125,7 +120,7 @@ function main(): void {
   const trig = (a: Announcement): THEvent => byJob.get(Number(a.buildId))!;
   const first = (a: Announcement): THEvent => byJob.get(Number(a.firstBuildId))!;
   const correct = (a: Announcement): boolean => trig(a).cls === "regression" || first(a).cls === "regression";
-  const tag = (a: Announcement): Tag => tagOf(a, N, F);
+  const tag = (a: Announcement): FlakyTag => tagOf(a, N, F);
 
   console.log(`\n=== announcements by the job type's history (control: the "all" line — a tag without information gives every group its precision) ===`);
   const row = (label: string, xs: Announcement[]): void => {

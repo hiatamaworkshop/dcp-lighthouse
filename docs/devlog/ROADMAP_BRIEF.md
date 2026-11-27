@@ -7317,3 +7317,14 @@ user の決定 (選択肢から): C36 を次に・環境変数で opt-in・値�
 実サーバ (`test-stream`・`prow`・11-02〜11-04・7200 倍、確認用スクリプトで起動 → 再生終了を待って取得 → 停止): 付けたとき `/persistence` の 1 件 (e2e・KubeProxy CLOSE_WAIT、11-04 14:14Z) に `history: {runs: 10, fails: 2}` と `flakyHistory`、SSE に `persistenceHistory`。付けないとき従来の形 (キーも同じ)。dashboard の描画はブラウザでは見ていない (app.js の構文検査と SSE の中身まで)。
 
 Prow の 89 日 (全取り込み) の名乗り 2 件に札を当てると: C13 が回帰と呼ぶ e2e の 1 件は 2/10 = flaky、C13 が flaky と呼ぶ integration の 1 件は 1/10 = quiet。札と真値が逆向きだが、2 件では何も言えない。Prow で札を読めるかは未測定のまま (応答の `basis` もそう名乗る)。
+
+## 2026-11-28 — C25〜C36 レビューの反映と小修正 (厳密採点の注記・述語統一・`passedOn` 有界化)
+
+`742725b`〜`b35c2a6` をレビューし、4,446 push・1,638,069 ジョブ (`data/treeherder/`) の裏取りを実施 (完了ジョブの `end_timestamp <= 0` は 0 件、`fixedBy` プレフィックス割れによる回帰の二重計上も 0 件)。
+
+**厳密採点 (同一回帰の 2 連続) による C29・C35 の補足**
+- C29・C35 のレポートは `correct` を「2 回の失敗のどちらかが regression」として採点していたため、片側が intermittent 等の混在 (C29 で 199 件) や別回帰同士の連続 (`crossIncReg`: C29 で 27 件・C35 で 68 件) が捕捉に計上され、C29 で規則上拾えない 18/156 を含む 140/156 (`140 + 18 = 158 > 156`)・1 ジョブだけの回帰 `1/3` が捕捉扱いになっていた。
+- 厳密基準 (`first.incident === trig.incident`、同一回帰の 2 連続) での数字:
+  - **C29 (11-09〜22, 156 件)**: 捕捉 **129/156 (82.7%)** (報告 140 = 89.7%)、quiet 精度 **56.2%** (報告 70.6%)、札の差 (i) **+22.7 pt**、quiet+short 保持率 (ii) **119/129 = 92.2%**。
+  - **C35 確認 (10-24〜11-06, 161 件)**: 捕捉 **130/161 (80.7%)** (報告 144 = 89.4%)、quiet 精度 **44.6%** (報告 60.3%)、札の差 (i) **+27.5 pt** (≥ 15 で頑健に成立)、quiet+short 保持率 (ii) **115/130 = 88.5%** (90% の境界付近)。
+- **小修正**: (1) `run-treeherder-c35-report.ts` の `C35_HISTORY_RUNS` / `C35_QUIET_MAX` / `tagOf` を `prow-persist.ts` の `C35_FLAKY_HISTORY` / `flakyTag` 参照に統一、(2) `PersistenceDetector` の `passedOn` をテストあたり既定 256 commit (`DEFAULT_MAX_PASSED_COMMITS`) の FIFO に有界化し常駐サーバでの無制限増加を防止、(3) `dashboard/index.html` に `.persist-short` の明示スタイルを追加、(4) `CLAUDE.md` の見出し日付を更新。

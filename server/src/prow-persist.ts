@@ -76,6 +76,14 @@ export interface FlakyHistoryOptions {
 }
 
 /**
+ * Default cap on remembered passing commits per (job, testId). Persistence only
+ * ever checks the current and previous build's commit, so bounding `passedOn`
+ * keeps memory O(1) per test in a long-running server without affecting any
+ * realistic rerun window.
+ */
+export const DEFAULT_MAX_PASSED_COMMITS = 256;
+
+/**
  * C35's reading of a history, chosen on Treeherder autoland's spent C29 range
  * and confirmed on 2026-10-24…11-06 (ROADMAP_BRIEF.md 2026-11-27 (3)). Not
  * measured on any other stream: a reader that shows the tag elsewhere says so.
@@ -122,14 +130,20 @@ interface TestState {
 
 export class PersistenceDetector {
   private readonly perJob = new Map<string, { lastMs: number; tests: Map<string, TestState> }>();
+  private readonly maxPassedCommits: number;
 
   constructor(
     private readonly opts: ProwEventOptions = {},
     private readonly flakyHistory?: FlakyHistoryOptions,
+    maxPassedCommits: number = DEFAULT_MAX_PASSED_COMMITS,
   ) {
     if (flakyHistory !== undefined && !(Number.isInteger(flakyHistory.runs) && flakyHistory.runs >= 1)) {
       throw new RangeError(`PersistenceDetector: flakyHistory.runs must be a positive integer, got ${flakyHistory.runs}`);
     }
+    if (!(Number.isInteger(maxPassedCommits) && maxPassedCommits >= 1)) {
+      throw new RangeError(`PersistenceDetector: maxPassedCommits must be a positive integer, got ${maxPassedCommits}`);
+    }
+    this.maxPassedCommits = maxPassedCommits;
   }
 
   /** Feeds one build (each job's builds in time order) and returns what it announces. */
@@ -152,7 +166,15 @@ export class PersistenceDetector {
       const fail = c.fail > 0;
       const mixed = fail && c.pass > 0;
       if (!fail) {
-        if (b.commit !== undefined) st.passedOn.add(b.commit);
+        if (b.commit !== undefined) {
+          st.passedOn.delete(b.commit);
+          st.passedOn.add(b.commit);
+          while (st.passedOn.size > this.maxPassedCommits) {
+            const oldest = st.passedOn.values().next().value;
+            if (oldest === undefined) break;
+            st.passedOn.delete(oldest);
+          }
+        }
         delete st.runStart;
       } else {
         const prev = st.last;
