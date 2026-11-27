@@ -316,7 +316,9 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **本物の回帰に対する名乗りを測る** (2026-11-27、C29) — Treeherder `autoland` の 14 日 (2,226 push・tier 1 の 74 万事象・回帰 156 件、真値は人の分類 fixed by commit を修正の revision ごとにまとめたもの、規則は読む前に固定)。
       **ジョブ種単位の持続は回帰の 90% を中央値 0.2 時間で名乗り、105/140 は sheriff の修正の push より先**。ただし名乗りの 4 割は回帰を含まない (intermittent が続いたもの)。
       粗窓の下向きタイルは 37% (参照の窓の半分に回帰が混ざり物差しが鈍る)、固定 10 件の同時多発は回帰の無い失敗窓の 57% でも発火、OS 系統での自動 replay の帰属は exact 11/163。詳細は ROADMAP_BRIEF.md 2026-11-27 (2)
-- [ ] **次**: 判断待ちの提案 — C34 (同時多発を参照に対する多さで名乗る)・C35 (持続の名乗りに flaky の履歴)・C30 (自前の試験結果を流し込む `POST /ingest/build`)。自前の試験を流し込む `POST /ingest/build` (C30) はその後。全 pass の参照の帰無 (C18)・量チャネル (C7) は保留。仮想ストリームの常設 (F3) は未着手
+- [x] **持続の名乗りに flaky の履歴を添える** (2026-11-27、C35) — 名乗りは落とさず、そのジョブ種の直近 10 回の失敗の割合を添える (opt-in)。値は使用済みの C29 範囲で決めて固定し、別の 14 日 (10-24〜11-06・回帰 161 件) で 1 回だけ確認。
+      回帰を名乗らない名乗りの 52% に flaky の札が付き、回帰を名乗るものには 21%。札が quiet の名乗りの精度は 60% (全体 48%)、quiet か履歴不足の名乗りだけで回帰の捕捉 134/144。読む前に書いた 2 つの判定はどちらも成り立った。詳細は ROADMAP_BRIEF.md 2026-11-27 (3)
+- [ ] **次**: 判断待ちの提案 — C36 (本番の `/persistence` に flaky の履歴を載せる)・C34 (同時多発を参照に対する多さで名乗る)・C30 (自前の試験結果を流し込む `POST /ingest/build`)。全 pass の参照の帰無 (C18)・量チャネル (C7) は保留。仮想ストリームの常設 (F3) は未着手
 
 現在テスト計 754 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
@@ -345,6 +347,7 @@ node --max-old-space-size=6144 dist/run-prow-persist-report.js --from 2026-08-19
 node dist/run-prow-attribution-report.js --from 2026-10-26 --to 2026-11-15 --per-job 20  # 粗窓の発火 → ジョブ別の自動 replay が名乗るジョブを植え込みで数える (C28。exact/partial/extra/wrong/none と植えない対照)
 node dist/run-treeherder-import.js --from 2026-11-07 --to 2026-11-22           # Treeherder autoland の tier 1 を日ごとに data/treeherder/ へ (C29。日の終わりから 3 日は拒否、個人情報は保存前に落とす)
 node dist/run-treeherder-c29-report.js --from 2026-11-09 --to 2026-11-22      # 本物の回帰に対する粗窓・持続・自動 replay の名乗り (C29)
+node dist/run-treeherder-c35-report.js --from 2026-10-24 --to 2026-11-06      # ジョブ種の持続の名乗りを flaky の履歴 (直近 10 回の失敗の割合) で分けた精度と回帰の捕捉 (C35)
 node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
 node dist/run-otel-flag-schedule.js        # H4 の障害フラグ切替 (既定: paymentFailure 50%、休止 10%、≒ 24 h)。真値は data/otel/flags.jsonl
 node dist/run-otel-report.js --from <day> --to <day>   # H4。p=1 の配線確認が通らなければ判定を出さない (判定日 10-03 は使用済み)
