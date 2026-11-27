@@ -21,13 +21,15 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 
 ## 現在地 (2026-11-25)
 
-- **Phase 0 + Phase 1 完了**。L1〜L5 (足場・Brain write surface・ClaudeBrain・レンズチェーン・参照ゾーン) 完了。テスト 742 件
+- **Phase 0 + Phase 1 完了**。L1〜L5 (足場・Brain write surface・ClaudeBrain・レンズチェーン・参照ゾーン) 完了。テスト 754 件
 - **実データ較正期間 (Wikimedia / OTel、第 1〜5 段階) は完了**。収集は 2026-11-17 に停止 (タスク無効化・データ保持)。未使用の保留期間は無い
 - **いまの実データは公開 CI の試験結果 (Kubernetes Prow、`data/prow/`)**。1 時間窓 × 参照 30 窓の構成 (`LIGHTHOUSE_PROFILE=test-stream`)・
   持続の名乗り (`/persistence`)・粗窓発火からのグループ別自動 replay まで本番配線済み (C12〜C28)。`mock` が既定で従来のまま
 - **C25 (2026-11-27)**: 本物の回帰がある流れは **Mozilla Treeherder `autoland`** に決定 (人の分類 fixed by commit つき、2 日で回帰 26 塊。Prow の非ゲート定期ジョブは 7 日で回帰 0)。
   ジョブ単位・同じジョブ種は push の約 5% でしか走らない、という制約がある
-- **次**: C29 (Treeherder で名乗りを測る。完了条件の直し 4 点が user の判断待ち) → C30 (自前テスト用 `POST /ingest/build`、保留)。
+- **C29 (2026-11-27)**: Treeherder 14 日の本物の回帰 156 件で本番の配線を測った (`data/treeherder/`、`run-treeherder-c29-report`)。ジョブ種の持続が 90% を拾い 3/4 は修正の push より先、ただし名乗りの 4 割は flaky。
+  粗窓の下向きタイルは 37%、固定 10 件の同時多発はこの流れでは「忙しい時間」を拾うだけ、OS 系統での帰属は弱い
+- **次**: 判断待ちの提案 C34 (同時多発を参照に対する多さで)・C35 (持続に flaky の履歴)・C30 (自前テスト用 `POST /ingest/build`)。
   整備項目 C31〜C33 は 2026-11-25 に閉じた (C32 は見送り、`data/` は判定の生データとして残す)。詳細は `docs/roadmap.md`
 - 数値・日付つきの経緯を知りたいときは `grep -n "^## " docs/devlog/ROADMAP_BRIEF.md` で見出しを引き、該当節だけ `Read` する (全文は 600 KB 超)
 
@@ -97,6 +99,7 @@ server/src/      Node.js / TypeScript
   ── 実データ (検証ハーネス・レポート。起動口は run-*.ts) ──
   wikimedia-collector.ts / otlp-receiver.ts / otel-flag-schedule.ts / real-data-harness.ts / range-coverage.ts
   prow-{import,events,replay,truth,persist,plant,shape,attribution}.ts   Prow の取り込み・再生・真値導出・植え込み・帰属
+  treeherder-{import,stream}.ts   Treeherder autoland の取り込み (tier 1・個人情報を落とす) と、ジョブ単位の写し・人の分類による真値 (C29)
   ── §12 A/B 実験 ──  ab-fixture.ts / ab-harness.ts / ab-strategy-b.ts / anthropic-ask.ts
 server/otel/     OTel Demo の extras (collector 設定・compose 上書き)
 server/scripts/  run-wiki-collector.ps1 / run-h4-day.ps1

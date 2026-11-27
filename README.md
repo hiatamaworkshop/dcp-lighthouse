@@ -313,9 +313,12 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **粗窓の発火を契機にグループ別の遡及的再観測を自動で回す** (2026-11-22、C24) — `CoarseReplayTrigger` (`coarse-replay-trigger.ts`) を `LIGHTHOUSE_PROFILE=test-stream` に配線。合算の 1 時間粗窓で下向きタイル (`dip`・`step_down`) または同時多発 (`failures.bursts`) が出た窓に重複抑止つきで `group_by: ["agentId"]` の `replayRequest` を自動発火 (`compare:test_result:v1#fine` も 30 窓参照を宣言し `broadcastReplay` へ配信、`mock` は不変)。実データ 11 日 (2026-08-30〜09-09、873 ビルド) で発火 13 窓 (同時多発 9/9)・帰属 12/13 がすべて `ci-kubernetes-e2e-gci-gce` に特定。詳細は ROADMAP_BRIEF.md 2026-11-22 (4)
 - [x] **再生速度の上限・自動 replay の専用行・植え込みでの帰属** (2026-11-22、C26〜C28) — 記録流の再生は live が追える速度 (1 時間窓で 7200) を超えると起動時に拒否。自動 replay は `$Q` の `#regroup` 行で採点し、ライブの `#fine` を書き換えない。C24 の帰属 12/13 は既知の 1 ジョブの固まりの配線確認だったので、他のジョブに回帰を植えて測った (`run-prow-attribution-report`): 誤帰属 0、5 試験の回帰で正しいジョブだけを名乗ったのは 1 ジョブ 50/60・2 ジョブ同時 44/60、外れは「名乗らない」側。詳細は ROADMAP_BRIEF.md 2026-11-22 (5)(6)
 - [x] **本物の回帰がある流れを 1 本に決める** (2026-11-27、C25) — Prow の非ゲート定期 3 ジョブ (7 日・315 ビルド) は失敗 6 件・回帰 0。Treeherder `autoland` (2 日・495 push・17.8 万ジョブ) は人の分類 fixed by commit が 804 ジョブ・26 の固まりで、backout が回帰の終わりを示す。**Treeherder に決定**。弱点はジョブ単位 (試験名は失敗だけ) と、同じジョブ種が push の約 5% でしか走らないこと。詳細は ROADMAP_BRIEF.md 2026-11-27
-- [ ] **次** (台帳 C29): Treeherder `autoland` で本物の回帰に対する名乗りと遅れを測る。完了条件の直し 4 点 (ジョブ単位の事象・持続のジョブ種単位への読み替え・グループの鍵の事前固定・取り込み器の新設) が user の判断待ち。自前の試験を流し込む `POST /ingest/build` (C30) はその後。全 pass の参照の帰無 (C18)・量チャネル (C7) は保留。仮想ストリームの常設 (F3) は未着手
+- [x] **本物の回帰に対する名乗りを測る** (2026-11-27、C29) — Treeherder `autoland` の 14 日 (2,226 push・tier 1 の 74 万事象・回帰 156 件、真値は人の分類 fixed by commit を修正の revision ごとにまとめたもの、規則は読む前に固定)。
+      **ジョブ種単位の持続は回帰の 90% を中央値 0.2 時間で名乗り、105/140 は sheriff の修正の push より先**。ただし名乗りの 4 割は回帰を含まない (intermittent が続いたもの)。
+      粗窓の下向きタイルは 37% (参照の窓の半分に回帰が混ざり物差しが鈍る)、固定 10 件の同時多発は回帰の無い失敗窓の 57% でも発火、OS 系統での自動 replay の帰属は exact 11/163。詳細は ROADMAP_BRIEF.md 2026-11-27 (2)
+- [ ] **次**: 判断待ちの提案 — C34 (同時多発を参照に対する多さで名乗る)・C35 (持続の名乗りに flaky の履歴)・C30 (自前の試験結果を流し込む `POST /ingest/build`)。自前の試験を流し込む `POST /ingest/build` (C30) はその後。全 pass の参照の帰無 (C18)・量チャネル (C7) は保留。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 742 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 754 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 
@@ -340,6 +343,8 @@ node --max-old-space-size=6144 dist/run-prow-truth-report.js --from 2026-08-19 -
 node --max-old-space-size=6144 dist/run-prow-plant-report.js --from 2026-10-26 --to 2026-11-15 --per-job 20  # 回帰を植えて検出を測る (C20、約 20 分)
 node --max-old-space-size=6144 dist/run-prow-persist-report.js --from 2026-08-19 --to 2026-11-15 --plant-from 2026-10-26 --plant-to 2026-11-15  # 試験ごとの持続の名乗り: 記録での件数と、C20 の植え込みでの検出 (C21、約 3 分)
 node dist/run-prow-attribution-report.js --from 2026-10-26 --to 2026-11-15 --per-job 20  # 粗窓の発火 → ジョブ別の自動 replay が名乗るジョブを植え込みで数える (C28。exact/partial/extra/wrong/none と植えない対照)
+node dist/run-treeherder-import.js --from 2026-11-07 --to 2026-11-22           # Treeherder autoland の tier 1 を日ごとに data/treeherder/ へ (C29。日の終わりから 3 日は拒否、個人情報は保存前に落とす)
+node dist/run-treeherder-c29-report.js --from 2026-11-09 --to 2026-11-22      # 本物の回帰に対する粗窓・持続・自動 replay の名乗り (C29)
 node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
 node dist/run-otel-flag-schedule.js        # H4 の障害フラグ切替 (既定: paymentFailure 50%、休止 10%、≒ 24 h)。真値は data/otel/flags.jsonl
 node dist/run-otel-report.js --from <day> --to <day>   # H4。p=1 の配線確認が通らなければ判定を出さない (判定日 10-03 は使用済み)
