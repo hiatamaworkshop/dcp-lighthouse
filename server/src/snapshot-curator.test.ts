@@ -13,7 +13,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { applyLens, MIN_VALID_COUNT, type LensEvent, type LensResult } from "./lens.js";
-import { SnapshotCurator, studentUpperTail, type SnapshotPackage } from "./snapshot-curator.js";
+import { SnapshotCurator, normalQuantile, studentUpperTail, type SnapshotPackage } from "./snapshot-curator.js";
 
 const ev = (ts: number, value: number): LensEvent => ({ ts, value });
 
@@ -1856,5 +1856,191 @@ describe("relativeFailureBurst (ROADMAP C34)", () => {
     ]) {
       assert.throws(() => new SnapshotCurator({ relativeFailureBurst: bad }), RangeError);
     }
+  });
+});
+
+// ── C40: the exact two-level tail at any window size (exactBinaryTail) ──────
+
+/** A pass/fail window of n results with k failures, summarised as the lens would. */
+function binaryWindow(windowStart: number, n: number, k: number) {
+  return {
+    windowStart,
+    windowEnd: windowStart + 1000,
+    mean: (n - k) / n,
+    count: n,
+    sumSq: n - k,
+    valid: n >= MIN_VALID_COUNT,
+    range: { min: k > 0 ? 0 : 1, max: k < n ? 1 : 0 },
+  };
+}
+
+/** Observation (from t=0) and reference (30 windows before it) as LensResults. */
+function binaryPair(obs: { n: number; k: number }[], ref: { n: number; k: number }[]): { observation: LensResult; reference: LensResult } {
+  return {
+    observation: { window_ms: 1000, windows: obs.map((w, i) => binaryWindow(i * 1000, w.n, w.k)) },
+    reference: { window_ms: 1000, windows: ref.map((w, i) => binaryWindow((i - ref.length) * 1000, w.n, w.k)) },
+  };
+}
+
+/** k failures among n results at failure rate q. */
+function failuresOf(rand: () => number, n: number, q: number): number {
+  let k = 0;
+  for (let i = 0; i < n; i++) if (rand() < q) k++;
+  return k;
+}
+
+/**
+ * The independent null's exact mid-p z the way the n ≤ 2,000 path computes it
+ * (every composition, log tables) — written out again here so the large-n
+ * path is checked against something that shares none of its code.
+ */
+function bruteMidZ(n: number, passes: number, refPass: number, refFail: number): number {
+  const a1 = refPass + 0.5;
+  const a0 = refFail + 0.5;
+  const lf = new Float64Array(n + 1);
+  const g0 = new Float64Array(n + 1);
+  const g1 = new Float64Array(n + 1);
+  for (let j = 1; j <= n; j++) {
+    lf[j] = lf[j - 1] + Math.log(j);
+    g0[j] = g0[j - 1] + Math.log(a0 + j - 1);
+    g1[j] = g1[j - 1] + Math.log(a1 + j - 1);
+  }
+  let logConst = lf[n];
+  for (let j = 0; j < n; j++) logConst -= Math.log(a0 + a1 + j);
+  let below = 0;
+  let above = 0;
+  let at = 0;
+  for (let c1 = 0; c1 <= n; c1++) {
+    const p = Math.exp(logConst - lf[n - c1] - lf[c1] + g0[n - c1] + g1[c1]);
+    if (c1 < passes) below += p;
+    else if (c1 > passes) above += p;
+    else at += p;
+  }
+  return passes < (n * a1) / (a0 + a1) ? normalQuantile(below + 0.5 * at) : -normalQuantile(above + 0.5 * at);
+}
+
+describe("SnapshotCurator — exact two-level tail at any size (C40)", () => {
+  const close = (a: number | null, b: number | null, tol: number) =>
+    a === b || (a !== null && b !== null && Math.abs(a - b) <= tol);
+  const strip = (pkg: SnapshotPackage) => {
+    const { generatedAt: _g, ...rest } = pkg;
+    return rest;
+  };
+
+  it("agrees with the existing exact tail up to 2,000 events, gate, sensitivity and unreachable tails", () => {
+    const tol = 1e-7;
+    let compared = 0;
+    for (const nullModel of ["independent", "overdispersed"] as const) {
+      for (const [seed, q] of [[1, 0.4], [2, 0.05], [3, 0.004]] as const) {
+        const rand = rng32(seed);
+        // Overdispersed: each reference window's rate wanders around q.
+        const ref = Array.from({ length: 30 }, () => {
+          const qi = nullModel === "overdispersed" ? Math.min(0.9, q * (0.4 + 1.2 * rand())) : q;
+          return { n: 60, k: failuresOf(rand, 60, qi) };
+        });
+        if (ref.every((w) => w.k === 0)) ref[0].k = 1;
+        const obs: { n: number; k: number }[] = [];
+        for (const n of [5, 12, 40, 200, 1000, 2000]) {
+          obs.push({ n, k: failuresOf(rand, n, q) }, { n, k: 0 }, { n, k: Math.min(n, Math.ceil(3 * q * n) + 2) });
+        }
+        obs.push({ n: 30, k: 30 });
+        const { observation, reference } = binaryPair(obs, ref);
+        const opts = { nullModel, recordWindowScores: true, sensitivityPower: 0.8 };
+        const old = new SnapshotCurator(opts).curate(observation, reference);
+        const neu = new SnapshotCurator({ ...opts, exactBinaryTail: true }).curate(observation, reference);
+        assert.equal(old.sensitivity!.units[0].exactWindows, neu.sensitivity!.units[0].exactWindows, "the same windows on the exact path");
+        assert.equal(old.windowScores!.length, neu.windowScores!.length);
+        old.windowScores!.forEach((s, i) => {
+          const t = neu.windowScores![i];
+          const where = `${nullModel} q=${q} n=${s.count} i=${i}`;
+          assert.ok(close(s.gateZ, t.gateZ, tol), `${where}: gateZ ${s.gateZ} vs ${t.gateZ}`);
+          assert.ok(close(s.mde!.dip, t.mde!.dip, 1e-9), `${where}: dip ${s.mde!.dip} vs ${t.mde!.dip}`);
+          assert.ok(close(s.mde!.spike, t.mde!.spike, 1e-9), `${where}: spike ${s.mde!.spike} vs ${t.mde!.spike}`);
+          compared++;
+        });
+        assert.deepEqual(old.unreachableTails.map((u) => u.direction), neu.unreachableTails.map((u) => u.direction));
+        old.unreachableTails.forEach((u, i) => assert.ok(close(u.attainableZ, neu.unreachableTails[i].attainableZ, tol)));
+        assert.deepEqual(old.tiles.map((x) => x.label), neu.tiles.map((x) => x.label));
+      }
+    }
+    assert.ok(compared > 100);
+  });
+
+  it("has no seam at 2,000 → 2,001 events against a reference holding one failure", () => {
+    const ref = Array.from({ length: 30 }, (_, i) => ({ n: 2000, k: i === 7 ? 1 : 0 }));
+    const obs = [0, 1, 2, 3].flatMap((k) => [{ n: 2000, k }, { n: 2001, k }]);
+    const { observation, reference } = binaryPair(obs, ref);
+    const scores = (exactBinaryTail: boolean) =>
+      new SnapshotCurator({ recordWindowScores: true, exactBinaryTail }).curate(observation, reference).windowScores!.map((s) => s.gateZ);
+    const on = scores(true);
+    const off = scores(false);
+    for (let k = 0; k < 4; k++) {
+      const [a, b] = [on[2 * k], on[2 * k + 1]];
+      assert.ok(Math.abs(a - b) < 0.01, `k=${k}: ${a} at 2,000 vs ${b} at 2,001 under exactBinaryTail`);
+      assert.ok(close(off[2 * k], a, 1e-7), `k=${k}: n=2,000 is the existing exact value`);
+    }
+    // The fallback this removes: the default gate jumps at the seam (one failure:
+    // −1.96 exact → −2.51 normal, continuity-corrected; the raw z reads ≈ −5).
+    assert.ok(off[3] - off[2] < -0.4, `the default still jumps at the seam (${off[2]} → ${off[3]})`);
+  });
+
+  it("matches a brute-force sum over every composition at 100,000 events", () => {
+    for (const [seed, q] of [[11, 0.002], [12, 0.3]] as const) {
+      const rand = rng32(seed);
+      const ref = Array.from({ length: 30 }, () => ({ n: 3000, k: failuresOf(rand, 3000, q) }));
+      const refFail = ref.reduce((s, w) => s + w.k, 0);
+      const refPass = 30 * 3000 - refFail;
+      const n = 100_000;
+      const mid = Math.round(n * q);
+      const spread = Math.ceil(4 * Math.sqrt(n * q * (1 - q)) * Math.sqrt(1 + n / 90_000));
+      const ks = [0, 1, mid - spread, mid - 1, mid, mid + 1, mid + spread, mid + 3 * spread, Math.min(n, 10 * mid)].filter((k) => k >= 0 && k <= n);
+      const { observation, reference } = binaryPair(ks.map((k) => ({ n, k })), ref);
+      const pkg = new SnapshotCurator({ recordWindowScores: true, exactBinaryTail: true }).curate(observation, reference);
+      pkg.windowScores!.forEach((s, i) => {
+        const want = bruteMidZ(n, n - ks[i], refPass, refFail);
+        assert.ok(close(s.gateZ, want, 1e-6), `q=${q} k=${ks[i]}: ${s.gateZ} vs brute ${want}`);
+      });
+      assert.equal(pkg.selection.exactBinaryTail, true);
+    }
+  });
+
+  it("quotes sensitivity on the exact tail past 2,000 events, close to the normal one where that is sound", () => {
+    const rand = rng32(21);
+    const ref = Array.from({ length: 30 }, () => ({ n: 3000, k: failuresOf(rand, 3000, 0.5) }));
+    const obs = Array.from({ length: 5 }, () => ({ n: 50_000, k: failuresOf(rand, 50_000, 0.5) }));
+    const { observation, reference } = binaryPair(obs, ref);
+    const unit = (exactBinaryTail: boolean) =>
+      new SnapshotCurator({ sensitivityPower: 0.8, exactBinaryTail }).curate(observation, reference).sensitivity!.units[0];
+    const exact = unit(true);
+    const normal = unit(false);
+    assert.equal(exact.exactWindows, 5);
+    assert.equal(normal.exactWindows, 0);
+    for (const dir of ["dip", "spike"] as const) {
+      const r = exact[dir]!.median / normal[dir]!.median;
+      assert.ok(r > 0.97 && r < 1.03, `${dir}: exact ${exact[dir]!.median} vs normal ${normal[dir]!.median}`);
+    }
+  });
+
+  it("leaves three-level data and the default package as they were", () => {
+    // Three levels (pass / flaky / fail = 1 / 0.5 / 0) at 3,000 events: the normal path either way.
+    const tri = (windowStart: number, c0: number, c1: number, c2: number) => {
+      const n = c0 + c1 + c2;
+      return { windowStart, windowEnd: windowStart + 1000, mean: (0.5 * c1 + c2) / n, count: n, sumSq: 0.25 * c1 + c2, valid: true, range: { min: 0, max: 1 } };
+    };
+    const observation: LensResult = { window_ms: 1000, windows: [tri(0, 30, 60, 2910), tri(1000, 90, 120, 2790)] };
+    const reference: LensResult = { window_ms: 1000, windows: Array.from({ length: 20 }, (_, i) => tri((i - 20) * 1000, 30 + (i % 3), 60, 2910 - (i % 3))) };
+    const opts = { recordWindowScores: true, sensitivityPower: 0.8 };
+    const triOn = new SnapshotCurator({ ...opts, exactBinaryTail: true }).curate(observation, reference);
+    const triOff = new SnapshotCurator(opts).curate(observation, reference);
+    const { exactBinaryTail: flag, ...selection } = triOn.selection;
+    assert.equal(flag, true);
+    assert.deepEqual({ ...strip(triOn), selection }, strip(triOff));
+
+    // Two-valued data: `false` is the default, and the default names nothing.
+    const { observation: o2, reference: r2 } = binaryPair([{ n: 3000, k: 9 }, { n: 500, k: 1 }], Array.from({ length: 30 }, () => ({ n: 3000, k: 2 })));
+    const absent = new SnapshotCurator(opts).curate(o2, r2);
+    const off = new SnapshotCurator({ ...opts, exactBinaryTail: false }).curate(o2, r2);
+    assert.deepEqual(strip(off), strip(absent));
+    assert.equal("exactBinaryTail" in absent.selection, false);
   });
 });

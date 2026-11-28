@@ -612,6 +612,11 @@ export interface SelectionContext {
    * baseZThreshold instead.
    */
   effectiveZThreshold: number;
+  /**
+   * Present (always `true`) only under `CurationOptions.exactBinaryTail`: two-valued
+   * windows were read on the exact tail at every size, not only up to 2,000 events.
+   */
+  exactBinaryTail?: true;
 }
 
 // ── Curation options ────────────────────────────────────────────────────────
@@ -782,6 +787,25 @@ export interface CurationOptions {
    * window summaries and changes nothing in the rate gate or `failures`.
    */
   relativeFailureBurst?: boolean | RelativeFailureBurstOptions;
+  /**
+   * Opt-in (ROADMAP C40): read two-valued windows (pass/fail) on the exact
+   * beta-binomial tail at ANY size. Absent / `false` (default): a window above
+   * 2,000 events (EXACT_MAX_COUNT) falls back to the normal approximation, and
+   * the package is byte-identical to one built before the option existed.
+   *
+   * Why: past 2,000 events the fallback is discontinuous — against a reference
+   * holding a single failure, one failure in a 2,001-event window jumps to
+   * ≈5σ under the normal approximation while the exact tail at 2,000 says it is
+   * ordinary — and a 1-hour window of a CI stream holds 2,500–3,500 results.
+   * The exact tail of two levels needs no O(n²) work: it is summed outward from
+   * the observed count by the pmf's ratio recurrence and stops once the rest is
+   * provably negligible (betaBinomialTail), so a window with k failures costs
+   * O(k) terms on the side of fewer failures, a few dozen past k on the other.
+   * On, the two-level exact path (gate, unreachable tails, sensitivity) uses
+   * that sum at every size, n ≤ 2,000 included, so there is no seam; three-level
+   * data is unchanged. The package says so in `selection.exactBinaryTail`.
+   */
+  exactBinaryTail?: boolean;
 }
 
 /** CurationOptions.nullModel's values — also what $Q[compare]'s `null_model` names. */
@@ -830,6 +854,7 @@ export class SnapshotCurator {
       volumeChannel: opts.volumeChannel ?? false,
       failureCount: opts.failureCount ?? 0,
       relativeFailureBurst: opts.relativeFailureBurst ?? false,
+      exactBinaryTail: opts.exactBinaryTail ?? false,
     };
     const fc = opts.failureCount;
     if (fc !== undefined && !(Number.isInteger(fc) && fc >= 1)) {
@@ -1040,7 +1065,7 @@ export class SnapshotCurator {
       // — the correction belongs to the tail probability, not to the effect
       // size Brain reads.
       const lattice = detectLattice(unit.windows, unit.refWindows);
-      const model = categoricalModel(unit.windows, unit.refWindows, unit.ref);
+      const model = categoricalModel(unit.windows, unit.refWindows, unit.ref, this.opts.exactBinaryTail);
 
       collectUnreachableTails(unit, effectiveZThreshold, lattice, model, unreachableTails, (w) => refFor(unit, w));
 
@@ -1235,6 +1260,7 @@ export class SnapshotCurator {
         scoredWindowCount: scorableCount,
         baseZThreshold: this.opts.spikeZThreshold,
         effectiveZThreshold,
+        ...(this.opts.exactBinaryTail ? { exactBinaryTail: true as const } : {}),
       },
       unreachableTails,
       ...(overdispersed
@@ -1442,7 +1468,7 @@ function windowMde(
   power: number,
 ): { dip: number | null; spike: number | null; exact: boolean } {
   // exactZ's own conditions for reading the exact tail, without its O(n²) work on three levels.
-  const exactPath = model !== null && w.count > 0 && w.count <= EXACT_MAX_COUNT && levelCounts(w, model.min, model.step, model.levels) !== null;
+  const exactPath = model !== null && w.count > 0 && (w.count <= EXACT_MAX_COUNT || model.binaryTail === true) && levelCounts(w, model.min, model.step, model.levels) !== null;
   if (exactPath && model!.levels === 2) {
     return { dip: exactWindowMde(w, ref, zGate, model!, power, -1), spike: exactWindowMde(w, ref, zGate, model!, power, 1), exact: true };
   }
@@ -1576,6 +1602,14 @@ function exactWindowMde(w: WindowStat, ref: RefStats, zGate: number, model: Cate
     const q = p0 + dir * delta;
     const a1 = q * A;
     const a0 = (1 - q) * A;
+    if (model.binaryTail === true) {
+      // C40: P(count ≤ crit) (dip) or P(count ≥ crit) (spike), each from the side
+      // away from the alternative's mean so the outward sum stops early; the
+      // other side's complement is fine at the powers asked for here.
+      const mean = n * q;
+      if (dir < 0) return crit < mean ? betaBinomialTail(n, n - crit, a0, a1, 1) : 1 - betaBinomialTail(n, crit, a1, a0, 0);
+      return crit > mean ? betaBinomialTail(n, crit, a1, a0, 1) : 1 - betaBinomialTail(n, n - crit, a0, a1, 0);
+    }
     // P(count ≤ last) by the pmf's ratio recurrence from c = 0 (log P carried, so
     // a far-off start cannot underflow the terms that matter); a spike's firing
     // side c ≥ crit is its complement — fine at the powers asked for here.
@@ -2446,6 +2480,8 @@ interface CategoricalModel {
    * which exactZ folds into the Dirichlet concentration. Absent = independent.
    */
   overdispersion?: { tau2Step: number; refShare: number };
+  /** Two levels under CurationOptions.exactBinaryTail: exactZ reads betaBinomialTail at every size. */
+  binaryTail?: true;
 }
 
 /**
@@ -2494,6 +2530,7 @@ function categoricalModel(
   observation: readonly WindowStat[],
   reference: readonly WindowStat[],
   ref: RefStats,
+  exactBinaryTail = false,
 ): CategoricalModel | null {
   const all = [...observation, ...reference].filter((w) => w.count > 0);
   if (all.length === 0 || reference.every((w) => w.count === 0)) return null;
@@ -2515,9 +2552,11 @@ function categoricalModel(
       for (let i = 0; i < levels; i++) refCounts[i] += c[i];
     }
     const tau2 = ref.tau2 ?? 0;
-    return tau2 > 0
+    const model: CategoricalModel = tau2 > 0
       ? { min, step, levels, refCounts, overdispersion: { tau2Step: tau2 / (step * step), refShare: ref.refShare ?? 0 } }
       : { min, step, levels, refCounts };
+    if (exactBinaryTail && levels === 2) model.binaryTail = true;
+    return model;
   }
   return null;
 }
@@ -2559,7 +2598,7 @@ const EXACT_MAX_COUNT = 2_000;
  */
 function exactZ(w: WindowStat, model: CategoricalModel, latentVar?: number): number | null {
   const n = w.count;
-  if (!(n > 0) || n > EXACT_MAX_COUNT) return null;
+  if (!(n > 0) || (n > EXACT_MAX_COUNT && model.binaryTail !== true)) return null;
   const c = levelCounts(w, model.min, model.step, model.levels);
   if (c === null) return null;
   const x = c.reduce((s, ci, i) => s + i * ci, 0);
@@ -2570,6 +2609,11 @@ function exactZ(w: WindowStat, model: CategoricalModel, latentVar?: number): num
     latentVar === undefined ? undefined : latentVar / (model.step * model.step),
   );
   const A = alpha.reduce((s, a) => s + a, 0);
+  if (model.binaryTail === true) {
+    // C40: the same mid-p tail, summed outward from x (two levels: x = c₁).
+    if (x < (n * alpha[1]) / A) return normalQuantile(betaBinomialTail(n, n - x, alpha[0], alpha[1], 0.5));
+    return -normalQuantile(betaBinomialTail(n, x, alpha[1], alpha[0], 0.5));
+  }
   // Cumulative tables, so each composition costs a few additions:
   //   logFact[j] = ln j!,  g[i][j] = ln Γ(αᵢ + j) − ln Γ(αᵢ).
   const logFact = new Float64Array(n + 1);
@@ -2608,6 +2652,61 @@ function exactZ(w: WindowStat, model: CategoricalModel, latentVar?: number): num
   // Each side from its own tail sum, never as 1 − (the other): the tail that
   // matters is the small one, and subtracting it from 1 would round it away.
   return x < expected ? normalQuantile(below + 0.5 * at) : -normalQuantile(above + 0.5 * at);
+}
+
+/**
+ * P(J > j) + h·P(J = j) for J ~ BetaBinomial(n, a, b), J counting the level
+ * whose Beta parameter is `a` (the other level's is `b`). The lower tail is the
+ * same call on n − J: P(J < j) + h·P(J = j) = betaBinomialTail(n, n − j, b, a, h).
+ * Under CurationOptions.exactBinaryTail (ROADMAP C40) this is exactZ's and
+ * exactWindowMde's two-level tail at every window size.
+ *
+ * P(J = j) comes from ln Γ once; the terms beyond it from the pmf's ratio
+ *   t(i) = P(i+1)/P(i) = (n−i)(i+a) / ((i+1)(n−i−1+b)),
+ * multiplied up in linear scale relative to P(j) (renormalised before it could
+ * overflow), so the sum costs one multiply-add per term and no logarithm.
+ *
+ * Early stop, only where it is provably safe. Write t(i') = A(i')·B(i') with
+ * A = (i'+a)/(i'+1) and B = (n−i')/(n−i'−1+b). For every i' after the current
+ * term, A ≤ max(A(i+1), 1) (A falls toward 1 when a > 1, stays ≤ 1 otherwise)
+ * and, when b ≥ 1, B ≤ B(i+1) (B falls as i' grows). So with ρ the product of
+ * the two bounds, ρ < 1 caps the rest at term·ρ/(1−ρ), and the sum stops once
+ * that is under 1e-17 of what it has. With b < 1 the pmf turns up again at
+ * J = n (the other level's count heads to 0 under a Beta density that diverges
+ * there), no such bound holds, and the sum runs to n — still exact, just O(n).
+ * For a pass/fail window that is the side of fewer failures, which has only k
+ * terms; the side of more failures (b = the pass level's, ≫ 1) stops a few
+ * dozen terms past k.
+ */
+function betaBinomialTail(n: number, j: number, a: number, b: number, h: number): number {
+  const logPmf = (i: number): number =>
+    logGamma(n + 1) - logGamma(i + 1) - logGamma(n - i + 1)
+    + logGamma(i + a) + logGamma(n - i + b) - logGamma(n + a + b)
+    - logGamma(a) - logGamma(b) + logGamma(a + b);
+  let lp = logPmf(j);
+  let at = h;
+  let rest = 0;
+  let term = 1;
+  for (let i = j; i < n; i++) {
+    term *= ((n - i) * (i + a)) / ((i + 1) * (n - i - 1 + b));
+    rest += term;
+    if (term > 1e250) {
+      lp += Math.log(term);
+      rest /= term;
+      at /= term;
+      term = 1;
+    }
+    if (term === 0) break;
+    if (b >= 1 && i + 1 < n) {
+      const next = i + 1;
+      const aBound = a > 1 ? (next + a) / (next + 1) : 1;
+      const m = n - next;
+      const rho = aBound * (m / (m - 1 + b));
+      if (rho < 1 && (term * rho) / (1 - rho) <= 1e-17 * (rest + at)) break;
+    }
+  }
+  const total = at + rest;
+  return total > 0 ? Math.exp(lp + Math.log(total)) : 0;
 }
 
 /**
