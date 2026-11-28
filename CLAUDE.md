@@ -37,7 +37,7 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
   受けたビルドを再起動をまたいで保つ `LIGHTHOUSE_INGEST_LOG` (opt-in)、窓を出さない常駐 `server/scripts/run-lighthouse-ingest.ps1`、`/status` の `liveReference` (`ingest` のときだけ。粗窓の参照が盲目か)。dcp-lighthouse と agent-hub の実の試験で、名乗りが再起動の前後で一致することまで確認
 - **C38 (2026-11-28)**: `LIGHTHOUSE_INGEST_LOG_KEEP_HOURS=N` (opt-in、保持 34 時間未満は拒否) で、起動時に N 時間より古いビルドを先頭行のチェックポイント (検出器の状態・名乗り・通算・再送の記憶) へ畳む。
   ただ消すと続いている連続失敗を二度名乗るため。常駐は 168 時間で有効・タスク `dcp-lighthouse-ingest` (ログオン時) に登録・`LIGHTHOUSE_INGEST_URL` を常設
-- **次**: 台帳 `## 予定` は空 (C38 は 2026-11-28 に閉じた)。未完は条件付きの保留・提案のみ (C7 量チャネル・C11 履歴窓数上限・C18 全 pass 帰無)。整備項目 C31〜C33 は 2026-11-25 に閉じた。詳細は `docs/roadmap.md`
+- **次**: 台帳 `## 予定` は C39 (C34 の相対の同時多発を本番の粗窓・自動 replay へ opt-in でつなぐ) → C40 (2 値の厳密な裾を 2,000 件超でも) → C18 (全 pass 参照の帰無、opt-in・確認は未取り込みの Prow 2026-11-16〜)。2026-11-28 の C18 下調べ (`ROADMAP_BRIEF` 2026-11-28 (9)) から user 決定。保留・提案は C7 量チャネル・C11 履歴窓数上限。整備項目 C31〜C33 は 2026-11-25 に閉じた。詳細は `docs/roadmap.md`
 - 数値・日付つきの経緯を知りたいときは `grep -n "^## " docs/devlog/ROADMAP_BRIEF.md` で見出しを引き、該当節だけ `Read` する (全文は 600 KB 超)
 
 | | dcp-minecraft | dcp-lighthouse |

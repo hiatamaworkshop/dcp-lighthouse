@@ -7460,3 +7460,47 @@ C37 の積み残しのうち user が 3 つを選んだ: 常駐のタスクス�
 **常駐**: `run-lighthouse-ingest.ps1` に `-KeepHours` (既定 168 = 1 週間。生のビルドを振り返れる分を残す)。
 タスク `dcp-lighthouse-ingest` (ログオン時・時間制限なし・失敗時 1 分ごとに 5 回まで再起動、`conhost --headless` 経由) に登録し、タスクから起こして PID が本物の node.exe であること・3 ビルドと名乗り 5 件が戻ることを確かめた。
 ユーザ環境変数 `LIGHTHOUSE_INGEST_URL=http://localhost:3001` を置いた (以後に起こした shell の `npm test` が送る)。いまは 168 時間より古いビルドが無いので、実の常駐ではまだ畳んでいない。
+
+## 2026-11-28 (9) — C18 の下調べ: 全 pass 参照の帰無を素直に開くと何が壊れるか (実測と修正案)
+
+C37/C38 で自前 `ingest` の常駐運用が始まり、全 pass の流れで粗窓が盲目になる C18 の状況をコードと Prow 実データ (3 週 `2026-10-26〜11-15`・89 日 `2026-08-19〜11-15`) で調べた。実装はまだ触っていない (帰無の変更は user 判断待ち)。
+
+**実機ログの切り分け**: `data/logs/lighthouse-ingest-20261128-100250.err.log` および `GET /status` の `liveReference.referenceUsable: false` は、現時点では 3 ビルド (計 2,569 件) がすべて同じ 1 時間窓に入り直前 30 時間の参照が空 (`referenceCoverage: 0`) であるウォームアップ不足による盲目。これは C18 では解除されない (データが無いなら盲目のままが正しい)。C18 が対象とするのは、参照に十分な pass が溜まった後 (`effectiveN >= MIN_VALID_COUNT` かつ `variance === 0`) に起きる盲目。
+
+**実測で分かったこと (なぜ C18 は 10 分以下だけの話ではなく、素直に開くと詰まるか)**
+
+1. **単発 flaky ($k=1$) の暴発**: 全 pass 参照 ($0 / N_{\text{ref}}$) で 2 値厳密帰無の失敗 1 件確率はほぼ比率 $n / N_{\text{ref}}$ で決まる。$N_{\text{ref}} / n$ が大きい薄い観測窓や長期蓄積では、Jeffreys `Beta(0.5, 0.5)`・Laplace `Beta(1, 1)`・Clopper-Pearson 95%/99% 上限のいずれでも単発失敗 1 件で 3 窓 Šidák 閾値 (`2.423σ`) を越える。
+
+| 条件 (全 pass 参照 $0/N_{\text{ref}}$) | $k$ | `BB(0.5)` mid | `BB(0.5)` exact | `BB(1.0)` exact | `CP95` exact | 参考: 参照に 1 件失敗あり (`BB(0.5)` mid / 正規近似) |
+|---|---|---:|---:|---:|---:|---:|
+| `ingest` 3 ビルド ($N=2400, n=800$) | 1 / 2 / 3 | 1.41 / 2.16 / 2.72 | 1.11 / 1.95 / 2.55 | 0.67 / 1.53 / 2.16 | −0.34 / 0.63 / 1.41 | 0.74 / 1.48 / 2.06 (norm: 1.00 / 2.50 / 4.00) |
+| `ingest` 30 ビルド ($N=24000, n=800$) | 1 / 2 / 3 | 2.39 / 3.54 / 4.40 | 2.14 / 3.36 / 4.25 | 1.85 / 3.08 / 3.99 | 1.31 / 2.60 / 3.61 | 1.96 / 3.09 / 3.96 (norm: 5.21 / 10.60 / 15.99) |
+| `ingest` 100 ビルド ($N=80000, n=800$) | 1 / 2 | 2.81 / 4.12 | 2.58 / 3.96 | 2.33 / 3.72 | 1.89 / 3.33 | 2.43 / 3.74 (norm: 9.85 / 19.80) |
+| Prow `10min` 薄い窓 ($N=17500, n=142$) | 1 / 2 | 2.87 / 4.22 | 2.65 / 4.06 | 2.41 / 3.83 | 1.98 / 3.44 | 2.51 / 3.84 (norm: 10.97 / 22.02) |
+
+   Prow 3 週の実データ (全 pass 参照になった失敗窓での発火数):
+   - `10min × 30w` (全 pass 参照 747/2,933 = 25.5%、失敗窓 $k=1$: 35・$k\ge 2$: 0): `BB(0.5)` mid・exact・`BB(1.0)`・`CP95` すべて $k=1$ で 3/35 発火 (`CP99` でも 1/35)。原因は $n=23\text{–}44$ に対し $N_{\text{ref}} \approx 18{,}000$ ($N_{\text{ref}}/n = 401\text{–}768$)。`BB(0.5)` exact + $k \ge 2$ なら 0/35。
+   - `60s × 30w` (全 pass 参照 17,687/20,258 = 87.3%、失敗窓 $k=1$: 114・$k\ge 2$: 3): $k=1$ の誤発火は `BB(0.5)` mid 52/114・exact 39/114・`BB(1.0)` exact 16/114・`CP95` 10/114・`CP99` 4/114 (端切れ suite $n=3\text{–}6$ に対し $N_{\text{ref}} \approx 2{,}600$、$N_{\text{ref}}/n = 464\text{–}873$)。一方で $k \ge 2$ の 3 窓は 1 ビルドまるごと入った $n \approx 1{,}300$ に対し参照が $N_{\text{ref}} = 709\text{–}1{,}177$ ($N_{\text{ref}}/n < 1$) で、どの帰無でも 0/3。60 秒窓は参照長そのものが不足しており、帰無だけでは救えない。
+
+2. **`EXACT_MAX_COUNT = 2_000` の壁と正規近似フォールバックの爆発 (`snapshot-curator.ts:2526`)**:
+   - `exactZ` は `n > 2000` で一律 `null` を返して通常 Z 検定 (`comparisonSE`) へ落とす。全 pass 参照では `se === 0` になり `curate()` (`L1065`) でスキップされて採点不能になる。
+   - Prow 1 時間合算 (約 3,500 件/時)、`e2e` 単体の全 pass 参照窓の 51% (22/43 窓)、自前 `ingest` の初回 1 時間窓 (2,569 件) がいずれも 2,000 を超える。
+   - さらに参照に失敗 1 件 ($c_0 = 1$) あるときも、`n > 2000` で正規近似に落ちると $k=1$ が `5.21σ` に跳ね上がる不連続がある。$O(n^2)$ になるのは 3 値だけで、2 値 (`levels === 2`) の Beta-Binomial 裾確率は失敗数 $k$ 側から対数比漸化式で足せば $O(k)$〜$O(n)$ で $n = 10^5$ でも厳密・高速に計算できる。
+
+3. **`categoricalModel()` の全 pass 非対称 (`snapshot-curator.ts:2507`)**:
+   - `if (!(max > min)) return null;` のため、参照・観測とも全 pass (`min === max === 1`) のときは `null` になり、失敗が出た瞬間だけ `min=0, max=1` で採点可能になる矛盾が生じる。連続値の定数メトリクスと区別するため、2 値ドメイン `[0, 1]` を opt-in オプション側で明示する必要がある。
+
+4. **`ref.variance > 0` / `se > 0` に暗黙依存する 6 箇所の連鎖と `#regroup` の盲目**:
+   - `isReferenceUsable` (`L2165`) だけを緩めると、(a) パッケージ `referenceUsable` (`L975`)、(b) 窓ループの `!(se > 0)` スキップと `z = (mean - ref.mean) / se` の `0/0`・`-Infinity` (`L1064–1067`)、(c) `buildScoringUnits()` のグループ除外 (`L1670`)、(d) `collectUnreachableTails()` (`L2251, L2256`)、(e) `windowMde()` / `exactWindowMde()` (`L1435–1603`)、(f) `detectSteps()` (`L2830, L2849`) が連鎖的に破綻・無言スキップする。
+   - 89 日間 Prow の `1h × 30w` (ウォームアップ 2 日後) を実測すると、合算では全 pass 参照 `0.0%` (0/2,087) だが、**ジョブ別 (`group_by: ["agentId"]` = 自動 replay `#regroup`) では `unit` 16.5% (339/2,060)・`integration` 19.2% (396/2,066)・`e2e` 2.6% (54/2,078、うち失敗窓 11・$k \ge 2$ が 10 窓) が全 pass 参照で `unscoredGroups` に落ちている**。C18 は 10 分以下だけでなく、現行 1 時間窓の `#regroup` 帰属と自前 `ingest` の定常状態にも直接効く。
+
+5. **0 件失敗参照と 1 件失敗参照の非単調な段差**:
+   - 全 pass ($c_0 = 0$) だけ `CP95` 等の保守的な別モデルにし、$c_0 = 1$ で従来の `BB(0.5)` へ戻すと、「0 件失敗の参照 ($1.31\sigma$) より 1 件失敗の参照 ($1.96\sigma$) のほうが発火しやすい」逆転が起きる。
+
+**修正案 (実装は user の決定後)**
+- **本案 (C18、opt-in `allPassBinaryNull`)**:
+  1. `CurationOptions` に opt-in を追加 (既定 `false`、`mock`・既定 `test-stream` はバイト同一)。unweighted かつ全値が `{0, 1}` の参照 (`effectiveN >= MIN_VALID_COUNT`、`variance === 0`、`mean === 1`) のみを対象とし、重み付きや `{0, 1}` 以外の値が混じれば従来どおり盲目へ退避。全 pass 観測でも明示的に 2 値モデル `[0, 1]` を構築し `referenceUsable: true` (静穏) を返す。
+  2. 2 値 (`levels === 2`) の `exactZ` / `exactWindowMde` を $O(k)$ 対数比漸化式にして `EXACT_MAX_COUNT` 制限を外し、$c_0 = 0$ と $c_0 \ge 1$ を同一の Beta-Binomial 帰無で単調に接続する。
+  3. 全 pass 参照の窓では `minFailures: 2` (既定) 未満の単発失敗で dip タイルを立てない (`gateZ` は `windowScores` に正直に残す)。1 試験の継続失敗はすでに C21/C22 (`PersistenceDetector`) が担っており、役割分担とも一致する (`BB(0.5)` exact + $k \ge 2$ で Prow `10min` 0/35・`60s` 0/114 の誤発火ゼロ、自前 `ingest` 30 ビルドで $k=2$ が `3.36σ`、3 ビルドの起動直後は $k=3$ から `2.55σ`)。
+  4. `isUnitReferenceUsable` を curator 内部で共通化し、`curate` ループ (有限の等価正規 $z$ と説明文での明示)・`buildScoringUnits`・`collectUnreachableTails` (上側 `spike` は到達不能、下側 `dip` は $k=n$ で判定)・`windowMde`・`detectSteps` (全 pass 参照では step 検定を抑止し窓の `dip` に委ねる) の 6 箇所を整合させる。
+- **補助案 (C37 自前運用向けの即効策)**: 既に全 pass 参照で動く C34 (`countRelativeFailureBursts`: 参照 8 窓以上で稼働、4 件以上で発火) が `stream-profile.ts` / `index.ts` / `coarse-replay-trigger.ts` には未配線。これを opt-in 接続すれば、固定 10 件未満の 4〜9 件同時失敗でも粗窓発火 → 自動 `#regroup` replay に繋がる (本案と併用すると `#regroup` 側でも全 pass ジョブが `unscoredGroups` に落ちず帰属できる)。

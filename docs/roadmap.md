@@ -4,6 +4,10 @@
 
 ## 予定
 
+- [ ] C39
+- [ ] C40
+- [ ] C18
+
 ## 閉じた項目
 
 - [x] C38 受けたビルドの保存 (`LIGHTHOUSE_INGEST_LOG`) を、名乗りを変えずに切り詰める (2026-11-28、user 決定で C37 の積み残しから起票。古いビルドを先頭行のチェックポイントへ畳む方式で実装し、試験と実の `builds.jsonl` の写しで再起動の前後の一致を確認。記録は ROADMAP_BRIEF の 2026-11-28 （8） の節)
@@ -166,14 +170,57 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 
 - 起こす条件: user が 60 s 窓の比較行を本番に持つと決めたとき
 - 案: 上限を窓の幅ごとに窓数で持つ (60 s 窓で 24 時間は 1440 件の要約)。6〜24 時間のどこから成り立つかは未測定で、決めるときに先に測る
-### C18. 全 pass の参照でも採点できる帰無 (稀な失敗の流れ)
-状態: 保留(短い窓 (10 分以下) のビューを本番に持つと決めたとき。2026-11-17 に user が推奨を承認)
 
-設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-17 (4)。Prow の試験結果では、本番の 10 s 窓・1 s 窓で失敗のある窓の 0/77・0〜2/113 しか参照が使えない。
+### C39. 参照に対する同時多発 (C34) を本番の粗窓と自動 replay につなぐ
+設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-28 (2) (C34 の規則と確認)・2026-11-28 (9) (補助案)。2026-11-28 に user 決定。
+C34 の `relativeFailureBurst` は全 pass の参照でも動く (参照の平均 0 なら閾値 3、4 件から発火) が、使っているのはレポートと `prow-replay.ts` だけで、`index.ts`・`coarse-replay-trigger.ts` には無い。
+本番の粗窓が固定 10 件の `failures.bursts` でしか自動 replay を起こさないため、4〜9 件の同時失敗は下向きタイルが立たない限り `#regroup` に届かない。
+閾値は Treeherder と Prow で決めて確かめたもので、自前の `ingest` の流れでは未測定。常駐の受け手で有効にするかは、入ってから user が決める。
+
+#### 完了条件
+- [ ] `LIGHTHOUSE_RELATIVE_BURST=1` (opt-in。`test-stream` 以外・`1` 以外の値は起動時に拒否) で、本番の粗窓の curator に `relativeFailureBurst: true` (`C34_RELATIVE_BURST` の既定値) が渡り、package に `relativeFailures` が載る
+- [ ] 未設定なら package・SSE・`/status`・起動ログがバイト同一 (既存の試験が無修正で通る)
+- [ ] `CoarseReplayTrigger` が `relativeFailures.bursts` の窓でも `#regroup` の replay を発火する (重複抑止は従来と同じ窓区間ごと)。`relativeFailures.blind: true` の窓では発火せず、盲目であることを SSE と `/status` が名乗る
+- [ ] SSE と `/status` が「閾値は Treeherder・Prow で決めて確かめた値で、この流れでは未測定」と名乗る (C36 と同じ形)
+- [ ] dashboard の失敗数のパネルに、相対の同時多発を固定 10 件の `bursts` と区別して描く (ブラウザで見たか、見ていないかを記録に書く)
+- [ ] 試験: 発火する経路・盲目で発火しない経路・未設定でのバイト同一・不正な値での起動拒否
+- [ ] 記録済みの Prow 89 日を本番の配線 (`replayThroughShippedWiring`) に流し、package の `relativeFailures.bursts` の窓と件数が `run-treeherder-c34-report` の Prow 側の数えと一致する
+
+### C40. 2 値の厳密な裾を `EXACT_MAX_COUNT` を越えても計算する
+設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-28 (9) の 2 番。2026-11-28 に user 決定 (C18 の前提)。`exactZ` は `n > EXACT_MAX_COUNT` (2,000、`snapshot-curator.ts`) で一律 `null` を返し正規近似へ落ちる。
+Prow の 1 時間合算 (約 3,500 件)・`e2e` 単体の全 pass 参照窓の 51%・自前 `ingest` の 1 時間窓 (2,569 件) が 2,000 を越える。
+参照に失敗 1 件 ($c_0 = 1$) あるとき、2,000 を越えると $k = 1$ が正規近似で `5.21σ` に跳ねる不連続もある。
+$O(n^2)$ になるのは 3 値以上だけで、2 値 (`levels === 2`) の Beta-Binomial の裾は失敗数 $k$ の側から対数比の漸化式で足せば $O(k)$ で厳密に出る。
+既定の出力を変えるので opt-in にする。C18 の opt-in はこれを内側で有効にする。
+
+#### 完了条件
+- [ ] `CurationOptions` の opt-in で、2 値 (`levels === 2`) の `exactZ` と `exactWindowMde` が `n > EXACT_MAX_COUNT` でも厳密な裾を返す。3 値以上と opt-in 無しは従来どおり
+- [ ] $n \le 2{,}000$ で既存の厳密計算と一致する (許容の誤差を試験で固定)
+- [ ] $c_0 = 1$ の参照で、$n = 2{,}000$ と $n = 2{,}001$ の前後の $z$ に正規近似の跳ねが無いことを試験で固定する
+- [ ] $n = 10^5$ の窓 1 つの計算時間を測って記録に書く
+- [ ] 未設定なら package がバイト同一 (`mock`・`test-stream`・A/B のシード集合)
+
+### C18. 全 pass の参照でも採点できる帰無 (稀な失敗の流れ)
+状態: ブロック(C40 の後)
+
+設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-17 (4)・2026-11-28 (9)。Prow の試験結果では、本番の 10 s 窓・1 s 窓で失敗のある窓の 0/77・0〜2/113 しか参照が使えない。
 使えない参照の 92〜99% は「全部 pass で分散が 0」(`isReferenceUsable` が偽)。curator は参照が使えないと採点しないので、失敗が 1 件も無かった直後の失敗で盲目になる。
 
-- user が決めること: 帰無を変えるか (今の「分散 0 の参照は使わない」は 2026-08-18 に締めた安全側の規則)。変えるなら既定は不変の opt-in にするか
-- 案: 参照が全 pass のとき、「n 件中 0 件」から失敗率の上限を持つ帰無で採点する。2 値の窓の厳密な裾 (事前分布つき) の経路が近い形を持つ
-- 先に測ること: その帰無で、平常の flaky (1 万 3 千件に 1 件) が毎回発火しないか。発火するなら、失敗 1 件ではなく「同じ試験が続けて落ちる」を拾う統計が要る
-- C12 の結果 (2026-11-17 (5)): 1 時間窓 × 参照 30 窓では盲目は 1.2% で、この帰無が無くても動く。要るのは短い窓 (10 分以下) を使うときで、急がない
-- 決定になったら完了条件を付ける
+- 2026-11-28 user 決定: 帰無を opt-in で変える (既定の「分散 0 の参照は使わない」は不変)。起こす理由は短い窓ではなく、1 時間窓の `#regroup` のジョブ別の盲目 (下の実測) と自前 `ingest` の定常状態
+- 下調べ (2026-11-28 (9)) は Prow 3 週・89 日 = 使用済みの探索データで、`BB(0.5)` 厳密・`minFailures: 2` もそれを見て選んだ。確認は未取り込みの Prow 2026-11-16 以降で 1 回だけ行う
+- 本番 (`#regroup`・`ingest`) への配線は、確認が成立してから別項目にする (C34 → C39 と同じ順)
+- 案 (2026-11-28 (9) 下調べで具体化): opt-in `allPassBinaryNull` — unweighted かつ `{0, 1}` の 2 値ストリームに限り、全 pass 参照 (`effectiveN >= MIN_VALID_COUNT`・`variance === 0`・`mean === 1`) を 2 値厳密 Beta-Binomial 帰無 ($O(k)$ 計算で `EXACT_MAX_COUNT = 2_000` 制限を 2 値のみ解除) と `minFailures: 2` (単発 flaky 抑止、1 試験の継続は C21/C22 `PersistenceDetector` に委ねる) で採点する。`isReferenceUsable` / `curate` ループ / `buildScoringUnits` / `collectUnreachableTails` / `windowMde` / `detectSteps` の 6 箇所と `categoricalModel` の全 pass 非対称を整合させる
+- 下調べの実測 (2026-11-28 (9)):
+  - 単発 flaky ($k=1$) の暴発: 全 pass 参照の単発失敗は $N_{\text{ref}}/n$ が大きい窓で `BB(0.5)`・`BB(1.0)`・`CP95`/`CP99` いずれでも誤発火する (Prow 3 週 `10min` で 1〜3/35、`60s` で 4〜52/114)。`BB(0.5)` exact + $k \ge 2$ なら 0/35・0/114 に抑えられ、自前 `ingest` 30 ビルドで $k=2$ (`3.36σ`)・3 ビルドで $k=3$ (`2.55σ`) から検出。なお `60s` の $k \ge 2$ (3 窓) は参照長不足 ($N_{\text{ref}}/n < 1$) でどの帰無でも 0/3
+  - `EXACT_MAX_COUNT = 2_000` の壁: Prow 1 時間合算 (~3,500 件)・`e2e` 単体の全 pass 参照窓の 51% (22/43)・自前 `ingest` の初回 1 時間窓 (2,569 件) が 2,000 超。2 値の $O(k)$ 厳密化は $c_0=1$ の正規近似フォールバック爆発 (`5.21σ`) と $c_0=0 \to 1$ の単調性段差も同時に防ぐ
+  - 影響範囲の拡大: C12 (2026-11-17 (5)) の合算 1 時間窓では盲目 0.0〜1.2% だが、89 日間 Prow の 1 時間窓ジョブ別 (`#regroup`) では `unit` 16.5%・`integration` 19.2%・`e2e` 2.6% (うち $k \ge 2$ が 10 窓) が全 pass 参照で `unscoredGroups` に落ちている。自前 `ingest` (C37/C38) の定常状態でも同様
+  - 補助策: 全 pass 参照で動く C34 (`relativeFailureBurst`) の本番配線は C39 に起票した
+
+#### 完了条件
+- [ ] `CurationOptions.allPassBinaryNull` (opt-in、C40 の厳密な裾を内側で有効にする): unweighted・値が `{0, 1}` だけ・`effectiveN >= MIN_VALID_COUNT`・`variance === 0`・`mean === 1` の参照を、2 値の Beta-Binomial 帰無で採点する。条件を外れる参照は従来どおり盲目と名乗る
+- [ ] 採点可能性の判定は述語 1 つにし、`curate` のループ・`buildScoringUnits`・`collectUnreachableTails`・`windowMde`・`detectSteps`・package の `referenceUsable` と `categoricalModel` がそれを呼ぶ (コピーを作らない)。各箇所に全 pass 参照の試験がある
+- [ ] 全 pass の参照の窓で、失敗が `minFailures` (既定 2) 未満なら下向きのタイルを立てない。`windowScores` に $z$ は残し、抑止したことを package が名乗る
+- [ ] 全 pass の参照では `detectSteps` が step を検定せず、そのことを名乗る (窓の `dip` に委ねる)
+- [ ] 未設定なら package がバイト同一 (`mock`・`test-stream`・A/B のシード集合)
+- [ ] 判定の基準 (単発の失敗での誤発火・`#regroup` のジョブ別の盲目の割合・C20 と同じ規則の植え込みでのジョブ別の捕捉) と線を、確認範囲 (Prow 2026-11-16 以降、3 ジョブ) を取り込む前にコミットする
+- [ ] 確認範囲を取り込み、1 回だけ読んで成立・不成立をそのまま記録する (不成立でも線は動かさない)。植え込みなしの対照を同じ出力に並べる
