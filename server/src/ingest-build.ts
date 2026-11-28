@@ -247,6 +247,17 @@ export interface LiveBuildIngestorOptions {
   maxSeenBuilds?: number;
   now?: () => number;
   onAnnouncement?: (a: Announcement) => void;
+  /**
+   * Where each accepted build is written before it is applied (ROADMAP C37, `ingest-log.ts`).
+   * A build it cannot write is refused with nothing applied. Absent = memory only, as before.
+   */
+  log?: { append(build: ProwBuild): void };
+}
+
+/** What `LiveBuildIngestor.restore` fed back from a log. */
+export interface IngestRestoreResult {
+  builds: number;
+  announcements: number;
 }
 
 /**
@@ -263,6 +274,7 @@ export class LiveBuildIngestor {
   private readonly maxAnnouncements: number;
   private readonly now: () => number;
   private readonly onAnnouncement?: (a: Announcement) => void;
+  private readonly log?: { append(build: ProwBuild): void };
   private readonly surfaced: Announcement[] = [];
   private readonly maxSeenBuilds: number;
   /** (job, buildId) keys in arrival order; a Set keeps insertion order, so the oldest is evicted first. */
@@ -294,6 +306,7 @@ export class LiveBuildIngestor {
     this.eventOpts = opts.eventOpts ?? {};
     this.now = opts.now ?? (() => Date.now());
     this.onAnnouncement = opts.onAnnouncement;
+    this.log = opts.log;
     this.detector = new PersistenceDetector(this.eventOpts, opts.flakyHistory, opts.maxPassedCommits);
   }
 
@@ -317,13 +330,30 @@ export class LiveBuildIngestor {
   }
 
   ingestBuild(build: ProwBuild): IngestBuildResult {
+    return this.apply(build, true);
+  }
+
+  /**
+   * Feeds builds read back from the log (ROADMAP C37) through the same path as a POST, in order,
+   * without writing them again and without `onAnnouncement` (they were announced before the restart).
+   * Their announcements return to `announcements()`, so `/persistence` reads as it did.
+   */
+  restore(builds: readonly ProwBuild[]): IngestRestoreResult {
+    let announcements = 0;
+    for (const b of builds) announcements += this.apply(b, false).announcements.length;
+    return { builds: builds.length, announcements };
+  }
+
+  private apply(build: ProwBuild, live: boolean): IngestBuildResult {
     // A resent build is refused before anything is touched: the detector would take an equal
     // scheduledMs as in order and count its failures a second time.
     const key = `${build.job}\u0000${build.id}`;
     if (this.seenBuilds.has(key)) throw new DuplicateBuildError(build.job, build.id);
 
-    // Run PersistenceDetector FIRST so an out-of-order scheduledMs throws
-    // RangeError before mutating downstream buffers or counters.
+    // Refuse an out-of-order build before it is written or reaches any buffer or counter, then write
+    // it: a build the log cannot hold is refused whole, so memory never holds what a restart would lose.
+    this.detector.checkOrder(build);
+    if (live) this.log?.append(build);
     const announcements = this.detector.add(build);
     this.lastScheduledMs = build.scheduledMs;
     this.seenBuilds.add(key);
@@ -343,7 +373,7 @@ export class LiveBuildIngestor {
       if (this.surfaced.length > this.maxAnnouncements) {
         this.surfaced.splice(0, this.surfaced.length - this.maxAnnouncements);
       }
-      this.onAnnouncement?.(a);
+      if (live) this.onAnnouncement?.(a);
     }
 
     this.builds++;

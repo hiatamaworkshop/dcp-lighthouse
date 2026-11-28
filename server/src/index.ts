@@ -27,6 +27,7 @@ import { resolveStreamProfile } from "./stream-profile.js";
 import { CoarseReplayTrigger, COARSE_REPLAY_VIEW } from "./coarse-replay-trigger.js";
 import { checkSourceProfile, loadProwLive, maxReplaySpeed, parsePersistHistory, prowEventExtractor, type ProwLiveSource, type ProwPersistenceFeed } from "./prow-live.js";
 import { LiveBuildIngestor } from "./ingest-build.js";
+import { IngestLog, parseIngestLogPath } from "./ingest-log.js";
 import { describeFlakyHistory, flakyTag, type FlakyHistoryDescription } from "./prow-persist.js";
 import { DEFAULT_PROW_JOBS } from "./prow-import.js";
 import { resolve as resolvePath } from "node:path";
@@ -77,6 +78,12 @@ const persistHistory: FlakyHistoryDescription | undefined =
     ? describeFlakyHistory(persistHistoryRuns, LIGHTHOUSE_SOURCE === "ingest" ? "the ingested build stream" : "the recorded Prow stream")
     : undefined;
 checkSourceProfile(LIGHTHOUSE_SOURCE, profile.name);
+/**
+ * LIGHTHOUSE_INGEST_LOG=<path> (ROADMAP C37, opt-in, ingest only): every accepted build is appended
+ * there and fed back at the next boot, so a restart does not leave the live view without its
+ * 30 reference windows. Unset: memory only, as before.
+ */
+const ingestLogPath = parseIngestLogPath(process.env.LIGHTHOUSE_INGEST_LOG, LIGHTHOUSE_SOURCE);
 if (LIGHTHOUSE_SOURCE === "prow") {
   const fromDay = process.env.PROW_REPLAY_FROM;
   const toDay = process.env.PROW_REPLAY_TO;
@@ -417,6 +424,7 @@ if (LIGHTHOUSE_SOURCE !== "mock" && BRAIN_MODE !== "rule") {
   throw new Error(`LIGHTHOUSE_SOURCE=${LIGHTHOUSE_SOURCE} runs with BRAIN_MODE=rule only, got "${BRAIN_MODE}"`);
 }
 
+const ingestLog = ingestLogPath !== undefined ? new IngestLog(resolvePath(ingestLogPath)) : undefined;
 const liveIngestor =
   LIGHTHOUSE_SOURCE === "ingest"
     ? new LiveBuildIngestor(
@@ -427,6 +435,7 @@ const liveIngestor =
         },
         {
           ...(persistHistoryRuns !== undefined ? { flakyHistory: { runs: persistHistoryRuns } } : {}),
+          ...(ingestLog !== undefined ? { log: ingestLog } : {}),
           onAnnouncement: (a) => {
             const h =
               a.history !== undefined && persistHistory !== undefined
@@ -458,6 +467,19 @@ overlay.add("fine",   "test_result:v1", { view: "fine"   });
 // scope resizes the freshness zone in place, the same way $Q[observe] reshapes
 // a collector's window. Without this the row was set and never read.
 bindPipelineRetention(registry, buffer);
+
+// The ingest log (ROADMAP C37) is fed back only now, once the overlay's views exist and the buffer
+// follows its $Q row: the restored events take the same path a POST's events take.
+if (liveIngestor !== undefined && ingestLog !== undefined) {
+  const loaded = ingestLog.load();
+  if (loaded.droppedTailBytes > 0) {
+    console.warn(`[ingest-log] ${ingestLog.path}: cut off an unterminated last line (${loaded.droppedTailBytes} bytes) — a write the process did not finish`);
+  }
+  const restored = liveIngestor.restore(loaded.builds);
+  console.log(`[ingest-log] ${ingestLog.path}: restored ${restored.builds} builds (${restored.announcements} persistence announcements)`);
+} else if (liveIngestor !== undefined) {
+  console.log("[ingest-log] LIGHTHOUSE_INGEST_LOG unset — ingested builds live in memory only and are gone at restart");
+}
 
 // ── Wire event flow ───────────────────────────────────────────────────────────
 

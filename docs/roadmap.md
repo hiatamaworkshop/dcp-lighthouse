@@ -178,8 +178,14 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 - 受けた試験名・コミットは個人のローカルのデータとして `data/` の下に置き、コミットしない
 
 #### 完了条件
-- [ ] 送り手: プロジェクトの試験を 1 回走らせると、従来の表示と終了コードのまま、1 ビルド (`job` = プロジェクト名・`buildId` は一意・`commit` = HEAD) として `POST /ingest/build` に届く。灯台が落ちているときは警告 1 行だけで、試験の終了コードは変えない
-- [ ] 保持: opt-in の `LIGHTHOUSE_INGEST_LOG=<path>` で、受理したビルドだけを追記保存し、起動時に読み戻す。拒否したビルド (`400`・`409`) は保存しない。再起動の前後で `/persistence` の名乗りと `/status` の `ingest` 集計が一致することを試験で固定する。未設定なら従来の挙動のまま
-- [ ] 常駐: 灯台サーバを窓を出さずに常駐させる起動手順 (ファイルログ) を用意する。個人環境の部分 (絶対パス・タスク登録) は `CLAUDE.local.md` に置く
-- [ ] 実サーバで dcp-lighthouse と agent-hub の試験をそれぞれ 1 回以上流し、`/status`・`/persistence` に届くこと、サーバを再起動しても残ることを確かめ、ROADMAP_BRIEF に記録する
-- [ ] 試験が全 green。README のコマンド一覧と CLAUDE.md の現在地・環境変数を更新する
+- [x] 送り手: プロジェクトの試験を 1 回走らせると、従来の表示と終了コードのまま、1 ビルド (`job` = プロジェクト名・`buildId` は一意・`commit` = HEAD) として `POST /ingest/build` に届く。灯台が落ちているときは警告 1 行だけで、試験の終了コードは変えない
+- [x] 保持: opt-in の `LIGHTHOUSE_INGEST_LOG=<path>` で、受理したビルドだけを追記保存し、起動時に読み戻す。拒否したビルド (`400`・`409`) は保存しない。再起動の前後で `/persistence` の名乗りと `/status` の `ingest` 集計が一致することを試験で固定する。未設定なら従来の挙動のまま
+- [x] 常駐: 灯台サーバを窓を出さずに常駐させる起動手順 (ファイルログ) を用意する。個人環境の部分 (絶対パス・タスク登録) は `CLAUDE.local.md` に置く
+- [x] 実サーバで dcp-lighthouse と agent-hub の試験をそれぞれ 1 回以上流し、`/status`・`/persistence` に届くこと、サーバを再起動しても残ることを確かめ、ROADMAP_BRIEF に記録する
+- [x] 試験が全 green。README のコマンド一覧と CLAUDE.md の現在地・環境変数を更新する
+
+進み (2026-11-28、記録は ROADMAP_BRIEF の 2026-11-28 （5） の節):
+- `server/scripts/lighthouse-test.mjs` (`npm test` が通る)・`ingest-log.ts` (`IngestLog`・`parseIngestLogPath`)・`LiveBuildIngestor.restore`・`PersistenceDetector.checkOrder`・`server/scripts/run-lighthouse-ingest.ps1`。未コミットの変更の上の実行はコミットを `HEAD+dirty.<diff のハッシュ>` にする
+- 実サーバ: dcp-lighthouse 793 件・失敗 0、agent-hub 888 件・失敗 5 (agent-hub に元からある C126 の試験)。agent-hub の 2 回目で名乗り 5 件、再起動後 `/persistence`・`/status` の `ingest` が一致
+- 試験 793 件 (+12)、全 green。タスクスケジューラへの登録はしていない (user の判断)。保存の切り詰めは無い (約 16 万バイト/ビルド)
+- レビュー無し。閉じるのは user の一言で

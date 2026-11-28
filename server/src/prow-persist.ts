@@ -146,11 +146,20 @@ export class PersistenceDetector {
     this.maxPassedCommits = maxPassedCommits;
   }
 
+  /**
+   * Throws the RangeError `add` would throw for a build out of its job's time order, without
+   * touching any state — so a caller can refuse it before writing it anywhere (ROADMAP C37).
+   */
+  checkOrder(b: ProwBuild): void {
+    const lastMs = this.perJob.get(b.job)?.lastMs ?? -Infinity;
+    if (b.scheduledMs < lastMs) throw new RangeError(`PersistenceDetector: ${b.job} build ${b.id} arrived out of time order`);
+  }
+
   /** Feeds one build (each job's builds in time order) and returns what it announces. */
   add(b: ProwBuild): Announcement[] {
+    this.checkOrder(b);
     let job = this.perJob.get(b.job);
     if (job === undefined) this.perJob.set(b.job, (job = { lastMs: -Infinity, tests: new Map() }));
-    if (b.scheduledMs < job.lastMs) throw new RangeError(`PersistenceDetector: ${b.job} build ${b.id} arrived out of time order`);
     job.lastMs = b.scheduledMs;
     const inBuild = new Map<string, { pass: number; fail: number }>();
     for (const e of buildToEvents(b, this.opts).events) {

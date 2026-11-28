@@ -7382,3 +7382,31 @@ C30 のコードを読み直して 3 点を直した。既定の `mock`・`prow`
 - **経路の前方一致**: `url.startsWith("/ingest/build")` が `/ingest/buildX` も受けていたので、`/ingest/build` と `/ingest/build?…` の完全一致に。
 
 試験 781 件 (+3: 再送の拒否・記憶の FIFO・`checkSourceProfile`。HTTP 試験に `409` 再送と `404` を追加)、全 green。
+
+## 2026-11-28 (5) — C37: 自前のプロジェクトの試験を `ingest` で常時流す (送り手・再起動をまたぐ保持・常駐)
+
+C30 の入口を普段の開発で使う。対象は dcp-lighthouse と agent-hub (どちらも `node --test`)。
+
+**再起動をまたぐ保持 (`server/src/ingest-log.ts`、`LIGHTHOUSE_INGEST_LOG=<path>`、opt-in・`ingest` 専用)**:
+- 動機: `LiveBuildIngestor` はメモリだけで、test-stream は 1 時間窓 × 参照 30 窓なので、再起動のたびに 30 時間盲目に戻っていた。機械の不正終了も続いている。
+- 受理したビルド (正規化済みの `ProwBuild`) を 1 行 1 ビルドで追記し、書くたびに fsync する。起動時に、overlay のビューと `$Q` の bind ができた後で `LiveBuildIngestor.restore` が同じ経路に順に流し戻す。
+  buffer・窓要約の履歴・持続検出器はどれもストリーム時刻に錨を置くので、元の状態に戻る。復元時は書き直さず、`onAnnouncement` も呼ばない (名乗りは `announcements()` に戻る)。
+- 書く順: 再送の拒否 → `PersistenceDetector.checkOrder` (新設。状態を触らずに順序違反を投げる) → 追記 → 反映。拒否されたビルド (`400`・`409`) は書かれず、書けないビルドは何も反映せず `500` (seen にも入らないので回復後に送り直せる)。
+- 末尾の書きかけの行 (改行なし) は切り落として起動時に警告、途中の壊れた行は起動を拒否 (黙って抜かさない)。`ingest` 以外で設定すると起動時に落ちる。
+
+**送り手 (`server/scripts/lighthouse-test.mjs`、依存なし)**:
+- `node lighthouse-test.mjs [--job NAME] [--cwd DIR] -- <node の引数 (--test を含む)>`。`LIGHTHOUSE_INGEST_URL` が無ければ素の `node` を走らせるだけ。あれば `--test` の直後に spec (stdout) と junit (一時ファイル) の 2 つの reporter を足し、終わったら JUnit XML を送る (タイムアウト 5 秒)。
+  送れない・拒否されたときは stderr に警告 1 行で、終了コードは試験のまま。`npm test` (server/) はこれを通る。
+- コミットは、きれいな木なら HEAD、変更があれば `HEAD+dirty.<git diff HEAD --binary の sha1 先頭 12 桁>`。持続検出器は「この試験はこのコミットで pass したことがある」を flaky と読むので、同じ HEAD の上の別の変更を同じコミットにすると、本物の連続失敗を黙らせる。追跡外のファイルはハッシュに入らない。
+- 落とし穴: node の試験の中から `node --test` を起こすと、子が `NODE_TEST_CONTEXT` を継いで親へ報告する形で走る。送り手の試験 (`lighthouse-test-script.test.ts`) はこれを消して起こす。
+
+**常駐 (`server/scripts/run-lighthouse-ingest.ps1`)**: test-stream + ingest + `LIGHTHOUSE_PERSIST_HISTORY=10` + `LIGHTHOUSE_INGEST_LOG=data/ingest/builds.jsonl`。`conhost.exe --headless` 経由で窓を出さず、ログは `data/logs/`、PID は `data/lighthouse-ingest.pid` (Wikimedia 収集器と同じ形)。タスク登録はしていない。
+
+**実地確認 (2026-11-28、PORT 3001)**:
+- dcp-lighthouse の `npm test` (未コミットの変更あり → `+dirty.` のコミット): 793 件・失敗 0 の 1 ビルドとして届いた。
+- agent-hub (リポジトリは変えず `--cwd` で外から): 888 件中 5 件失敗。5 件は送り手を通さない `npm test` でも同じに落ちる、agent-hub 側に元からある失敗 (C126 のフックの試験)。
+  2 回目の送信で 5 件とも持続の名乗りになった (`history` 0/0 = 履歴不足)。
+- サーバを止めて起動し直すと `restored 3 builds (5 persistence announcements)`。`/persistence` と `/status` の `ingest` は再起動の前後で JSON が一致した。
+- 保存は 3 ビルドで 484,286 バイト (1 ビルド約 16 万バイト)。日に 30 回なら約 5 MB/日。切り詰めはまだ無く、起動時の流し戻しの時間も件数に比例する。
+
+試験 793 件 (+12: 保持 9・送り手 3)、全 green。`mock`・`prow`、および `ingest` で `LIGHTHOUSE_INGEST_LOG` 未設定のときの挙動は従来のまま (起動ログに「メモリだけ」の 1 行が増える)。
