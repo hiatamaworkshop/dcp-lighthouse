@@ -33,7 +33,7 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 - **C36 (2026-11-27)**: その履歴を本番の `/persistence`・SSE・dashboard に `LIGHTHOUSE_PERSIST_HISTORY=N` の opt-in で載せた (値は Treeherder で決めたもので Prow では未測定と応答が名乗る)
 - **C34 (2026-11-28)**: 参照 30 窓の失敗数分布に対する相対的な同時多発検出 (`relativeFailureBurst`, opt-in)。上位 10% トリム平均 + 3×scale・最小 3 件・参照 8 窓未満は盲目。確認範囲 (Treeherder 10-24〜11-06 + Prow 89 日) で事前登録した 3 基準が 3/3 成立 (回帰なし失敗窓 4.6% 対 `fixed10` 61.1%、回帰窓との差 +16.9 pt、Prow 10/10・単発 0/379)
 - **C30 (2026-11-28)**: 自前の試験結果・CI をリアルタイム投入する `POST /ingest/build` (`LIGHTHOUSE_SOURCE=ingest`, opt-in)。JSON と JUnit XML (`node --test --test-reporter=junit` 対応) を受け取り `RetentionBuffer`・`PersistenceDetector` (`/persistence`・SSE・任意 `LIGHTHOUSE_PERSIST_HISTORY=N`) へ供給
-- **次**: 台帳 `## 予定` は空。未完は条件付きの保留・提案のみ (C7 量チャネル・C11 履歴窓数上限・C18 全 pass 帰無)。整備項目 C31〜C33 は 2026-11-25 に閉じた。詳細は `docs/roadmap.md`
+- **次**: 台帳 `## 予定` は C37 (自前のプロジェクトの試験結果を `ingest` で常時流す運用。送り手・再起動をまたぐ保持・常駐)。ほかの未完は条件付きの保留・提案のみ (C7 量チャネル・C11 履歴窓数上限・C18 全 pass 帰無)。整備項目 C31〜C33 は 2026-11-25 に閉じた。詳細は `docs/roadmap.md`
 - 数値・日付つきの経緯を知りたいときは `grep -n "^## " docs/devlog/ROADMAP_BRIEF.md` で見出しを引き、該当節だけ `Read` する (全文は 600 KB 超)
 
 | | dcp-minecraft | dcp-lighthouse |
