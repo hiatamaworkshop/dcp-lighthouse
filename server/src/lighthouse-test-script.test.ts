@@ -21,14 +21,14 @@ function fixture(failing: boolean): { dir: string; cleanup: () => void } {
   return { dir, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
 }
 
-function runSender(dir: string, url: string | undefined): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function runSender(dir: string, url: string | undefined, extraNodeArgs: string[] = []): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const env = { ...process.env };
   // This file runs under `node --test`, which marks its children; a nested runner that sees the mark reports to it.
   delete env.NODE_TEST_CONTEXT;
   delete env.LIGHTHOUSE_INGEST_URL;
   if (url !== undefined) env.LIGHTHOUSE_INGEST_URL = url;
   return new Promise((done) => {
-    const child = spawn(process.execPath, [SCRIPT, "--job", "fixture", "--cwd", dir, "--", "--test", "x.test.mjs"], { env });
+    const child = spawn(process.execPath, [SCRIPT, "--job", "fixture", "--cwd", dir, "--", ...extraNodeArgs, "--test", "x.test.mjs"], { env });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (c) => (stdout += c));
@@ -103,6 +103,37 @@ describe("scripts/lighthouse-test.mjs (ROADMAP C37)", () => {
       assert.match(down.stderr, /not sent to http:\/\/127\.0\.0\.1:9/);
     } finally {
       f.cleanup();
+    }
+  });
+
+  it("formatCommit fails closed (undefined) when git diff is unavailable instead of returning clean HEAD", async () => {
+    const { formatCommit } = (await import(new URL("../scripts/lighthouse-test.mjs", import.meta.url).href)) as {
+      formatCommit: (head: string | undefined, diff: Buffer | undefined) => string | undefined;
+    };
+    const head = "0123456789abcdef0123456789abcdef01234567";
+    assert.equal(formatCommit(head, Buffer.alloc(0)), head);
+    assert.equal(formatCommit(head, undefined), undefined, "unreadable diff must not masquerade as clean HEAD");
+    const dirty = formatCommit(head, Buffer.from("diff --git a/x b/x\n"));
+    assert.match(dirty ?? "", new RegExp(`^${head}\\+dirty\\.[0-9a-f]{12}$`));
+    assert.equal(formatCommit(undefined, Buffer.alloc(0)), undefined);
+  });
+
+  it("does not send an interrupted test run (Ctrl+C / signal exit)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "lh-sender-abort-"));
+    writeFileSync(
+      join(dir, "x.test.mjs"),
+      `import { it } from "node:test";\nit("passes first", () => {});\nit("aborts", () => { process.exit(0xc000013a); });\n`,
+    );
+    try {
+      await withReceiver(200, async (url, got) => {
+        // --test-isolation=none runs the test in the node --test process itself so process.exit simulates Ctrl+C on the runner.
+        const r = await runSender(dir, url, ["--test-isolation=none"]);
+        assert.notEqual(r.code, 0);
+        assert.equal(got.length, 0, "aborted run must not be posted to /ingest/build");
+        assert.match(r.stderr, /not sent: test run terminated by SIGINT/);
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

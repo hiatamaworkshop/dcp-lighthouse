@@ -239,6 +239,19 @@ describe("LiveBuildIngestor (ROADMAP C30)", () => {
     assert.throws(() => new LiveBuildIngestor(() => {}, { maxSeenBuilds: 0 }), RangeError);
   });
 
+  it("keeps lastScheduledMs monotonic when another job arrives with an earlier scheduledMs", () => {
+    let clock = 4_500;
+    const ing = new LiveBuildIngestor(() => {}, { now: () => clock });
+    // Job A at 5000, then Job B at 4000 (legal: checkOrder is per job).
+    ing.ingestJson({ job: "job-a", buildId: "a1", scheduledMs: 5_000, cases: [{ name: "t", status: "passed" }] });
+    ing.ingestJson({ job: "job-b", buildId: "b1", scheduledMs: 4_000, cases: [{ name: "t", status: "passed" }] });
+    // Job A arrives without explicit scheduledMs while wall clock reads 4500 (< 5000):
+    // monotonic lastScheduledMs keeps it >= 5000 instead of throwing out-of-order.
+    const res = ing.ingestJson({ job: "job-a", buildId: "a2", cases: [{ name: "t", status: "passed" }] });
+    assert.equal(res.accepted, true);
+    assert.equal(ing.status().builds, 3);
+  });
+
   it("parsePersistHistory accepts ingest alongside prow and still refuses mock", () => {
     assert.equal(parsePersistHistory("10", "ingest"), 10);
     assert.equal(parsePersistHistory("10", "prow"), 10);
@@ -311,16 +324,19 @@ describe("DashboardServer POST /ingest/build (ROADMAP C30)", () => {
       assert.equal(pers.flakyHistory?.runs, 10);
       assert.match(pers.flakyHistory?.basis ?? "", /ingested build stream/);
 
-      // /status carries ingest counters
+      // /status carries ingest counters and liveReference (silence vs blindness)
       const st = (await (await fetch(`${env.baseUrl}/status`)).json()) as {
         running: boolean;
         ingest?: { source: string; builds: number; events: number; failed: number };
+        liveReference?: { referenceUsable: boolean; window_ms: number; scoredWindowCount: number };
       };
       assert.equal(st.running, true);
       assert.equal(st.ingest?.source, "ingest");
       assert.equal(st.ingest?.builds, 3);
       assert.equal(st.ingest?.events, 5);
       assert.equal(st.ingest?.failed, 2);
+      assert.equal(st.liveReference?.referenceUsable, false, "without preceding reference history /status explicitly says blind");
+      assert.equal(st.liveReference?.window_ms, 10_000);
 
       // /demo/start refused with 409 under ingest
       const demo = await fetch(`${env.baseUrl}/demo/start?scenario=AR`);
@@ -363,6 +379,7 @@ describe("DashboardServer POST /ingest/build (ROADMAP C30)", () => {
       assert.equal(r.status, 409);
       const st = (await (await fetch(`${inactive.baseUrl}/status`)).json()) as Record<string, unknown>;
       assert.equal("ingest" in st, false, "mock /status is unchanged when ingest is inactive");
+      assert.equal("liveReference" in st, false, "mock /status carries no liveReference when ingest is inactive");
     } finally {
       await inactive.close();
     }
@@ -414,6 +431,39 @@ describe("DashboardServer POST /ingest/build (ROADMAP C30)", () => {
       assert.equal(bigRes.status, 413);
     } finally {
       await active.close();
+    }
+  });
+
+  it("GET /status liveReference flips from blind (false) to usable (true) once the reference span holds variance", async () => {
+    const env = startTestDashboard({ withIngest: true });
+    try {
+      const before = (await (await fetch(`${env.baseUrl}/status`)).json()) as {
+        liveReference?: { referenceUsable: boolean };
+      };
+      assert.equal(before.liveReference?.referenceUsable, false);
+
+      // Stamp a build inside the preceding 3-window reference span [gridNow - 60s, gridNow - 30s)
+      // with pass + fail variance and >= MIN_VALID_COUNT events.
+      const gridNow = Math.floor(Date.now() / 10_000) * 10_000;
+      const refTs = gridNow - 45_000;
+      const cases = [
+        ...Array.from({ length: 9 }, (_, i) => ({ name: `ok-${i}`, status: "passed" })),
+        { name: "flaky-0", status: "failed" },
+      ];
+      const res = await fetch(`${env.baseUrl}/ingest/build`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ job: "local-ci", buildId: "ref-1", startedMs: refTs, finishedMs: refTs + 1000, cases }),
+      });
+      assert.equal(res.status, 200);
+
+      const after = (await (await fetch(`${env.baseUrl}/status`)).json()) as {
+        liveReference?: { referenceUsable: boolean; window_ms: number };
+      };
+      assert.equal(after.liveReference?.referenceUsable, true);
+      assert.equal(after.liveReference?.window_ms, 10_000);
+    } finally {
+      await env.close();
     }
   });
 });

@@ -187,5 +187,5 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 進み (2026-11-28、記録は ROADMAP_BRIEF の 2026-11-28 （5） の節):
 - `server/scripts/lighthouse-test.mjs` (`npm test` が通る)・`ingest-log.ts` (`IngestLog`・`parseIngestLogPath`)・`LiveBuildIngestor.restore`・`PersistenceDetector.checkOrder`・`server/scripts/run-lighthouse-ingest.ps1`。未コミットの変更の上の実行はコミットを `HEAD+dirty.<diff のハッシュ>` にする
 - 実サーバ: dcp-lighthouse 793 件・失敗 0、agent-hub 888 件・失敗 5 (agent-hub に元からある C126 の試験)。agent-hub の 2 回目で名乗り 5 件、再起動後 `/persistence`・`/status` の `ingest` が一致
-- 試験 793 件 (+12)、全 green。タスクスケジューラへの登録はしていない (user の判断)。保存の切り詰めは無い (約 16 万バイト/ビルド)
-- レビュー無し。閉じるのは user の一言で
+- 試験 797 件 (+16、うちレビュー修正 +4)、全 green。タスクスケジューラへの登録はしていない (user の判断)。保存の切り詰めは無い (約 16 万バイト/ビルド)
+- レビュー修正済み (2026-11-28、ROADMAP_BRIEF 2026-11-28 （6）): `lighthouse-test.mjs` の Ctrl+C / シグナル中断時の送信抑止と `git diff` 失敗時の安全側処理 (`undefined`)、`/status` への `liveReference` (`referenceUsable`、ingest のみ) 追加、`LiveBuildIngestor.lastScheduledMs` の単調化。閉じるのは user の一言で (`close C37`)

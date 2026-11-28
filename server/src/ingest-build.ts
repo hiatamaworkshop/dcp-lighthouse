@@ -355,7 +355,7 @@ export class LiveBuildIngestor {
     this.detector.checkOrder(build);
     if (live) this.log?.append(build);
     const announcements = this.detector.add(build);
-    this.lastScheduledMs = build.scheduledMs;
+    this.lastScheduledMs = Math.max(this.lastScheduledMs, build.scheduledMs);
     this.seenBuilds.add(key);
     if (this.seenBuilds.size > this.maxSeenBuilds) {
       this.seenBuilds.delete(this.seenBuilds.values().next().value!);

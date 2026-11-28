@@ -22,6 +22,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const SEND_TIMEOUT_MS = 5000;
 
@@ -49,12 +50,20 @@ function git(cwd, args) {
   return r.status === 0 ? r.stdout : undefined;
 }
 
+export function formatCommit(head, diff) {
+  if (!head) return undefined;
+  // Fail closed when `git diff` fails: mistaking an unreadable diff for a clean HEAD would
+  // attribute dirty-tree passes to HEAD and let PersistenceDetector suppress real regressions.
+  if (diff === undefined) return undefined;
+  if (diff.length === 0) return head;
+  return `${head}+dirty.${createHash("sha1").update(diff).digest("hex").slice(0, 12)}`;
+}
+
 function commitUnderTest(cwd) {
   const head = git(cwd, ["rev-parse", "HEAD"])?.toString("utf-8").trim();
   if (!head) return undefined;
   const diff = git(cwd, ["diff", "HEAD", "--binary"]);
-  if (diff === undefined || diff.length === 0) return head;
-  return `${head}+dirty.${createHash("sha1").update(diff).digest("hex").slice(0, 12)}`;
+  return formatCommit(head, diff);
 }
 
 function defaultJob(cwd) {
@@ -65,16 +74,21 @@ function defaultJob(cwd) {
 function run(cwd, args) {
   return new Promise((done) => {
     const child = spawn(process.execPath, args, { cwd, stdio: "inherit" });
-    // Ctrl+C reaches the child too; stay alive to forward its exit code.
-    const ignore = () => {};
-    process.on("SIGINT", ignore);
+    // Ctrl+C reaches the child too; stay alive to forward its exit code, and remember
+    // the interrupt (on Windows, Ctrl+C exits the child with 0xC000013A and signal=null).
+    let interrupted = false;
+    const onSigint = () => { interrupted = true; };
+    process.on("SIGINT", onSigint);
     child.on("error", (err) => {
+      process.off("SIGINT", onSigint);
       warn(`could not start node: ${err.message}`);
-      done(1);
+      done({ code: 1, signal: null });
     });
     child.on("exit", (code, signal) => {
-      process.off("SIGINT", ignore);
-      done(code ?? (signal ? 1 : 0));
+      process.off("SIGINT", onSigint);
+      const ctrlC = interrupted || code === 0xc000013a || code === -1073741510 || code === 130;
+      const abortedBy = signal ?? (ctrlC ? "SIGINT" : null);
+      done({ code: code ?? (signal ? 1 : 0), signal: abortedBy });
     });
   });
 }
@@ -108,12 +122,12 @@ async function main() {
   }
   const { cwd, nodeArgs } = parsed;
   const url = process.env.LIGHTHOUSE_INGEST_URL?.trim();
-  if (!url) return run(cwd, nodeArgs);
+  if (!url) return (await run(cwd, nodeArgs)).code;
 
   const testAt = nodeArgs.indexOf("--test");
   if (testAt < 0 || nodeArgs.some((a) => a.startsWith("--test-reporter"))) {
     warn("not sending: the arguments need --test and no --test-reporter of their own");
-    return run(cwd, nodeArgs);
+    return (await run(cwd, nodeArgs)).code;
   }
   const dir = mkdtempSync(join(tmpdir(), "lighthouse-test-"));
   const junitPath = join(dir, "junit.xml");
@@ -128,9 +142,13 @@ async function main() {
   const job = parsed.job ?? defaultJob(cwd);
   const commit = commitUnderTest(cwd);
   const startedMs = Date.now();
-  const code = await run(cwd, args);
+  const { code, signal } = await run(cwd, args);
   const finishedMs = Date.now();
   try {
+    if (signal !== null) {
+      warn(`not sent: test run terminated by ${signal}`);
+      return code;
+    }
     let xml;
     try {
       xml = readFileSync(junitPath, "utf-8");
@@ -156,4 +174,9 @@ async function main() {
   }
 }
 
-process.exitCode = await main();
+const isMain =
+  process.argv[1] !== undefined &&
+  resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase();
+if (isMain) {
+  process.exitCode = await main();
+}

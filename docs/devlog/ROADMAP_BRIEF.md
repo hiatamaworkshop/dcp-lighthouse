@@ -7410,3 +7410,13 @@ C30 の入口を普段の開発で使う。対象は dcp-lighthouse と agent-hu
 - 保存は 3 ビルドで 484,286 バイト (1 ビルド約 16 万バイト)。日に 30 回なら約 5 MB/日。切り詰めはまだ無く、起動時の流し戻しの時間も件数に比例する。
 
 試験 793 件 (+12: 保持 9・送り手 3)、全 green。`mock`・`prow`、および `ingest` で `LIGHTHOUSE_INGEST_LOG` 未設定のときの挙動は従来のまま (起動ログに「メモリだけ」の 1 行が増える)。
+
+## 2026-11-28 (6) — C37 レビュー修正 (中断ラン送信抑止・diff 失敗の安全側処理・`/status` 参照状態・時刻単調化)
+
+C37 (`5000e0b`) をレビューし、運用で踏みうる 4 点を修正した (`mock`・`prow` の出力と挙動は不変)。
+
+- **中断ランの送信抑止 (`server/scripts/lighthouse-test.mjs`)**: `run()` が `{ code, signal }` を返すようにし、シグナル終了または Ctrl+C (`SIGINT` 受信・Windows `0xC000013A`・POSIX `130`) のときは途中書きの JUnit XML を `/ingest/build` へ送らず警告 1 行のみで終了コードを返す。
+- **`git diff` 失敗時の安全側処理 (`server/scripts/lighthouse-test.mjs`)**: `formatCommit(head, diff)` を切り出し、`git diff HEAD --binary` が失敗して `undefined` のときに素の `HEAD` を返さず `undefined` (不明コミット) を返すように変更。dirty ツリーの pass が `HEAD` の `passedOn` に混入して連続失敗を flaky 誤認するのを防ぐ。
+- **`GET /status` にライブ参照の状態を追加 (`server/src/dashboard.ts`)**: `LIGHTHOUSE_SOURCE=ingest` のときだけ `liveReference` (`referenceUsable`・`referenceCoverage`・`aggFuncUnscored`・`window_ms`・`scoredWindowCount`) を返すようにし、台帳の設計メモどおり「緑続きで何も言わない状態」が沈黙か盲目かを `/status` だけで読めるようにした (`mock`・`prow` は出力不変)。
+- **複数ジョブ間の時刻単調化 (`server/src/ingest-build.ts`)**: `LiveBuildIngestor.apply()` の `lastScheduledMs` 更新を `Math.max(this.lastScheduledMs, build.scheduledMs)` に変更し、別ジョブの先行開始ビルドで巻き戻らないようにした。
+- **試験**: 797 件 (+4: `formatCommit` 失敗時・中断ラン送信抑止・複数ジョブ間 `lastScheduledMs` 単調性・`/status` `liveReference` の盲目→使用可能遷移)、全 green。

@@ -994,11 +994,30 @@ export class DashboardServer {
       // rather than a 500.
       const replay = this.replayStatus?.();
       const ingest = this.ingest?.status();
+      // Under ingest (ROADMAP C37), expose whether the live coarse reference can actually
+      // score right now so a quiet stream ("no alarms") can be told apart from a blind one
+      // directly from /status. Omitted under mock and prow so their payloads stay unchanged.
+      const livePkg = ingest !== undefined ? this.livePackage(Date.now()) : null;
+      const liveReference =
+        livePkg !== null
+          ? {
+              referenceUsable: livePkg.referenceUsable,
+              ...(livePkg.aggFuncUnscored === true ? { aggFuncUnscored: true } : {}),
+              ...(livePkg.referenceCoverage !== undefined ? { referenceCoverage: livePkg.referenceCoverage } : {}),
+              window_ms: livePkg.window_ms,
+              scoredWindowCount: livePkg.selection.scoredWindowCount,
+            }
+          : undefined;
       const body = JSON.stringify(
         replay !== undefined
           ? { ...this.generator.getCurrentLoad(), running: !replay.finished, replay }
           : ingest !== undefined
-            ? { ...this.generator.getCurrentLoad(), running: true, ingest }
+            ? {
+                ...this.generator.getCurrentLoad(),
+                running: true,
+                ingest,
+                ...(liveReference !== undefined ? { liveReference } : {}),
+              }
             : this.generator.getCurrentLoad(),
       );
       jsonHeaders(res);

@@ -63,8 +63,8 @@ npm test       # tsc && node --test "dist/*.test.js" (実サーバは起動し�
 
 **自前の試験を灯台へ送る (C37)** — `npm test` は `scripts/lighthouse-test.mjs` を通る。`LIGHTHOUSE_INGEST_URL` が未設定なら
 `node --test` をそのまま走らせるだけ (表示・終了コードは従来どおり)。設定すると JUnit の出力を足して、終わったあと 1 ビルドとして
-`<url>/ingest/build` に送る。灯台が落ちている・拒否したときは警告 1 行で、終了コードは変えない。
-コミットは HEAD、未コミットの変更があれば `HEAD+dirty.<git diff HEAD のハッシュ>` (同じ HEAD の上の別の変更を「同じコミットで pass した」= flaky と読ませないため。追跡外のファイルは含まない)。
+`<url>/ingest/build` に送る (Ctrl+C 等のシグナル中断時は送らない)。灯台が落ちている・拒否したときは警告 1 行で、終了コードは変えない。
+コミットは HEAD、未コミットの変更があれば `HEAD+dirty.<git diff HEAD のハッシュ>` (同じ HEAD の上の別の変更を「同じコミットで pass した」= flaky と読ませないため。追跡外のファイルは含まない)。同一 `--job` で複数試験が並列に重なると開始時刻順の検査で後着が 400 になるため、並列実行時は `--job` を分ける。`/status` の `liveReference.referenceUsable` で参照が盲目か使えるかを確認できる。
 
 ```sh
 # 受け手: 窓を出さずに常駐 (test-stream + ingest + LIGHTHOUSE_PERSIST_HISTORY=10 + LIGHTHOUSE_INGEST_LOG=data/ingest/builds.jsonl)
@@ -338,7 +338,7 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **自前のプロジェクトの試験を常時流す** (2026-11-28、C37) — 送り手 `server/scripts/lighthouse-test.mjs` (`npm test` が通る。`LIGHTHOUSE_INGEST_URL` 未設定なら素通し)、受けたビルドを再起動をまたいで保つ `LIGHTHOUSE_INGEST_LOG` (opt-in、`ingest-log.ts`)、窓を出さない常駐 `server/scripts/run-lighthouse-ingest.ps1`。詳細は ROADMAP_BRIEF.md 2026-11-28 (5)
 - [ ] **次**: 未完は条件付きの保留・提案のみ — 全 pass の参照の帰無 (C18)・量チャネル (C7)・窓要約履歴の窓数上限 (C11)。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 793 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 797 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 
