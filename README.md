@@ -339,9 +339,10 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **自前のプロジェクトの試験を常時流す** (2026-11-28、C37) — 送り手 `server/scripts/lighthouse-test.mjs` (`npm test` が通る。`LIGHTHOUSE_INGEST_URL` 未設定なら素通し)、受けたビルドを再起動をまたいで保つ `LIGHTHOUSE_INGEST_LOG` (opt-in、`ingest-log.ts`)、窓を出さない常駐 `server/scripts/run-lighthouse-ingest.ps1`。詳細は ROADMAP_BRIEF.md 2026-11-28 (5)
 - [x] **受けたビルドの保存の切り詰め** (2026-11-28、C38) — `LIGHTHOUSE_INGEST_LOG_KEEP_HOURS=N` (opt-in) で、起動時に N 時間より古いビルドをファイル先頭行のチェックポイント (検出器の状態・名乗り・通算・再送の記憶) に畳む。ただ消すと続いている連続失敗を二度名乗るため。再起動の前後で `/persistence`・`/status` が一致することを試験と実ログの写しで確認。詳細は ROADMAP_BRIEF.md 2026-11-28 (8)
 - [x] **相対の同時多発を本番の自動 replay へ** (2026-11-28、C39) — `LIGHTHOUSE_RELATIVE_BURST=1` (opt-in、`test-stream` のみ) で本番の粗窓に C34 の `relativeFailures` を載せ、その窓も `#regroup` で replay する。SSE・`/status` に値・「この流れでは未測定」・盲目かを載せる。Prow 89 日を本番の配線に流して C34 の数えと窓・件数が一致。全 pass の参照では届いた replay がジョブ別に盲目 (帰属は C18)。詳細は ROADMAP_BRIEF.md 2026-11-28 (10)
-- [ ] **次**: 2 値の厳密な裾 (C40) → 全 pass の参照の帰無 (C18)。保留・提案は量チャネル (C7)・窓要約履歴の窓数上限 (C11)。仮想ストリームの常設 (F3) は未着手
+- [x] **2 値の厳密な裾を 2,000 件超でも** (2026-11-28、C40) — `CurationOptions.exactBinaryTail` (opt-in) で、pass/fail の窓を件数によらず厳密な Beta-Binomial の mid-p で読む。観測した個数から外向きに漸化式で足し、残りが無視できると証明できるときだけ打ち切る。既定では gate の z が 2,000 → 2,001 件で跳ねる (参照の失敗が通算 1 件で、失敗 3 件の窓が −3.96 → −13.29) が、opt-in では一致する。$10^5$ 件の窓 1 つで 0.1 ms 未満。本番の配線には未投入 (C18 が内側で使う)。詳細は ROADMAP_BRIEF.md 2026-11-28 (11)
+- [ ] **次**: 全 pass の参照の帰無 (C18)。保留・提案は量チャネル (C7)・窓要約履歴の窓数上限 (C11)。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 815 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 820 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 

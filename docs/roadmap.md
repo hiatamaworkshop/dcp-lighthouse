@@ -4,10 +4,15 @@
 
 ## 予定
 
-- [ ] C40
 - [ ] C18
 
 ## 閉じた項目
+
+- [x] C40 2 値の厳密な裾を `EXACT_MAX_COUNT` を越えても計算する (2026-11-28、opt-in `CurationOptions.exactBinaryTail` で実装。記録は ROADMAP_BRIEF の 2026-11-28 （11） の節)
+  - `snapshot-curator.ts` の `betaBinomialTail`: 観測した個数から外向きに比の漸化式で足し、残りが和の $10^{-17}$ 未満と証明できるときだけ打ち切る。opt-in では $n \le 2{,}000$ も同じ和を通るので継ぎ目が無い。`selection.exactBinaryTail` で名乗る
+  - 既定の継ぎ目 (参照の失敗が通算 1 件): gate の z が $n = 2{,}000 \to 2{,}001$ で $k=1$ は −1.96 → −2.51、$k=3$ は −3.96 → −13.29。(9) の `5.21σ` は生の z の値だった
+  - $n = 10^5$ の窓 1 つの `curate` は 0.02〜0.07 ms (感度つきで 1.6 ms 以下)
+  - 試験 820 件 (+5)、全 green。本番の配線には入れていない (C18 の opt-in が内側で有効にする)
 
 - [x] C39 参照に対する同時多発 (C34) を本番の粗窓と自動 replay につなぐ (2026-11-28、opt-in `LIGHTHOUSE_RELATIVE_BURST=1` で実装・Prow 89 日を本番の配線に流して C34 の数えと窓・件数まで一致。記録は ROADMAP_BRIEF の 2026-11-28 （10） の節)
   - `coarse-replay-trigger.ts` (`parseRelativeBurst`・`describeRelativeBurst`・`relativeFailures.bursts` での発火、盲目からは発火しない)・`index.ts` (本番の `Comparator` に `relativeFailureBurst: true`)・`dashboard.ts` (SSE と `/status` の `relativeBurst`: 値・「この流れでは未測定」・直近の live package の盲目と発火)・`dashboard/app.js` (相対だけの窓を破線のタイル)
@@ -194,21 +199,22 @@ C34 の `relativeFailureBurst` は全 pass の参照でも動く (参照の平�
 - [x] 記録済みの Prow 89 日を本番の配線 (`replayThroughShippedWiring`) に流し、package の `relativeFailures.bursts` の窓と件数が `run-treeherder-c34-report` の Prow 側の数えと一致する
 
 ### C40. 2 値の厳密な裾を `EXACT_MAX_COUNT` を越えても計算する
+状態: 完了 (2026-11-28)
+
 設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-28 (9) の 2 番。2026-11-28 に user 決定 (C18 の前提)。`exactZ` は `n > EXACT_MAX_COUNT` (2,000、`snapshot-curator.ts`) で一律 `null` を返し正規近似へ落ちる。
 Prow の 1 時間合算 (約 3,500 件)・`e2e` 単体の全 pass 参照窓の 51%・自前 `ingest` の 1 時間窓 (2,569 件) が 2,000 を越える。
-参照に失敗 1 件 ($c_0 = 1$) あるとき、2,000 を越えると $k = 1$ が正規近似で `5.21σ` に跳ねる不連続もある。
+参照に失敗 1 件 ($c_0 = 1$) あるとき、2,000 を越えると $k = 1$ が正規近似で `5.21σ` に跳ねる不連続もある (実装後の実測: `5.21σ` は生の z。gate の z は −1.96 → −2.51、$k = 3$ で −3.96 → −13.29。2026-11-28 (11))。
 $O(n^2)$ になるのは 3 値以上だけで、2 値 (`levels === 2`) の Beta-Binomial の裾は失敗数 $k$ の側から対数比の漸化式で足せば $O(k)$ で厳密に出る。
 既定の出力を変えるので opt-in にする。C18 の opt-in はこれを内側で有効にする。
 
 #### 完了条件
-- [ ] `CurationOptions` の opt-in で、2 値 (`levels === 2`) の `exactZ` と `exactWindowMde` が `n > EXACT_MAX_COUNT` でも厳密な裾を返す。3 値以上と opt-in 無しは従来どおり
-- [ ] $n \le 2{,}000$ で既存の厳密計算と一致する (許容の誤差を試験で固定)
-- [ ] $c_0 = 1$ の参照で、$n = 2{,}000$ と $n = 2{,}001$ の前後の $z$ に正規近似の跳ねが無いことを試験で固定する
-- [ ] $n = 10^5$ の窓 1 つの計算時間を測って記録に書く
-- [ ] 未設定なら package がバイト同一 (`mock`・`test-stream`・A/B のシード集合)
+- [x] `CurationOptions` の opt-in で、2 値 (`levels === 2`) の `exactZ` と `exactWindowMde` が `n > EXACT_MAX_COUNT` でも厳密な裾を返す。3 値以上と opt-in 無しは従来どおり
+- [x] $n \le 2{,}000$ で既存の厳密計算と一致する (許容の誤差を試験で固定)
+- [x] $c_0 = 1$ の参照で、$n = 2{,}000$ と $n = 2{,}001$ の前後の $z$ に正規近似の跳ねが無いことを試験で固定する
+- [x] $n = 10^5$ の窓 1 つの計算時間を測って記録に書く
+- [x] 未設定なら package がバイト同一 (`mock`・`test-stream`・A/B のシード集合)
 
 ### C18. 全 pass の参照でも採点できる帰無 (稀な失敗の流れ)
-状態: ブロック(C40 の後)
 
 設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-17 (4)・2026-11-28 (9)。Prow の試験結果では、本番の 10 s 窓・1 s 窓で失敗のある窓の 0/77・0〜2/113 しか参照が使えない。
 使えない参照の 92〜99% は「全部 pass で分散が 0」(`isReferenceUsable` が偽)。curator は参照が使えないと採点しないので、失敗が 1 件も無かった直後の失敗で盲目になる。

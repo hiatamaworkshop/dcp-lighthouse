@@ -19,9 +19,9 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 
 ---
 
-## 現在地 (2026-11-28、C39 まで)
+## 現在地 (2026-11-28、C40 まで)
 
-- **Phase 0 + Phase 1 完了**。L1〜L5 (足場・Brain write surface・ClaudeBrain・レンズチェーン・参照ゾーン) 完了。テスト 815 件
+- **Phase 0 + Phase 1 完了**。L1〜L5 (足場・Brain write surface・ClaudeBrain・レンズチェーン・参照ゾーン) 完了。テスト 820 件
 - **実データ較正期間 (Wikimedia / OTel、第 1〜5 段階) は完了**。収集は 2026-11-17 に停止 (タスク無効化・データ保持)。未使用の保留期間は無い
 - **いまの実データは公開 CI の試験結果 (Kubernetes Prow、`data/prow/`)**。1 時間窓 × 参照 30 窓の構成 (`LIGHTHOUSE_PROFILE=test-stream`)・
   持続の名乗り (`/persistence`)・粗窓発火からのグループ別自動 replay まで本番配線済み (C12〜C28)。`mock` が既定で従来のまま
@@ -39,7 +39,9 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
   ただ消すと続いている連続失敗を二度名乗るため。常駐は 168 時間で有効・タスク `dcp-lighthouse-ingest` (ログオン時) に登録・`LIGHTHOUSE_INGEST_URL` を常設
 - **C39 (2026-11-28)**: `LIGHTHOUSE_RELATIVE_BURST=1` (opt-in、`test-stream` のみ) で C34 の相対の同時多発を本番の粗窓に載せ、その窓も `#regroup` で自動 replay。SSE・`/status` の `relativeBurst` が値・「この流れでは未測定」・盲目かを名乗る。
   Prow 89 日を本番の配線に流して C34 の数えと窓・件数が一致 (`run-prow-c39-report`)。全 pass の参照では届いた replay がジョブ別に盲目 (帰属は C18)。常駐の受け手では未有効
-- **次**: 台帳 `## 予定` は C40 (2 値の厳密な裾を 2,000 件超でも) → C18 (全 pass 参照の帰無、opt-in・確認は未取り込みの Prow 2026-11-16〜)。2026-11-28 の C18 下調べ (`ROADMAP_BRIEF` 2026-11-28 (9)) から user 決定。保留・提案は C7 量チャネル・C11 履歴窓数上限。整備項目 C31〜C33 は 2026-11-25 に閉じた。詳細は `docs/roadmap.md`
+- **C40 (2026-11-28)**: `CurationOptions.exactBinaryTail` (opt-in) で 2 値の窓を件数によらず厳密な Beta-Binomial の mid-p で読む (`betaBinomialTail`、外向きの漸化式・証明できるときだけ打ち切り)。
+  既定は gate の z が 2,000 → 2,001 件で跳ねる (失敗 3 件で −3.96 → −13.29)。`selection.exactBinaryTail` で名乗る。本番の配線には未投入
+- **次**: 台帳 `## 予定` は C18 (全 pass 参照の帰無、opt-in・C40 を内側で有効にする・確認は未取り込みの Prow 2026-11-16〜)。2026-11-28 の C18 下調べ (`ROADMAP_BRIEF` 2026-11-28 (9)) から user 決定。保留・提案は C7 量チャネル・C11 履歴窓数上限。整備項目 C31〜C33 は 2026-11-25 に閉じた。詳細は `docs/roadmap.md`
 - 数値・日付つきの経緯を知りたいときは `grep -n "^## " docs/devlog/ROADMAP_BRIEF.md` で見出しを引き、該当節だけ `Read` する (全文は 600 KB 超)
 
 | | dcp-minecraft | dcp-lighthouse |
