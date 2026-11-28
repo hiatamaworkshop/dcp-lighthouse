@@ -67,7 +67,8 @@ npm test       # tsc && node --test "dist/*.test.js" (実サーバは起動し�
 コミットは HEAD、未コミットの変更があれば `HEAD+dirty.<git diff HEAD のハッシュ>` (同じ HEAD の上の別の変更を「同じコミットで pass した」= flaky と読ませないため。追跡外のファイルは含まない)。同一 `--job` で複数試験が並列に重なると開始時刻順の検査で後着が 400 になるため、並列実行時は `--job` を分ける。`/status` の `liveReference.referenceUsable` で参照が盲目か使えるかを確認できる。
 
 ```sh
-# 受け手: 窓を出さずに常駐 (test-stream + ingest + LIGHTHOUSE_PERSIST_HISTORY=10 + LIGHTHOUSE_INGEST_LOG=data/ingest/builds.jsonl)
+# 受け手: 窓を出さずに常駐 (test-stream + ingest + LIGHTHOUSE_PERSIST_HISTORY=10 + LIGHTHOUSE_INGEST_LOG=data/ingest/builds.jsonl
+#         + LIGHTHOUSE_INGEST_LOG_KEEP_HOURS=168。-KeepHours で変えられる)
 conhost.exe --headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File server/scripts/run-lighthouse-ingest.ps1
 # 送り手: このリポジトリ
 LIGHTHOUSE_INGEST_URL=http://localhost:3001 npm test
@@ -336,9 +337,10 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **参照に対する相対的な同時多発検出** (2026-11-28、C34) — `CurationOptions.relativeFailureBurst` (opt-in、`SnapshotPackage.relativeFailures`)。参照 30 窓の上位 10% トリム平均 + 3×scale (最小 3 件、参照 8 窓未満は盲目) で流れの規模に依らず外れを拾う。事前登録 3 基準が未使用の確認範囲 (Treeherder 10-24〜11-06 + Prow 89 日) で 3/3 成立 (回帰なし失敗窓 61.1%→4.6%、回帰窓との差 +16.9 pt、Prow `>=10` 10/10・単発 0/379)。既定出力はバイト同一。詳細は ROADMAP_BRIEF.md 2026-11-28 (2)
 - [x] **自前の試験実行・CI のリアルタイム投入** (2026-11-28、C30) — `LIGHTHOUSE_SOURCE=ingest` (opt-in) で `POST /ingest/build` を有効化 (`ingest-build.ts`)。JSON ビルド形式と JUnit XML (`node --test --test-reporter=junit` 対応) を受け取り、`RetentionBuffer`・`ObservationOverlay`・`PersistenceDetector` (`/persistence`・SSE・任意 `LIGHTHOUSE_PERSIST_HISTORY=N`) へ供給。`mock`・`prow` の既定出力は不変。詳細は ROADMAP_BRIEF.md 2026-11-28 (3)
 - [x] **自前のプロジェクトの試験を常時流す** (2026-11-28、C37) — 送り手 `server/scripts/lighthouse-test.mjs` (`npm test` が通る。`LIGHTHOUSE_INGEST_URL` 未設定なら素通し)、受けたビルドを再起動をまたいで保つ `LIGHTHOUSE_INGEST_LOG` (opt-in、`ingest-log.ts`)、窓を出さない常駐 `server/scripts/run-lighthouse-ingest.ps1`。詳細は ROADMAP_BRIEF.md 2026-11-28 (5)
+- [x] **受けたビルドの保存の切り詰め** (2026-11-28、C38) — `LIGHTHOUSE_INGEST_LOG_KEEP_HOURS=N` (opt-in) で、起動時に N 時間より古いビルドをファイル先頭行のチェックポイント (検出器の状態・名乗り・通算・再送の記憶) に畳む。ただ消すと続いている連続失敗を二度名乗るため。再起動の前後で `/persistence`・`/status` が一致することを試験と実ログの写しで確認。詳細は ROADMAP_BRIEF.md 2026-11-28 (8)
 - [ ] **次**: 未完は条件付きの保留・提案のみ — 全 pass の参照の帰無 (C18)・量チャネル (C7)・窓要約履歴の窓数上限 (C11)。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 797 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 807 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 
@@ -432,6 +434,7 @@ curl -s http://localhost:3001/brain
 | `LIGHTHOUSE_SOURCE` | `mock` | `mock` \| `prow` \| `ingest`。`prow` は `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可 (`PROW_REPLAY_FROM` / `PROW_REPLAY_TO` 必須、`PROW_REPLAY_SPEED` 既定 `3600`・上限 `7200`・C26、`PROW_DIR` / `PROW_JOBS` 任意、`prow-live.ts`)。`ingest` も `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可で、`POST /ingest/build` (JSON または `Content-Type: application/xml` で JUnit XML + `?job=...&commit=...`) を有効化し `RetentionBuffer` と `/persistence` へ流す (C30、`ingest-build.ts`)。同じ `job` + `buildId` の再送は `409` |
 | `LIGHTHOUSE_PERSIST_HISTORY` | (未設定) | 正の整数 N。`LIGHTHOUSE_SOURCE=prow` または `ingest` のとき指定可 (それ以外・正の整数以外は起動時に落ちる)。持続の名乗りに試験の直近 N ビルドの失敗数 (`history`) を添え、`/persistence` の `flakyHistory`・SSE の `persistenceHistory` に読み方 (quiet = 失敗 ≤ 10%) と「Treeherder で決めた値で、この流れでは未測定」を載せる (C36)。未設定なら出力は従来のまま |
 | `LIGHTHOUSE_INGEST_LOG` | (未設定) | パス。`LIGHTHOUSE_SOURCE=ingest` のときだけ指定可 (それ以外は起動時に落ちる)。受理したビルドだけを 1 行 1 ビルドで追記 (fsync) し、次の起動で同じ経路に順に流し戻す。再起動で参照 30 窓が空にならない。末尾の書きかけの行は切り落として警告、途中の壊れた行は起動を拒否 (C37、`ingest-log.ts`)。書けないビルドは何も反映せず `500`。未設定ならメモリだけ (従来どおり) |
+| `LIGHTHOUSE_INGEST_LOG_KEEP_HOURS` | (未設定) | 正の整数 (時間)。`LIGHTHOUSE_INGEST_LOG` があるときだけ指定可、プロファイルの保持の幅 (`test-stream` で 34 時間) 未満は起動時に落ちる。起動時に、先頭から続く N 時間より古いビルドをファイル先頭行のチェックポイント (検出器の状態・名乗り・通算・再送の記憶) へ畳む (tmp に書いて fsync してから rename、書けなければ警告して元のまま)。チェックポイントを書いた起動と `LIGHTHOUSE_PERSIST_HISTORY` が違えば起動を拒否 (C38、`ingest-log.ts`)。未設定なら全部を残す (C37 のまま) |
 | `LIGHTHOUSE_INGEST_URL` | (未設定) | 送り手 `server/scripts/lighthouse-test.mjs` が読む (サーバは読まない)。設定すると試験の結果をそこへ送る (C37) |
 | `PORT` | `3001` | ダッシュボード / HTTP API の待受ポート (0〜65535 の整数) |
 | `CLAUDE_BRAIN_MODEL` | `claude-sonnet-5` | 実測済みは `claude-sonnet-5` / `claude-sonnet-4-6` |

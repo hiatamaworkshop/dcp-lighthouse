@@ -27,7 +27,7 @@ import { resolveStreamProfile } from "./stream-profile.js";
 import { CoarseReplayTrigger, COARSE_REPLAY_VIEW } from "./coarse-replay-trigger.js";
 import { checkSourceProfile, loadProwLive, maxReplaySpeed, parsePersistHistory, prowEventExtractor, type ProwLiveSource, type ProwPersistenceFeed } from "./prow-live.js";
 import { LiveBuildIngestor } from "./ingest-build.js";
-import { IngestLog, parseIngestLogPath } from "./ingest-log.js";
+import { IngestLog, parseIngestLogKeepHours, parseIngestLogPath, restoreFromLog } from "./ingest-log.js";
 import { describeFlakyHistory, flakyTag, type FlakyHistoryDescription } from "./prow-persist.js";
 import { DEFAULT_PROW_JOBS } from "./prow-import.js";
 import { resolve as resolvePath } from "node:path";
@@ -84,6 +84,12 @@ checkSourceProfile(LIGHTHOUSE_SOURCE, profile.name);
  * 30 reference windows. Unset: memory only, as before.
  */
 const ingestLogPath = parseIngestLogPath(process.env.LIGHTHOUSE_INGEST_LOG, LIGHTHOUSE_SOURCE);
+/**
+ * LIGHTHOUSE_INGEST_LOG_KEEP_HOURS=N (ROADMAP C38, opt-in): at boot, builds older than N hours are
+ * folded into a checkpoint at the head of the log, so it stops growing without changing what is
+ * announced. Unset: the whole log is kept.
+ */
+const ingestLogKeepMs = parseIngestLogKeepHours(process.env.LIGHTHOUSE_INGEST_LOG_KEEP_HOURS, ingestLogPath, profile.retentionMs);
 if (LIGHTHOUSE_SOURCE === "prow") {
   const fromDay = process.env.PROW_REPLAY_FROM;
   const toDay = process.env.PROW_REPLAY_TO;
@@ -471,12 +477,16 @@ bindPipelineRetention(registry, buffer);
 // The ingest log (ROADMAP C37) is fed back only now, once the overlay's views exist and the buffer
 // follows its $Q row: the restored events take the same path a POST's events take.
 if (liveIngestor !== undefined && ingestLog !== undefined) {
-  const loaded = ingestLog.load();
-  if (loaded.droppedTailBytes > 0) {
-    console.warn(`[ingest-log] ${ingestLog.path}: cut off an unterminated last line (${loaded.droppedTailBytes} bytes) — a write the process did not finish`);
+  const boot = restoreFromLog(ingestLog, liveIngestor, ingestLogKeepMs);
+  if (boot.droppedTailBytes > 0) {
+    console.warn(`[ingest-log] ${ingestLog.path}: cut off an unterminated last line (${boot.droppedTailBytes} bytes) — a write the process did not finish`);
   }
-  const restored = liveIngestor.restore(loaded.builds);
-  console.log(`[ingest-log] ${ingestLog.path}: restored ${restored.builds} builds (${restored.announcements} persistence announcements)`);
+  const fromCheckpoint = boot.checkpointBuilds > 0 ? ` + ${boot.checkpointBuilds} from its checkpoint` : "";
+  console.log(
+    `[ingest-log] ${ingestLog.path}: restored ${boot.replayedBuilds} builds${fromCheckpoint} (${liveIngestor.announcements().length} persistence announcements)`,
+  );
+  if (boot.folded > 0) console.log(`[ingest-log] folded the ${boot.folded} builds older than ${ingestLogKeepMs! / 3_600_000} h into the checkpoint`);
+  if (boot.foldError !== undefined) console.warn(`[ingest-log] could not fold the old builds (${boot.foldError}); the log is kept whole`);
 } else if (liveIngestor !== undefined) {
   console.log("[ingest-log] LIGHTHOUSE_INGEST_LOG unset — ingested builds live in memory only and are gone at restart");
 }

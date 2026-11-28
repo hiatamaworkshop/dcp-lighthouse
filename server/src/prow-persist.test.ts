@@ -130,3 +130,47 @@ describe("detectPersistence — the rule fixed on 2026-11-17 (C21)", () => {
     assert.ok(eps.length === 1 && eps.every((e) => announced.has(e.buildIds[0]!)));
   });
 });
+
+describe("PersistenceDetector state (ROADMAP C38)", () => {
+  // Passing and failing commits, a rerun of a commit that passed (split), a mixed build, a build
+  // with no commit, a run still going at the end, and a second job interleaved.
+  const builds: ProwBuild[] = [
+    build(0, "a", { t: "passed", u: "passed" }),
+    build(1, "b", { t: "failed", u: "passed" }),
+    build(2, "a", { t: "failed", u: "failed" }),
+    build(3, "c", { t: "passed", u: "failed" }),
+    build(4, undefined, { t: "failed", u: ["failed", "passed"] }),
+    build(5, "d", { t: "failed", u: "failed" }),
+    build(6, "e", { t: "failed", u: "passed" }, "other-job"),
+    build(7, "e", { t: "failed", u: "failed" }),
+    build(8, "f", { t: "failed", u: "passed" }, "other-job"),
+    build(9, "g", { t: "failed", u: "failed" }),
+  ];
+
+  for (const flakyHistory of [undefined, { runs: 3 }]) {
+    it(`reads on after a JSON round trip exactly as feeding every build (flaky history ${flakyHistory?.runs ?? "off"})`, () => {
+      const whole = new PersistenceDetector({}, flakyHistory);
+      const wholeOut = builds.flatMap((b) => whole.add(b));
+      assert.ok(wholeOut.length >= 2);
+      for (let k = 0; k <= builds.length; k++) {
+        const head = new PersistenceDetector({}, flakyHistory);
+        const out = builds.slice(0, k).flatMap((b) => head.add(b));
+        const tail = new PersistenceDetector({}, flakyHistory);
+        tail.importState(JSON.parse(JSON.stringify(head.exportState())));
+        out.push(...builds.slice(k).flatMap((b) => tail.add(b)));
+        assert.deepEqual(out, wholeOut, `split at ${k}`);
+        assert.deepEqual(tail.exportState(), whole.exportState(), `state after split at ${k}`);
+      }
+    });
+  }
+
+  it("refuses a state made under other options, and a detector that has seen builds", () => {
+    const d = new PersistenceDetector({}, { runs: 3 });
+    d.add(builds[0]!);
+    const state = d.exportState();
+    assert.throws(() => new PersistenceDetector().importState(state), /LIGHTHOUSE_PERSIST_HISTORY must match/);
+    assert.throws(() => new PersistenceDetector({}, { runs: 3 }, 8).importState(state), /remembered commits/);
+    assert.throws(() => d.importState(state), /already seen builds/);
+    assert.throws(() => new PersistenceDetector({}, { runs: 3 }).importState({ ...state, jobs: [{ job: "x", lastMs: 0, tests: [["t", { passedOn: [7] }]] }] }), /commit index 7/);
+  });
+});

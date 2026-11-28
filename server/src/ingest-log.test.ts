@@ -1,11 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import type { AddressInfo } from "node:net";
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { IngestLog, parseIngestLogPath } from "./ingest-log.js";
+import { IngestLog, foldCount, parseIngestLogKeepHours, parseIngestLogPath, restoreFromLog } from "./ingest-log.js";
 import { LiveBuildIngestor } from "./ingest-build.js";
 import { prowEventExtractor } from "./prow-live.js";
 import { describeFlakyHistory } from "./prow-persist.js";
@@ -44,11 +44,11 @@ const JUNIT = `<?xml version="1.0" encoding="utf-8"?>
 <testcase name="b" classname="suite" time="0.002"><failure message="boom">boom</failure></testcase></testsuite></testsuites>`;
 
 /** The production wiring of index.ts, small: an ingestor over a buffer and overlay, behind a dashboard. */
-function startServer(logPath: string, restore: boolean) {
+function startServer(logPath: string, restore: boolean, keepMs?: number) {
   const registry = new QRegistry();
   registry.set("observe:test_result:v1#coarse", { window_ms: 3_600_000, align: "epoch" });
   registry.set("compare:test_result:v1", { reference: "preceding", null_model: "independent" });
-  const buffer = new RetentionBuffer<TestEvent>(prowEventExtractor, { retentionWindowMs: 6 * 3_600_000 });
+  const buffer = new RetentionBuffer<TestEvent>(prowEventExtractor, { retentionWindowMs: RETENTION_MS });
   const overlay = new ObservationOverlay(registry);
   overlay.add("coarse", "test_result:v1", { view: "coarse" });
   const history = new WindowHistory(buffer, { maxHistoryMs: 3_600_000 });
@@ -61,7 +61,7 @@ function startServer(logPath: string, restore: boolean) {
     },
     { flakyHistory: { runs: 10 }, log },
   );
-  const restored = restore ? ingestor.restore(log.load().builds) : undefined;
+  const restored = restore ? restoreFromLog(log, ingestor, keepMs) : undefined;
   const dashboard = new DashboardServer(
     new MockStreamGenerator(),
     new TestorAdapter({ windowMs: 5_000 }),
@@ -81,8 +81,10 @@ function startServer(logPath: string, restore: boolean) {
   const server = dashboard.start({ port: 0 });
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const close = () => new Promise<void>((res) => server.close(() => res()));
-  return { baseUrl, close, buffer, restored };
+  return { baseUrl, close, buffer, restored, ingestor };
 }
+
+const RETENTION_MS = 6 * 3_600_000;
 
 async function postJson(baseUrl: string, body: unknown): Promise<number> {
   const r = await fetch(`${baseUrl}/ingest/build`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -123,7 +125,8 @@ describe("IngestLog (ROADMAP C37)", () => {
 
       const second = startServer(tmp.path, true);
       try {
-        assert.deepEqual(second.restored, { builds: 4, announcements: announced.length });
+        assert.deepEqual(second.restored, { droppedTailBytes: 0, checkpointBuilds: 0, replayedBuilds: 4, folded: 0 });
+        assert.equal(second.ingestor.announcements().length, announced.length);
         assert.deepEqual(await readState(second.baseUrl), before);
         assert.equal(second.buffer.size(), sizeBefore);
         // A build resent after the restart is still a resend.
@@ -242,6 +245,133 @@ describe("IngestLog (ROADMAP C37)", () => {
     } finally {
       tmp.cleanup();
     }
+  });
+});
+
+describe("Folding the ingest log (ROADMAP C38)", () => {
+  // Hourly builds h0…h12. b fails from h1 to the end and c now and then, so the 6-hour cut
+  // (h0…h5 folded) falls inside b's run.
+  const hourly = (h: number) => jsonBuild(`h${h}`, h * 60, h === 0 ? [] : h % 4 === 2 ? ["b", "c"] : ["b"]);
+
+  async function fill(logPath: string) {
+    const s = startServer(logPath, false);
+    for (let h = 0; h <= 12; h++) assert.equal(await postJson(s.baseUrl, hourly(h)), 200);
+    const state = await readState(s.baseUrl);
+    const size = s.buffer.size();
+    await s.close();
+    return { state, size };
+  }
+
+  it("keeps /persistence, /status and the buffer across restarts, and never announces a run twice", async () => {
+    const tmp = tempLogPath();
+    try {
+      const before = await fill(tmp.path);
+      const announced = (before.state.persistence as { announcements: Array<{ testId: string; firstBuildId: string }> }).announcements;
+      assert.deepEqual(announced.map((a) => a.firstBuildId), ["h1"]);
+
+      // What dropping the old lines would do: b's run starts again at the cut and is announced again.
+      const all = new IngestLog(tmp.path).load().builds;
+      assert.equal(foldCount(all, RETENTION_MS).count, 6);
+      const naive = new LiveBuildIngestor(() => {}, { flakyHistory: { runs: 10 } });
+      naive.restore(all.slice(6));
+      assert.deepEqual(naive.announcements().map((a) => a.firstBuildId), ["h6"]);
+
+      const second = startServer(tmp.path, true, RETENTION_MS);
+      try {
+        assert.deepEqual(second.restored, { droppedTailBytes: 0, checkpointBuilds: 0, replayedBuilds: 13, folded: 6 });
+        assert.deepEqual(await readState(second.baseUrl), before.state);
+        assert.equal(second.buffer.size(), before.size);
+      } finally {
+        await second.close();
+      }
+      const lines = readFileSync(tmp.path, "utf-8").split("\n").filter((l) => l !== "");
+      assert.equal(lines.length, 1 + 7);
+      assert.ok(lines[0]!.startsWith('{"$checkpoint":'));
+      assert.deepEqual(new IngestLog(tmp.path).load().checkpoint?.foldedBuilds, 6);
+
+      const third = startServer(tmp.path, true, RETENTION_MS);
+      try {
+        assert.deepEqual(third.restored, { droppedTailBytes: 0, checkpointBuilds: 6, replayedBuilds: 7, folded: 0 });
+        assert.deepEqual(await readState(third.baseUrl), before.state);
+        assert.equal(third.buffer.size(), before.size);
+        // A folded build is still a resend, and b's run goes on without a second announcement.
+        assert.equal(await postJson(third.baseUrl, hourly(2)), 409);
+        assert.equal(await postJson(third.baseUrl, hourly(13)), 200);
+        const after = (await readState(third.baseUrl)).persistence as { announcements: unknown[] };
+        assert.deepEqual(after.announcements, announced);
+        assert.equal(lineCount(tmp.path), 1 + 8);
+      } finally {
+        await third.close();
+      }
+    } finally {
+      tmp.cleanup();
+    }
+  });
+
+  it("keeps the log whole when the fold cannot be written, and the boot goes on", async () => {
+    const tmp = tempLogPath();
+    try {
+      const before = await fill(tmp.path);
+      mkdirSync(`${tmp.path}.tmp`); // the sibling file cannot be opened
+      const s = startServer(tmp.path, true, RETENTION_MS);
+      try {
+        assert.equal(s.restored?.folded, 0);
+        assert.ok(s.restored?.foldError !== undefined);
+        assert.deepEqual(await readState(s.baseUrl), before.state);
+        assert.equal(lineCount(tmp.path), 13);
+      } finally {
+        await s.close();
+      }
+    } finally {
+      tmp.cleanup();
+    }
+  });
+
+  it("refuses a checkpoint made with another flaky history, and a checkpoint below the first line", async () => {
+    const tmp = tempLogPath();
+    try {
+      await fill(tmp.path);
+      const log = new IngestLog(tmp.path);
+      restoreFromLog(log, new LiveBuildIngestor(() => {}, { flakyHistory: { runs: 10 } }), RETENTION_MS);
+      assert.throws(() => restoreFromLog(log, new LiveBuildIngestor(() => {})), /LIGHTHOUSE_PERSIST_HISTORY must match/);
+      const [cp, ...rest] = readFileSync(tmp.path, "utf-8").split("\n").filter((l) => l !== "");
+      writeFileSync(tmp.path, [rest[0], cp, ...rest.slice(1)].join("\n") + "\n");
+      assert.throws(() => log.load(), /:2: a checkpoint is only ever the first line/);
+    } finally {
+      tmp.cleanup();
+    }
+  });
+
+  it("folds nothing without KEEP_HOURS, and nothing newer than the cut", () => {
+    const tmp = tempLogPath();
+    try {
+      const log = new IngestLog(tmp.path);
+      const a = new LiveBuildIngestor(() => {}, { log });
+      for (let h = 0; h <= 12; h++) a.ingestJson(hourly(h));
+      assert.equal(restoreFromLog(log, new LiveBuildIngestor(() => {})).folded, 0);
+      assert.equal(restoreFromLog(log, new LiveBuildIngestor(() => {}), 24 * 3_600_000).folded, 0);
+      assert.equal(lineCount(tmp.path), 13);
+    } finally {
+      tmp.cleanup();
+    }
+  });
+});
+
+describe("parseIngestLogKeepHours (ROADMAP C38)", () => {
+  const RET = 34 * 3_600_000;
+  it("is off when unset or empty", () => {
+    assert.equal(parseIngestLogKeepHours(undefined, "x.jsonl", RET), undefined);
+    assert.equal(parseIngestLogKeepHours(" ", undefined, RET), undefined);
+  });
+  it("reads whole hours at or above the retention", () => {
+    assert.equal(parseIngestLogKeepHours("34", "x.jsonl", RET), RET);
+    assert.equal(parseIngestLogKeepHours(" 168 ", "x.jsonl", RET), 168 * 3_600_000);
+  });
+  it("refuses it without a log, a non-integer, and below the retention", () => {
+    assert.throws(() => parseIngestLogKeepHours("48", undefined, RET), /LIGHTHOUSE_INGEST_LOG, which is unset/);
+    assert.throws(() => parseIngestLogKeepHours("1.5", "x.jsonl", RET), /positive integer/);
+    assert.throws(() => parseIngestLogKeepHours("0", "x.jsonl", RET), /positive integer/);
+    assert.throws(() => parseIngestLogKeepHours("33", "x.jsonl", RET), /shorter than the retention/);
   });
 });
 

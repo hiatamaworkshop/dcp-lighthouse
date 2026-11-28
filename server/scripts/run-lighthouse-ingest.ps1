@@ -2,6 +2,7 @@
 #
 #   LIGHTHOUSE_PROFILE=test-stream  LIGHTHOUSE_SOURCE=ingest  LIGHTHOUSE_PERSIST_HISTORY=10
 #   LIGHTHOUSE_INGEST_LOG=data/ingest/builds.jsonl  (accepted builds survive a restart)
+#   LIGHTHOUSE_INGEST_LOG_KEEP_HOURS=168             (older builds folded into a checkpoint, C38)
 #
 # Start it without a console window — a visible window gets closed as clutter, and that kills the
 # server with 0xC000013A (2026-09-30, the Wikimedia collector). For a Task Scheduler action, or by hand:
@@ -20,8 +21,13 @@
 # for Windows that is a shim that starts the real node as its child, so the PID written below was the
 # shim's, Stop-Process killed only the shim, and the server kept port 3001 (2026-11-28: a "restart"
 # failed with EADDRINUSE and the old process went on answering).
+#
+# -KeepHours (ROADMAP C38): at each start, builds older than this are folded into a checkpoint at the
+# head of builds.jsonl, so it stops growing (~5 MB a day) without changing what is announced. A week
+# keeps the raw builds for a look back; the server refuses less than the 34 h the live view scores against.
 param(
   [int]$Port = 3001,
+  [int]$KeepHours = 168,
   [string]$Node = (& (Get-Command node -ErrorAction Stop).Source -p "process.execPath")
 )
 $ErrorActionPreference = "Stop"
@@ -35,6 +41,7 @@ $env:LIGHTHOUSE_PROFILE = "test-stream"
 $env:LIGHTHOUSE_SOURCE = "ingest"
 $env:LIGHTHOUSE_PERSIST_HISTORY = "10"
 $env:LIGHTHOUSE_INGEST_LOG = Join-Path $repo "data\ingest\builds.jsonl"
+$env:LIGHTHOUSE_INGEST_LOG_KEEP_HOURS = "$KeepHours"
 $env:PORT = "$Port"
 
 $p = Start-Process -FilePath $Node -ArgumentList "dist/index.js" `

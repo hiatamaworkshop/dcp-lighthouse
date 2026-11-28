@@ -163,10 +163,13 @@ curl -s http://localhost:3001/persistence     # 試験ごとの持続の名乗�
 ```bash
 cd server && npm run build
 LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=ingest LIGHTHOUSE_PERSIST_HISTORY=10 \
-  LIGHTHOUSE_INGEST_LOG=../data/ingest/builds.jsonl PORT=3002 node dist/index.js
+  LIGHTHOUSE_INGEST_LOG=<scratchpad>/builds.jsonl PORT=3002 node dist/index.js
 ```
 
-- 起動ログに `[ingest-log] <path>: restored N builds (M persistence announcements)` が出る。`LIGHTHOUSE_INGEST_LOG` 無しなら「メモリだけ」の 1 行
+- 起動ログに `[ingest-log] <path>: restored N builds (M persistence announcements)` が出る。`LIGHTHOUSE_INGEST_LOG` 無しなら「メモリだけ」の 1 行。
+  畳んだログなら `restored N builds + K from its checkpoint`、その起動で畳んだら `folded the K builds older than N h into the checkpoint` (C38、`LIGHTHOUSE_INGEST_LOG_KEEP_HOURS`)
+- **常駐の `data/ingest/builds.jsonl` を別のサーバに指さない**。常駐は起動時にそのファイルを書き換える (畳み込み) ので、2 つのプロセスが同じファイルを持つと受けたビルドが消える
+- ユーザ環境変数 `LIGHTHOUSE_INGEST_URL=http://localhost:3001` が常設されている (2026-11-28〜)。新しい shell の `npm test` は常駐へ送る。試しのサーバへ送るときは明示的に上書きする
 - 送る: `LIGHTHOUSE_INGEST_URL=http://localhost:3002 npm test` (server/)。最後に stderr へ `[lighthouse] sent <job> build <id>: N results, F failed` が出る。
   届かなければ `not sent to ...` の 1 行で、試験の終了コードは変わらない
 - 実験で常駐の `data/ingest/builds.jsonl` を汚さない。試しに流すときは `LIGHTHOUSE_INGEST_LOG` を scratchpad のファイルにするか付けない

@@ -14,7 +14,7 @@
 
 import { parseJunit, type CaseStatus, type JunitCase, type JunitSuite, type ProwBuild } from "./prow-import.js";
 import { buildToEvents, type ProwEvent, type ProwEventOptions } from "./prow-events.js";
-import { PersistenceDetector, type Announcement, type FlakyHistoryOptions } from "./prow-persist.js";
+import { PersistenceDetector, type Announcement, type FlakyHistoryOptions, type PersistenceDetectorState } from "./prow-persist.js";
 
 /** Maximum request body size accepted by POST /ingest/build (10 MiB). */
 export const MAX_INGEST_BODY_BYTES = 10 * 1024 * 1024;
@@ -412,4 +412,70 @@ export class LiveBuildIngestor {
       lastBuildId: this.lastBuildId,
     };
   }
+
+  /**
+   * Everything a restart needs besides the buffer (ROADMAP C38): the detector, the announcements,
+   * the totals and the resend memory, as plain JSON. An ingest log folds its old builds into this,
+   * so `restoreCheckpoint` then the newer builds reads on exactly as feeding every build would.
+   */
+  checkpoint(): IngestCheckpoint {
+    return {
+      version: 1,
+      detector: this.detector.exportState(),
+      surfaced: this.surfaced.map((a) => ({ ...a, ...(a.history !== undefined ? { history: { ...a.history } } : {}) })),
+      seenBuilds: [...this.seenBuilds],
+      seq: this.seq,
+      lastScheduledMs: Number.isFinite(this.lastScheduledMs) ? this.lastScheduledMs : null,
+      builds: this.builds,
+      totalEvents: this.totalEvents,
+      totalFailed: this.totalFailed,
+      totalSkipped: this.totalSkipped,
+      lastBuildAt: this.lastBuildAt,
+      lastJob: this.lastJob,
+      lastBuildId: this.lastBuildId,
+    };
+  }
+
+  /** Loads a `checkpoint()` into this ingestor, before any build reaches it. Its events are not replayed. */
+  restoreCheckpoint(raw: unknown): void {
+    if (this.builds > 0 || this.seenBuilds.size > 0) throw new Error("LiveBuildIngestor.restoreCheckpoint: builds were already ingested");
+    const c = raw as IngestCheckpoint;
+    const bad = (why: string): never => {
+      throw new Error(`ingest checkpoint: ${why}`);
+    };
+    if (typeof c !== "object" || c === null || c.version !== 1) bad("not a version 1 checkpoint");
+    if (!Array.isArray(c.surfaced) || !Array.isArray(c.seenBuilds) || c.seenBuilds.some((k) => typeof k !== "string")) bad("surfaced / seenBuilds");
+    for (const n of [c.seq, c.builds, c.totalEvents, c.totalFailed, c.totalSkipped]) {
+      if (!Number.isInteger(n) || n < 0) bad("totals");
+    }
+    this.detector.importState(c.detector);
+    for (const a of c.surfaced.slice(-this.maxAnnouncements)) this.surfaced.push(a);
+    for (const k of c.seenBuilds.slice(-this.maxSeenBuilds)) this.seenBuilds.add(k);
+    this.seq = c.seq;
+    this.lastScheduledMs = c.lastScheduledMs ?? -Infinity;
+    this.builds = c.builds;
+    this.totalEvents = c.totalEvents;
+    this.totalFailed = c.totalFailed;
+    this.totalSkipped = c.totalSkipped;
+    this.lastBuildAt = c.lastBuildAt;
+    this.lastJob = c.lastJob;
+    this.lastBuildId = c.lastBuildId;
+  }
+}
+
+/** What `LiveBuildIngestor.checkpoint` writes (ROADMAP C38). */
+export interface IngestCheckpoint {
+  version: 1;
+  detector: PersistenceDetectorState;
+  surfaced: Announcement[];
+  seenBuilds: string[];
+  seq: number;
+  lastScheduledMs: number | null;
+  builds: number;
+  totalEvents: number;
+  totalFailed: number;
+  totalSkipped: number;
+  lastBuildAt: number | null;
+  lastJob: string | null;
+  lastBuildId: string | null;
 }

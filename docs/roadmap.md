@@ -6,6 +6,13 @@
 
 ## 閉じた項目
 
+- [x] C38 受けたビルドの保存 (`LIGHTHOUSE_INGEST_LOG`) を、名乗りを変えずに切り詰める (2026-11-28、user 決定で C37 の積み残しから起票。古いビルドを先頭行のチェックポイントへ畳む方式で実装し、試験と実の `builds.jsonl` の写しで再起動の前後の一致を確認。記録は ROADMAP_BRIEF の 2026-11-28 （8） の節)
+  - 単に消すと、続いている連続失敗の途中で切れたとき同じ失敗を二度名乗る (試験で再現: 全部なら `h1` の 1 件、後ろだけなら `h6` の 1 件)。flaky の履歴・通った commit・通算・再送の記憶も欠ける
+  - `ingest-log.ts`: opt-in `LIGHTHOUSE_INGEST_LOG_KEEP_HOURS=N` (保持 34 時間未満・ログ無しは起動時に拒否)。起動時に、先頭から続く N 時間より古いビルドを `LiveBuildIngestor.checkpoint()` の 1 行に畳む (tmp → fsync → rename、書けなければ警告して元のまま)。`restoreFromLog` を本番と試験が共に通る
+  - `PersistenceDetector.exportState / importState` (commit は表引き)。設定 (flaky の履歴の N・`maxPassedCommits`) が違うチェックポイントは起動を拒否
+  - 試験 807 件 (+10)、全 green。実の 3 ビルドの写しで切れ目 2 通り × 2 回の起動とも名乗り 5 件と `/status` が一致。チェックポイントは約 43 万バイト (試験約 1,700 件ぶん) で、ファイルは「チェックポイント + N 時間ぶん」で頭打ち
+  - 常駐: `run-lighthouse-ingest.ps1 -KeepHours` (既定 168)。タスク `dcp-lighthouse-ingest` (ログオン時) に登録し、タスクから起こして復元を確認。ユーザ環境変数 `LIGHTHOUSE_INGEST_URL` を常設。実の常駐ではまだ畳む対象が無い (最古のビルドが 168 時間より新しい)
+
 - [x] C37 自前のプロジェクトの試験結果を `ingest` で常時流す運用を始める (2026-11-28、送り手・再起動をまたぐ保持・窓を出さない常駐を実装し、dcp-lighthouse と agent-hub の実の試験で再起動の前後の一致まで確認。レビュー修正込み。記録は ROADMAP_BRIEF の 2026-11-28 （5）〜（7） の節)
   - `server/scripts/lighthouse-test.mjs` (`npm test` が通る・`LIGHTHOUSE_INGEST_URL` 未設定なら素通し・送れなくても終了コードは不変・中断した実行は送らない)。コミットは HEAD、未コミットの変更があれば `HEAD+dirty.<git diff HEAD のハッシュ>`、diff が読めなければ送らない (同じ HEAD での pass を flaky と読ませない)
   - `ingest-log.ts` (`LIGHTHOUSE_INGEST_LOG`、opt-in・`ingest` 専用): 受理したビルドだけを fsync で追記し、起動時に `LiveBuildIngestor.restore` が同じ経路に流し戻す。書く前に `PersistenceDetector.checkOrder` で順序違反を拒否。書きかけの末尾は切り落として警告、途中の壊れた行は起動を拒否

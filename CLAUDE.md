@@ -21,7 +21,7 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 
 ## 現在地 (2026-11-28)
 
-- **Phase 0 + Phase 1 完了**。L1〜L5 (足場・Brain write surface・ClaudeBrain・レンズチェーン・参照ゾーン) 完了。テスト 797 件
+- **Phase 0 + Phase 1 完了**。L1〜L5 (足場・Brain write surface・ClaudeBrain・レンズチェーン・参照ゾーン) 完了。テスト 807 件
 - **実データ較正期間 (Wikimedia / OTel、第 1〜5 段階) は完了**。収集は 2026-11-17 に停止 (タスク無効化・データ保持)。未使用の保留期間は無い
 - **いまの実データは公開 CI の試験結果 (Kubernetes Prow、`data/prow/`)**。1 時間窓 × 参照 30 窓の構成 (`LIGHTHOUSE_PROFILE=test-stream`)・
   持続の名乗り (`/persistence`)・粗窓発火からのグループ別自動 replay まで本番配線済み (C12〜C28)。`mock` が既定で従来のまま
@@ -35,7 +35,9 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 - **C30 (2026-11-28)**: 自前の試験結果・CI をリアルタイム投入する `POST /ingest/build` (`LIGHTHOUSE_SOURCE=ingest`, opt-in)。JSON と JUnit XML (`node --test --test-reporter=junit` 対応) を受け取り `RetentionBuffer`・`PersistenceDetector` (`/persistence`・SSE・任意 `LIGHTHOUSE_PERSIST_HISTORY=N`) へ供給
 - **C37 (2026-11-28)**: 自前のプロジェクトの試験を `ingest` で常時流す。送り手 `server/scripts/lighthouse-test.mjs` (`npm test` が通る・`LIGHTHOUSE_INGEST_URL` 未設定なら素通し・送れなくても終了コードは不変)、
   受けたビルドを再起動をまたいで保つ `LIGHTHOUSE_INGEST_LOG` (opt-in)、窓を出さない常駐 `server/scripts/run-lighthouse-ingest.ps1`、`/status` の `liveReference` (`ingest` のときだけ。粗窓の参照が盲目か)。dcp-lighthouse と agent-hub の実の試験で、名乗りが再起動の前後で一致することまで確認
-- **次**: 台帳 `## 予定` は空 (C37 は 2026-11-28 に閉じた)。未完は条件付きの保留・提案のみ (C7 量チャネル・C11 履歴窓数上限・C18 全 pass 帰無)。整備項目 C31〜C33 は 2026-11-25 に閉じた。詳細は `docs/roadmap.md`
+- **C38 (2026-11-28)**: `LIGHTHOUSE_INGEST_LOG_KEEP_HOURS=N` (opt-in、保持 34 時間未満は拒否) で、起動時に N 時間より古いビルドを先頭行のチェックポイント (検出器の状態・名乗り・通算・再送の記憶) へ畳む。
+  ただ消すと続いている連続失敗を二度名乗るため。常駐は 168 時間で有効・タスク `dcp-lighthouse-ingest` (ログオン時) に登録・`LIGHTHOUSE_INGEST_URL` を常設
+- **次**: 台帳 `## 予定` は空 (C38 は 2026-11-28 に閉じた)。未完は条件付きの保留・提案のみ (C7 量チャネル・C11 履歴窓数上限・C18 全 pass 帰無)。整備項目 C31〜C33 は 2026-11-25 に閉じた。詳細は `docs/roadmap.md`
 - 数値・日付つきの経緯を知りたいときは `grep -n "^## " docs/devlog/ROADMAP_BRIEF.md` で見出しを引き、該当節だけ `Read` する (全文は 600 KB 超)
 
 | | dcp-minecraft | dcp-lighthouse |
@@ -57,7 +59,7 @@ npm test                          # tsc && node --test "dist/*.test.js" (scripts
 - `npm test` は **`dist/*.test.js` を指定**する。ディレクトリ指定だと `dist/index.js` (実サーバ) が起動して `EADDRINUSE` になる
 - `npm test` は送り手 `scripts/lighthouse-test.mjs` を通る (C37)。`LIGHTHOUSE_INGEST_URL` があるときだけ結果を灯台へ送る。node の試験の中から node の試験を起こすときは `NODE_TEST_CONTEXT` を消す (残すと子が親へ報告する形で走る)
 - `BRAIN_MODE=claude` は **実課金の API 呼び出し**が走る (既定は `rule`)。配線確認は `ANTHROPIC_BASE_URL` のスタブで課金ゼロにできる
-- 環境変数: `LIGHTHOUSE_PROFILE=mock|test-stream` / `LIGHTHOUSE_SOURCE=mock|prow|ingest` (`prow` は記録済み Prow を仮想時計再生、`ingest` は `POST /ingest/build` で JSON / JUnit XML 投入) / `LIGHTHOUSE_PERSIST_HISTORY=N` (持続の名乗りに flaky の履歴、C36・opt-in) / `LIGHTHOUSE_INGEST_LOG=<path>` (`ingest` の受理ビルドを再起動をまたいで保つ、C37・opt-in) / `PORT` (既定 3001)
+- 環境変数: `LIGHTHOUSE_PROFILE=mock|test-stream` / `LIGHTHOUSE_SOURCE=mock|prow|ingest` (`prow` は記録済み Prow を仮想時計再生、`ingest` は `POST /ingest/build` で JSON / JUnit XML 投入) / `LIGHTHOUSE_PERSIST_HISTORY=N` (持続の名乗りに flaky の履歴、C36・opt-in) / `LIGHTHOUSE_INGEST_LOG=<path>` (`ingest` の受理ビルドを再起動をまたいで保つ、C37・opt-in) / `LIGHTHOUSE_INGEST_LOG_KEEP_HOURS=N` (その古い部分をチェックポイントへ畳む、C38・opt-in) / `PORT` (既定 3001)
 - ブラウザでの実地確認は skill `run-lighthouse`、Wikimedia 収集器の運用は skill `wiki-collector-ops`
 
 ---

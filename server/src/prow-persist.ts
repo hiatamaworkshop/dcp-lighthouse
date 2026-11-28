@@ -117,6 +117,26 @@ export function describeFlakyHistory(runs: number, stream: string): FlakyHistory
   };
 }
 
+/**
+ * A `PersistenceDetector`'s whole state as plain JSON (ROADMAP C38): what an ingest log folds its old
+ * builds into, so a restart reads on exactly as if every build had been fed again. Commits are
+ * interned (`commits[i]`), since `passedOn` repeats them across every test of a job.
+ */
+export interface PersistenceDetectorState {
+  /** The options the state was built under; a detector with others refuses it. */
+  flakyHistoryRuns: number | null;
+  maxPassedCommits: number;
+  commits: string[];
+  jobs: Array<{ job: string; lastMs: number; tests: Array<[string, TestStateJson]> }>;
+}
+
+interface TestStateJson {
+  last?: { fail: boolean; buildId: string; scheduledMs: number; commit: number | null; mixed: boolean };
+  passedOn: number[];
+  runStart?: { buildId: string; scheduledMs: number; history?: FlakyHistory };
+  recent?: boolean[];
+}
+
 interface TestState {
   /** Outcome of the last build that had this test. */
   last?: { fail: boolean; buildId: string; scheduledMs: number; commit: string | undefined; mixed: boolean };
@@ -211,6 +231,84 @@ export class PersistenceDetector {
       st.last = { fail, buildId: b.id, scheduledMs: b.scheduledMs, commit: b.commit, mixed };
     }
     return out;
+  }
+
+  /** The state as plain JSON, for `importState` on a fresh detector (ROADMAP C38). */
+  exportState(): PersistenceDetectorState {
+    const commits: string[] = [];
+    const index = new Map<string, number>();
+    const intern = (c: string): number => {
+      let i = index.get(c);
+      if (i === undefined) {
+        index.set(c, (i = commits.length));
+        commits.push(c);
+      }
+      return i;
+    };
+    const jobs: PersistenceDetectorState["jobs"] = [];
+    for (const [job, j] of this.perJob) {
+      const tests: Array<[string, TestStateJson]> = [];
+      for (const [testId, st] of j.tests) {
+        const t: TestStateJson = { passedOn: [...st.passedOn].map(intern) };
+        if (st.last !== undefined) t.last = { ...st.last, commit: st.last.commit === undefined ? null : intern(st.last.commit) };
+        if (st.runStart !== undefined) t.runStart = { ...st.runStart, ...(st.runStart.history !== undefined ? { history: { ...st.runStart.history } } : {}) };
+        if (st.recent !== undefined) t.recent = [...st.recent];
+        tests.push([testId, t]);
+      }
+      jobs.push({ job, lastMs: j.lastMs, tests });
+    }
+    return { flakyHistoryRuns: this.flakyHistory?.runs ?? null, maxPassedCommits: this.maxPassedCommits, commits, jobs };
+  }
+
+  /**
+   * Loads what `exportState` wrote into this detector, which must not have seen a build yet. A state
+   * made under other options is refused: reading it on would give histories of the wrong length.
+   */
+  importState(raw: unknown): void {
+    if (this.perJob.size > 0) throw new Error("PersistenceDetector.importState: the detector has already seen builds");
+    const bad = (why: string): never => {
+      throw new Error(`persistence state: ${why}`);
+    };
+    const s = raw as PersistenceDetectorState;
+    if (typeof s !== "object" || s === null || !Array.isArray(s.commits) || !Array.isArray(s.jobs)) bad("not a detector state");
+    const runs = this.flakyHistory?.runs ?? null;
+    if (s.flakyHistoryRuns !== runs || s.maxPassedCommits !== this.maxPassedCommits) {
+      bad(
+        `made with flaky history ${s.flakyHistoryRuns ?? "off"} and ${s.maxPassedCommits} remembered commits, ` +
+          `this detector has ${runs ?? "off"} and ${this.maxPassedCommits} (LIGHTHOUSE_PERSIST_HISTORY must match the boot that wrote it)`,
+      );
+    }
+    const commit = (i: unknown): string => {
+      if (!Number.isInteger(i) || (i as number) < 0 || (i as number) >= s.commits.length) bad(`commit index ${String(i)}`);
+      return s.commits[i as number]!;
+    };
+    const restored = new Map<string, { lastMs: number; tests: Map<string, TestState> }>();
+    for (const j of s.jobs) {
+      if (typeof j?.job !== "string" || typeof j.lastMs !== "number" || !Array.isArray(j.tests)) bad("job entry");
+      const tests = new Map<string, TestState>();
+      for (const entry of j.tests) {
+        if (!Array.isArray(entry) || typeof entry[0] !== "string" || typeof entry[1] !== "object" || entry[1] === null) bad(`test entry in ${j.job}`);
+        const [testId, t] = entry;
+        if (!Array.isArray(t.passedOn)) bad(`passedOn of ${testId}`);
+        const st: TestState = { passedOn: new Set(t.passedOn.map(commit)) };
+        if (t.last !== undefined) {
+          if (typeof t.last.buildId !== "string" || typeof t.last.scheduledMs !== "number") bad(`last of ${testId}`);
+          st.last = { fail: t.last.fail === true, buildId: t.last.buildId, scheduledMs: t.last.scheduledMs, commit: t.last.commit === null ? undefined : commit(t.last.commit), mixed: t.last.mixed === true };
+        }
+        if (t.runStart !== undefined) {
+          if (typeof t.runStart.buildId !== "string" || typeof t.runStart.scheduledMs !== "number") bad(`runStart of ${testId}`);
+          st.runStart = { buildId: t.runStart.buildId, scheduledMs: t.runStart.scheduledMs };
+          if (t.runStart.history !== undefined) st.runStart.history = { runs: t.runStart.history.runs, fails: t.runStart.history.fails };
+        }
+        if (t.recent !== undefined) {
+          if (!Array.isArray(t.recent) || t.recent.some((x) => typeof x !== "boolean")) bad(`recent of ${testId}`);
+          st.recent = [...t.recent];
+        }
+        tests.set(testId, st);
+      }
+      restored.set(j.job, { lastMs: j.lastMs, tests });
+    }
+    for (const [k, v] of restored) this.perJob.set(k, v);
   }
 }
 
