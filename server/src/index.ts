@@ -24,7 +24,7 @@ import type { SnapshotPackage } from "./snapshot-curator.js";
 import { Comparator, assertComparable } from "./comparison.js";
 import { WindowHistory } from "./window-history.js";
 import { resolveStreamProfile } from "./stream-profile.js";
-import { CoarseReplayTrigger, COARSE_REPLAY_VIEW } from "./coarse-replay-trigger.js";
+import { CoarseReplayTrigger, COARSE_REPLAY_VIEW, describeRelativeBurst, parseRelativeBurst } from "./coarse-replay-trigger.js";
 import { checkSourceProfile, loadProwLive, maxReplaySpeed, parsePersistHistory, prowEventExtractor, type ProwLiveSource, type ProwPersistenceFeed } from "./prow-live.js";
 import { LiveBuildIngestor } from "./ingest-build.js";
 import { IngestLog, parseIngestLogKeepHours, parseIngestLogPath, restoreFromLog } from "./ingest-log.js";
@@ -78,6 +78,18 @@ const persistHistory: FlakyHistoryDescription | undefined =
     ? describeFlakyHistory(persistHistoryRuns, LIGHTHOUSE_SOURCE === "ingest" ? "the ingested build stream" : "the recorded Prow stream")
     : undefined;
 checkSourceProfile(LIGHTHOUSE_SOURCE, profile.name);
+/**
+ * LIGHTHOUSE_RELATIVE_BURST=1 (ROADMAP C39, opt-in, test-stream only): the live coarse package also counts
+ * C34's relative failure bursts (against its 30 reference windows), and CoarseReplayTrigger replays their
+ * windows grouped as it does the fixed 10. SSE and /status say the values were fixed on Treeherder and Prow,
+ * not on this stream. Unset: packages, SSE, /status and the boot log are as before.
+ */
+const relativeBurstOn = parseRelativeBurst(process.env.LIGHTHOUSE_RELATIVE_BURST, profile.name);
+const relativeBurst = relativeBurstOn
+  ? describeRelativeBurst(
+      LIGHTHOUSE_SOURCE === "ingest" ? "the ingested build stream" : LIGHTHOUSE_SOURCE === "prow" ? "Prow days outside 2026-08-19…11-15 (days inside it are the spent data the values were fixed on)" : "the mock stream",
+    )
+  : undefined;
 /**
  * LIGHTHOUSE_INGEST_LOG=<path> (ROADMAP C37, opt-in, ingest only): every accepted build is appended
  * there and fed back at the next boot, so a restart does not leave the live view without its
@@ -256,9 +268,11 @@ for (const view of ["coarse", "fine"]) windowHistory.track(registry.getObserve("
 // no volume channel, and no Brain reads it.
 // failureCount (ROADMAP C19): only the test-stream profile counts failed tests per window and calls a
 // burst; the mock stream's packages are unchanged.
+// relativeFailureBurst (ROADMAP C39): only with LIGHTHOUSE_RELATIVE_BURST=1, C34's defaults.
 const comparator = new Comparator({
   spikeZThreshold: 2.0, includeBaseline: true, sensitivityPower: 0.8, volumeChannel: true,
   ...(profile.failureBurstAt !== undefined ? { failureCount: profile.failureBurstAt } : {}),
+  ...(relativeBurstOn ? { relativeFailureBurst: true } : {}),
 }, windowHistory);
 // The §A gate asks "did the curator flag this agent", which must not depend on
 // how many tiles a reader is shown: maxTiles drops the smallest first, so with
@@ -463,6 +477,7 @@ const dashboard  = new DashboardServer(
       : undefined,
   persistHistory,
   liveIngestor,
+  relativeBurst,
 );
 
 // Two parallel observation views
@@ -744,3 +759,9 @@ const sourceLabel =
       : "Source: live build ingest (POST /ingest/build)";
 console.log(`[lighthouse] Phase 1 pilot running. ${sourceLabel}, profile: ${profile.name}`);
 if (LIGHTHOUSE_SOURCE === "mock") console.log("[lighthouse] POST /demo/start?scenario=AR|CG|RC to run a scenario");
+if (relativeBurst !== undefined) {
+  console.log(
+    `[lighthouse] LIGHTHOUSE_RELATIVE_BURST=1 — relative failure bursts (z=${relativeBurst.zThreshold}, trim ${relativeBurst.trimTop}, ` +
+      `≥${relativeBurst.minFailures} failures, ≥${relativeBurst.minRefWindows} reference windows) also replay grouped. ${relativeBurst.basis}`,
+  );
+}

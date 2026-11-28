@@ -18,10 +18,55 @@
  * ticks or overlapping multi-window observations. Opt-in (wired under
  * LIGHTHOUSE_PROFILE=test-stream); the default `mock` profile's RuleBrain is
  * untouched.
+ *
+ * With LIGHTHOUSE_RELATIVE_BURST=1 (ROADMAP C39) the coarse package also carries
+ * C34's `relativeFailures`, and its bursts (4–9 failures against an all-pass
+ * reference, which the fixed 10 never names) trigger the same replay. A blind
+ * relative channel names no burst, so it triggers nothing.
  */
 
 import type { BrainDecision } from "./brain-adapter.js";
-import type { SnapshotPackage, ShapeTag } from "./snapshot-curator.js";
+import { C34_RELATIVE_BURST, type SnapshotPackage, type ShapeTag } from "./snapshot-curator.js";
+
+/**
+ * LIGHTHOUSE_RELATIVE_BURST (ROADMAP C39, opt-in): `"1"` turns on C34's relative failure-burst channel in
+ * the live coarse view with its fixed defaults (`C34_RELATIVE_BURST`). Unset or empty: off, and nothing
+ * changes. Any other value, or a profile other than test-stream (whose coarse view is the only one that
+ * counts failures and replays grouped), is refused at boot — the same as an unknown profile.
+ */
+export function parseRelativeBurst(raw: string | undefined, profileName: string): boolean {
+  if (raw === undefined || raw === "") return false;
+  if (raw !== "1") {
+    throw new Error(`LIGHTHOUSE_RELATIVE_BURST must be "1" (C34's fixed defaults) or unset, got "${raw}"`);
+  }
+  if (profileName !== "test-stream") {
+    throw new Error(`LIGHTHOUSE_RELATIVE_BURST needs LIGHTHOUSE_PROFILE=test-stream (the "${profileName}" coarse view counts no failures and replays nothing grouped)`);
+  }
+  return true;
+}
+
+/** How the live relative-burst channel is to be read (SSE `relativeBurst`, GET /status), ROADMAP C39. */
+export interface RelativeBurstDescription {
+  zThreshold: number;
+  trimTop: number;
+  minFailures: number;
+  minRefWindows: number;
+  /** Where these values were chosen and confirmed, and that this stream was not measured. */
+  basis: string;
+}
+
+export function describeRelativeBurst(stream: string): RelativeBurstDescription {
+  return {
+    zThreshold: C34_RELATIVE_BURST.zThreshold,
+    trimTop: C34_RELATIVE_BURST.trimTop,
+    minFailures: C34_RELATIVE_BURST.minFailures,
+    minRefWindows: C34_RELATIVE_BURST.minRefWindows,
+    basis:
+      "C34 fixed these on Treeherder autoland 2026-11-09…11-22 and Prow 2026-08-19…11-15, and confirmed them on " +
+      `Treeherder 2026-10-24…11-06 and the same Prow days; not measured on ${stream}. ` +
+      "A burst is a count against the reference, not a cause; a blind channel names none and is not quiet.",
+  };
+}
 
 /**
  * The `$Q` view the automatic replays write (ROADMAP C27). Its own view, not the live `#fine` one: a
@@ -83,6 +128,14 @@ export class CoarseReplayTrigger {
 
     for (const b of pkg.failures?.bursts ?? []) {
       add(b.windowStart, b.windowEnd, `burst (${b.failed} failed)`);
+    }
+
+    // C39: only when the package carries C34's channel, and only from a reference it could read.
+    const rel = pkg.relativeFailures;
+    if (rel !== undefined && !rel.blind) {
+      for (const b of rel.bursts) {
+        add(b.windowStart, b.windowEnd, `relative burst (${b.failed} failed > ${rel.threshold.toFixed(1)})`);
+      }
     }
 
     const decisions: BrainDecision[] = [];

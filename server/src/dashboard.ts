@@ -39,6 +39,19 @@ import type { BrainDecision } from "./brain-adapter.js";
 import type { SnapshotPackage } from "./snapshot-curator.js";
 import type { ProwLiveStatus } from "./prow-live.js";
 import type { Announcement, FlakyHistoryDescription } from "./prow-persist.js";
+import type { RelativeBurstDescription } from "./coarse-replay-trigger.js";
+
+/** The live coarse package's relative failure-burst channel (ROADMAP C39), as SSE and GET /status name it. */
+export interface RelativeBurstLive {
+  /** The tick (virtual time under a recorded stream) the package was asked at. */
+  at: number;
+  /** Fewer than `minRefWindows` judged reference windows: no burst can be named, and that is not quiet. */
+  blind: boolean;
+  refWindows: number;
+  refMean: number;
+  threshold: number;
+  bursts: Array<{ windowStart: number; windowEnd: number; failed: number }>;
+}
 import { DuplicateBuildError, MAX_INGEST_BODY_BYTES, type IngestBuildResult, type IngestJunitMeta, type IngestStatus } from "./ingest-build.js";
 
 /** Surface DashboardServer needs for POST /ingest/build (ROADMAP C30). */
@@ -295,6 +308,10 @@ export class DashboardServer {
   private budgetCheckedFor = "";
   /** Edge-trigger state for checkGridAlignment(); starts true so only a lapse speaks. */
   private gridAligned = true;
+  /** Only with `relativeBurst` (ROADMAP C39): the relative channel of the last live package, for GET /status. */
+  private lastRelativeLive: RelativeBurstLive | null = null;
+  /** Edge-trigger state for the relative channel's blindness; starts false so only a lapse speaks. */
+  private relativeBlind = false;
 
   constructor(
     private readonly generator: MockStreamGenerator,
@@ -347,7 +364,27 @@ export class DashboardServer {
      * POST /ingest/build. Absent under mock and prow, leaving their routes and payloads unchanged.
      */
     private readonly ingest?: IngestHandler,
+    /**
+     * Only with LIGHTHOUSE_RELATIVE_BURST (ROADMAP C39): the comparator counts C34's relative bursts, and
+     * this says how to read them and that the values were not measured on this stream. SSE and /status
+     * then carry `relativeBurst` (with whether the live channel is blind). Absent: both are unchanged.
+     */
+    private readonly relativeBurst?: RelativeBurstDescription,
   ) {}
+
+  /** The relative channel's state in one live package, as SSE and /status name it (ROADMAP C39). */
+  private relativeLiveOf(pkg: SnapshotPackage | null, ts: number): RelativeBurstLive | null {
+    const r = pkg?.relativeFailures;
+    if (r === undefined) return null;
+    return {
+      at: ts,
+      blind: r.blind,
+      refWindows: r.refWindows,
+      refMean: r.refMean,
+      threshold: r.threshold,
+      bursts: r.bursts.map((b) => ({ windowStart: b.windowStart, windowEnd: b.windowEnd, failed: b.failed })),
+    };
+  }
 
   /**
    * Start HTTP server and wire up SSE broadcast on each adapter tick.
@@ -397,6 +434,20 @@ export class DashboardServer {
     const { observation } = liveSpans(ts, windowMs, LIVE_REFERENCE_WINDOW_COUNT, lens.origin ?? 0);
     const pkg = this.comparator.compare(this.buffer, lens, compare, observation);
     this.reportReferenceBlindness(pkg, windowMs, pkg.comparison!.reference);
+    if (this.relativeBurst !== undefined) {
+      this.lastRelativeLive = this.relativeLiveOf(pkg, ts);
+      // Blind is not quiet (ROADMAP C39): say it once when the relative channel loses its reference.
+      const blind = this.lastRelativeLive?.blind ?? false;
+      if (blind && !this.relativeBlind) {
+        console.warn(
+          `[dashboard] relative failure-burst channel BLIND — ${this.lastRelativeLive!.refWindows} judged reference window(s), ` +
+            `fewer than ${this.relativeBurst.minRefWindows}: no relative burst can be named, which is not quiet`,
+        );
+      } else if (!blind && this.relativeBlind) {
+        console.log(`[dashboard] relative failure-burst channel has its reference again (${this.lastRelativeLive?.refWindows ?? 0} windows)`);
+      }
+      this.relativeBlind = blind;
+    }
     return pkg;
   }
 
@@ -467,6 +518,9 @@ export class DashboardServer {
       ...(persistence !== undefined ? { persistence } : {}),
       // How to read the announcements' `history` (ROADMAP C36). Absent unless LIGHTHOUSE_PERSIST_HISTORY is set.
       ...(persistence !== undefined && this.persistenceHistory !== undefined ? { persistenceHistory: this.persistenceHistory } : {}),
+      // How to read the relative bursts, and whether the live channel is blind (ROADMAP C39). Absent unless
+      // LIGHTHOUSE_RELATIVE_BURST is set.
+      ...(this.relativeBurst !== undefined ? { relativeBurst: { ...this.relativeBurst, live: this.relativeLiveOf(snapshotPkg, snapshot.ts) } } : {}),
     };
 
     for (const res of this.snapshotSubs) sseWrite(res, payload);
@@ -1008,7 +1062,7 @@ export class DashboardServer {
               scoredWindowCount: livePkg.selection.scoredWindowCount,
             }
           : undefined;
-      const body = JSON.stringify(
+      const status =
         replay !== undefined
           ? { ...this.generator.getCurrentLoad(), running: !replay.finished, replay }
           : ingest !== undefined
@@ -1018,7 +1072,11 @@ export class DashboardServer {
                 ingest,
                 ...(liveReference !== undefined ? { liveReference } : {}),
               }
-            : this.generator.getCurrentLoad(),
+            : this.generator.getCurrentLoad();
+      // ROADMAP C39: the relative channel as of the last live package (the tick asks one every second; under
+      // ingest the line above just did). `live: null` until a live package has been asked. Absent unless set.
+      const body = JSON.stringify(
+        this.relativeBurst !== undefined ? { ...status, relativeBurst: { ...this.relativeBurst, live: this.lastRelativeLive } } : status,
       );
       jsonHeaders(res);
       res.end(body);

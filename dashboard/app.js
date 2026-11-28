@@ -53,6 +53,7 @@ function renderSnapshot(data) {
       : "";
   renderAgents(data.agents ?? []);
   renderDomains(data.domains ?? []);
+  relativeBasis = data.relativeBurst ? data.relativeBurst.basis : "";
   renderTiles(data.snapshot);
   renderPersistence(data.persistence, data.persistenceHistory);
   renderQHistory(data.qHistory ?? []);
@@ -209,8 +210,35 @@ function renderFailures(noteId, gridId, pkg) {
   }
   const recent = f.windows.slice(-6).map((w) => `${utcClock(w.windowStart)} ×${w.failed}`).join(" · ");
   const unjudged = f.unjudgedWindows > 0 ? ` · ${f.unjudgedWindows} window(s) cannot be counted (weighted), not read as quiet` : "";
-  note.textContent = `failures (tests failed per window; the cause is not named): ${f.windows.length} window(s) with a failure, ${f.bursts.length} with ${f.burstAt} or more${recent ? ` — ${recent}` : ""}${unjudged}`;
-  grid.innerHTML = f.bursts.map(failureTileHtml).join("");
+  note.textContent = `failures (tests failed per window; the cause is not named): ${f.windows.length} window(s) with a failure, ${f.bursts.length} with ${f.burstAt} or more${recent ? ` — ${recent}` : ""}${unjudged}${relativeNote(pkg.relativeFailures)}`;
+  // Relative bursts (C39) get their own dashed tiles; a window both channels name is drawn once, as fixed.
+  const fixedStarts = new Set(f.bursts.map((b) => b.windowStart));
+  const rel = pkg.relativeFailures && !pkg.relativeFailures.blind
+    ? pkg.relativeFailures.bursts.filter((b) => !fixedStarts.has(b.windowStart))
+    : [];
+  grid.innerHTML = f.bursts.map(failureTileHtml).join("") + rel.map((b) => relativeTileHtml(b, pkg.relativeFailures)).join("");
+}
+
+// ── Relative failure bursts (SnapshotPackage.relativeFailures, ROADMAP C34 / C39) ──
+//
+// Only with LIGHTHOUSE_RELATIVE_BURST=1: a window whose failures exceed what the 30 reference windows
+// usually held (trimmed mean + 3 × scale, at least 3). Dashed, so it is never read as the fixed 10's
+// tile. A blind channel (too few reference windows) names no burst and says so — not quiet.
+// `relativeBasis` is the payload's `relativeBurst.basis`: values fixed on Treeherder and Prow.
+
+let relativeBasis = "";
+
+function relativeNote(r) {
+  if (!r) return "";
+  if (r.blind) return ` · relative channel BLIND (${r.refWindows} of ${r.minRefWindows} reference windows) — not quiet`;
+  return ` · relative: ${r.bursts.length} above ${r.threshold.toFixed(1)} (reference mean ${r.refMean.toFixed(2)} over ${r.refTrimmedWindows} windows)${relativeBasis ? ` · ${relativeBasis}` : ""}`;
+}
+
+function relativeTileHtml(w, r) {
+  return `<div class="tile failures relative">
+    <div class="tile-label"><span class="tile-mag">${w.failed}</span>failed — above this stream's usual (${r.threshold.toFixed(1)})</div>
+    <div class="tile-desc">${utcClock(w.windowStart)}–${new Date(w.windowEnd).toISOString().substr(11, 5)} UTC · ${w.failed} of ${w.total} results · ${w.score.toFixed(1)} scales over the reference</div>
+  </div>`;
 }
 
 // ── Per-test persistence (domain layer, ROADMAP C22) ─────────────────────────
