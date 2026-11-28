@@ -7420,3 +7420,17 @@ C37 (`5000e0b`) をレビューし、運用で踏みうる 4 点を修正した 
 - **`GET /status` にライブ参照の状態を追加 (`server/src/dashboard.ts`)**: `LIGHTHOUSE_SOURCE=ingest` のときだけ `liveReference` (`referenceUsable`・`referenceCoverage`・`aggFuncUnscored`・`window_ms`・`scoredWindowCount`) を返すようにし、台帳の設計メモどおり「緑続きで何も言わない状態」が沈黙か盲目かを `/status` だけで読めるようにした (`mock`・`prow` は出力不変)。
 - **複数ジョブ間の時刻単調化 (`server/src/ingest-build.ts`)**: `LiveBuildIngestor.apply()` の `lastScheduledMs` 更新を `Math.max(this.lastScheduledMs, build.scheduledMs)` に変更し、別ジョブの先行開始ビルドで巻き戻らないようにした。
 - **試験**: 797 件 (+4: `formatCommit` 失敗時・中断ラン送信抑止・複数ジョブ間 `lastScheduledMs` 単調性・`/status` `liveReference` の盲目→使用可能遷移)、全 green。
+
+## 2026-11-28 (7) — 訂正: (5) の実サーバの再起動確認は再起動になっていなかった (nvm の shim の PID)
+
+(5) に「サーバを止めて起動し直すと `/persistence` と `/status` の `ingest` が一致した」と書いたが、**止まっていなかった**。
+
+- `run-lighthouse-ingest.ps1` の既定の `-Node` は `(Get-Command node).Source` で、nvm for Windows では `nvm\.nodejs\node.exe` (shim) に解決される。
+  shim は本物の `nvm\installs\<ver>\node.exe` を子として起こすので、`Start-Process` が返して PID ファイルに書いた番号は shim のもの。
+  `Stop-Process` は shim だけを落とし、本物のサーバは 3001 を握ったまま孤児として残った。
+- 新しい起動は `restored 3 builds (5 persistence announcements)` まで出してから `EADDRINUSE` で落ち、比較は古いプロセスに対して行っていた (一致して当然)。
+  /status に `liveReference` が出ない (レビュー修正前のコードのまま) ことで気付いた。
+- 修正: 既定の `-Node` を `node -p process.execPath` (本物の node.exe) にした。PID ファイルの番号と 3001 の待受のプロセスが一致することを確かめた。
+- やり直し: 孤児を落として起動 (ファイルから 3 ビルド・名乗り 5 件を復元) → PID ファイルで停止 → 3001 が空いたことを確認 → 起動 (PID 5216 → 13676)。
+  `/persistence` (名乗り 5 件) と `/status` の `ingest` は JSON で一致した。保持の挙動そのものは HTTP の試験 (`ingest-log.test.ts`) が別のサーバ実体で固定していた。
+- 同じ形は `run-wiki-collector.ps1` にもある (収集器は 2026-11-17 から停止中なので触っていない。再開するときに同じ修正が要る)。

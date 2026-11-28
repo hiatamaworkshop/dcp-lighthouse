@@ -34,8 +34,8 @@ L1〜L5 は devlog 側の工程名で、台帳の C<n> とは別物。
 - **C34 (2026-11-28)**: 参照 30 窓の失敗数分布に対する相対的な同時多発検出 (`relativeFailureBurst`, opt-in)。上位 10% トリム平均 + 3×scale・最小 3 件・参照 8 窓未満は盲目。確認範囲 (Treeherder 10-24〜11-06 + Prow 89 日) で事前登録した 3 基準が 3/3 成立 (回帰なし失敗窓 4.6% 対 `fixed10` 61.1%、回帰窓との差 +16.9 pt、Prow 10/10・単発 0/379)
 - **C30 (2026-11-28)**: 自前の試験結果・CI をリアルタイム投入する `POST /ingest/build` (`LIGHTHOUSE_SOURCE=ingest`, opt-in)。JSON と JUnit XML (`node --test --test-reporter=junit` 対応) を受け取り `RetentionBuffer`・`PersistenceDetector` (`/persistence`・SSE・任意 `LIGHTHOUSE_PERSIST_HISTORY=N`) へ供給
 - **C37 (2026-11-28)**: 自前のプロジェクトの試験を `ingest` で常時流す。送り手 `server/scripts/lighthouse-test.mjs` (`npm test` が通る・`LIGHTHOUSE_INGEST_URL` 未設定なら素通し・送れなくても終了コードは不変)、
-  受けたビルドを再起動をまたいで保つ `LIGHTHOUSE_INGEST_LOG` (opt-in)、窓を出さない常駐 `server/scripts/run-lighthouse-ingest.ps1`。dcp-lighthouse と agent-hub の実の試験で、名乗りが再起動の前後で一致することまで確認
-- **次**: 台帳 `## 予定` は C37 (実装・レビュー修正済み、クローズ待ち)。未完は条件付きの保留・提案のみ (C7 量チャネル・C11 履歴窓数上限・C18 全 pass 帰無)。整備項目 C31〜C33 は 2026-11-25 に閉じた。詳細は `docs/roadmap.md`
+  受けたビルドを再起動をまたいで保つ `LIGHTHOUSE_INGEST_LOG` (opt-in)、窓を出さない常駐 `server/scripts/run-lighthouse-ingest.ps1`、`/status` の `liveReference` (`ingest` のときだけ。粗窓の参照が盲目か)。dcp-lighthouse と agent-hub の実の試験で、名乗りが再起動の前後で一致することまで確認
+- **次**: 台帳 `## 予定` は空 (C37 は 2026-11-28 に閉じた)。未完は条件付きの保留・提案のみ (C7 量チャネル・C11 履歴窓数上限・C18 全 pass 帰無)。整備項目 C31〜C33 は 2026-11-25 に閉じた。詳細は `docs/roadmap.md`
 - 数値・日付つきの経緯を知りたいときは `grep -n "^## " docs/devlog/ROADMAP_BRIEF.md` で見出しを引き、該当節だけ `Read` する (全文は 600 KB 超)
 
 | | dcp-minecraft | dcp-lighthouse |

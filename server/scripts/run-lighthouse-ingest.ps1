@@ -15,9 +15,14 @@
 #
 # Then send a project's tests to it with LIGHTHOUSE_INGEST_URL=http://localhost:<Port> set
 # (server/scripts/lighthouse-test.mjs; `npm test` in server/ already goes through it).
+#
+# The default -Node is the real node.exe (`process.execPath`), not what `node` resolves to: under nvm
+# for Windows that is a shim that starts the real node as its child, so the PID written below was the
+# shim's, Stop-Process killed only the shim, and the server kept port 3001 (2026-11-28: a "restart"
+# failed with EADDRINUSE and the old process went on answering).
 param(
   [int]$Port = 3001,
-  [string]$Node = (Get-Command node -ErrorAction Stop).Source
+  [string]$Node = (& (Get-Command node -ErrorAction Stop).Source -p "process.execPath")
 )
 $ErrorActionPreference = "Stop"
 $server = Split-Path -Parent $PSScriptRoot

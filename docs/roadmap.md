@@ -4,9 +4,15 @@
 
 ## 予定
 
-- [ ] C37
-
 ## 閉じた項目
+
+- [x] C37 自前のプロジェクトの試験結果を `ingest` で常時流す運用を始める (2026-11-28、送り手・再起動をまたぐ保持・窓を出さない常駐を実装し、dcp-lighthouse と agent-hub の実の試験で再起動の前後の一致まで確認。レビュー修正込み。記録は ROADMAP_BRIEF の 2026-11-28 （5）〜（7） の節)
+  - `server/scripts/lighthouse-test.mjs` (`npm test` が通る・`LIGHTHOUSE_INGEST_URL` 未設定なら素通し・送れなくても終了コードは不変・中断した実行は送らない)。コミットは HEAD、未コミットの変更があれば `HEAD+dirty.<git diff HEAD のハッシュ>`、diff が読めなければ送らない (同じ HEAD での pass を flaky と読ませない)
+  - `ingest-log.ts` (`LIGHTHOUSE_INGEST_LOG`、opt-in・`ingest` 専用): 受理したビルドだけを fsync で追記し、起動時に `LiveBuildIngestor.restore` が同じ経路に流し戻す。書く前に `PersistenceDetector.checkOrder` で順序違反を拒否。書きかけの末尾は切り落として警告、途中の壊れた行は起動を拒否
+  - `server/scripts/run-lighthouse-ingest.ps1`: `conhost --headless` 経由で常駐、ログは `data/logs/`、PID は `data/lighthouse-ingest.pid`。既定の `-Node` は `process.execPath` (nvm の shim の PID を記録すると止めても本物が残る、2026-11-28 （7）)
+  - `/status` に `liveReference` (`ingest` のときだけ。粗窓の参照が盲目か)。`LiveBuildIngestor.lastScheduledMs` を単調に
+  - 実サーバ: dcp-lighthouse 793 件・失敗 0、agent-hub 888 件・失敗 5 (agent-hub に元からある C126 の試験)。2 回目で名乗り 5 件、PID 5216 → 13676 の再起動の前後で `/persistence`・`/status` の `ingest` が一致。試験 797 件、全 green
+  - 残したもの: タスクスケジューラへの登録・常設の `LIGHTHOUSE_INGEST_URL` は user の判断で未設定。保存の切り詰めは無い (約 16 万バイト/ビルド)。自前の全 pass の流れでは粗窓の参照はほぼ盲目 (C18 の状況)
 
 - [x] C30 自前の試験実行・CI 結果をリアルタイム投入できる入口 (`POST /ingest/build`) を作る (2026-11-28、opt-in `LIGHTHOUSE_SOURCE=ingest` で JSON / JUnit XML 両対応を実装・実サーバで 2 ビルド連続失敗の持続名乗りまで確認。記録は ROADMAP_BRIEF の 2026-11-28 （3） の節)
   - `ingest-build.ts` (`parseIngestBuildJson`・`parseIngestBuildJunit`・`LiveBuildIngestor`): JSON ビルド形式と JUnit XML (`prow-import.ts` の `parseJunit` を再利用、`node --test --test-reporter=junit` 対応) を `ProwBuild` へ正規化し、`PersistenceDetector` (FIFO 有界 `passedOn`・FIFO 上限 1000 名乗り・任意 `flakyHistory`) と `RetentionBuffer` / `ObservationOverlay` へ供給
@@ -164,28 +170,3 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 - 先に測ること: その帰無で、平常の flaky (1 万 3 千件に 1 件) が毎回発火しないか。発火するなら、失敗 1 件ではなく「同じ試験が続けて落ちる」を拾う統計が要る
 - C12 の結果 (2026-11-17 (5)): 1 時間窓 × 参照 30 窓では盲目は 1.2% で、この帰無が無くても動く。要るのは短い窓 (10 分以下) を使うときで、急がない
 - 決定になったら完了条件を付ける
-
-### C37. 自前のプロジェクトの試験結果を `ingest` で常時流す運用を始める
-
-設計: C30 (`POST /ingest/build`、ROADMAP_BRIEF 2026-11-28 （3）（4）) の入口を、普段の開発で実際に使う。2026-11-28 に user が起票を決定。
-対象は dcp-lighthouse (`server/`) と agent-hub。どちらも `node --test` なので、JUnit の出力を足すだけで同じ送り口に乗る
-(`--test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=<file>` で従来の表示を残せる)。
-
-- 今の `LiveBuildIngestor` は受けたビルドをメモリにしか持たない。`test-stream` は 1 時間窓 × 参照 30 窓なので、再起動のたびに参照が 30 時間ぶん空になって盲目に戻る。
-  機械の不正終了が続いている (2026-11-27 に 4 回) ため、常時の運用には再起動をまたぐ保持が前提になる
-- 自分の試験はほぼ常に green なので、名乗りは稀なはず。「何も言わない」ことが沈黙か盲目かを `/status` の参照の状態で読めることを確かめる
-- 送り手は試験の結果を変えない。灯台が落ちていても、試験の表示と終了コードは従来のまま
-- 受けた試験名・コミットは個人のローカルのデータとして `data/` の下に置き、コミットしない
-
-#### 完了条件
-- [x] 送り手: プロジェクトの試験を 1 回走らせると、従来の表示と終了コードのまま、1 ビルド (`job` = プロジェクト名・`buildId` は一意・`commit` = HEAD) として `POST /ingest/build` に届く。灯台が落ちているときは警告 1 行だけで、試験の終了コードは変えない
-- [x] 保持: opt-in の `LIGHTHOUSE_INGEST_LOG=<path>` で、受理したビルドだけを追記保存し、起動時に読み戻す。拒否したビルド (`400`・`409`) は保存しない。再起動の前後で `/persistence` の名乗りと `/status` の `ingest` 集計が一致することを試験で固定する。未設定なら従来の挙動のまま
-- [x] 常駐: 灯台サーバを窓を出さずに常駐させる起動手順 (ファイルログ) を用意する。個人環境の部分 (絶対パス・タスク登録) は `CLAUDE.local.md` に置く
-- [x] 実サーバで dcp-lighthouse と agent-hub の試験をそれぞれ 1 回以上流し、`/status`・`/persistence` に届くこと、サーバを再起動しても残ることを確かめ、ROADMAP_BRIEF に記録する
-- [x] 試験が全 green。README のコマンド一覧と CLAUDE.md の現在地・環境変数を更新する
-
-進み (2026-11-28、記録は ROADMAP_BRIEF の 2026-11-28 （5） の節):
-- `server/scripts/lighthouse-test.mjs` (`npm test` が通る)・`ingest-log.ts` (`IngestLog`・`parseIngestLogPath`)・`LiveBuildIngestor.restore`・`PersistenceDetector.checkOrder`・`server/scripts/run-lighthouse-ingest.ps1`。未コミットの変更の上の実行はコミットを `HEAD+dirty.<diff のハッシュ>` にする
-- 実サーバ: dcp-lighthouse 793 件・失敗 0、agent-hub 888 件・失敗 5 (agent-hub に元からある C126 の試験)。agent-hub の 2 回目で名乗り 5 件、再起動後 `/persistence`・`/status` の `ingest` が一致
-- 試験 797 件 (+16、うちレビュー修正 +4)、全 green。タスクスケジューラへの登録はしていない (user の判断)。保存の切り詰めは無い (約 16 万バイト/ビルド)
-- レビュー修正済み (2026-11-28、ROADMAP_BRIEF 2026-11-28 （6）): `lighthouse-test.mjs` の Ctrl+C / シグナル中断時の送信抑止と `git diff` 失敗時の安全側処理 (`undefined`)、`/status` への `liveReference` (`referenceUsable`、ingest のみ) 追加、`LiveBuildIngestor.lastScheduledMs` の単調化。閉じるのは user の一言で (`close C37`)

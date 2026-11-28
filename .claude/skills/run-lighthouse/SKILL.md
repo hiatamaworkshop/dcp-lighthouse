@@ -1,6 +1,6 @@
 ---
 name: run-lighthouse
-description: Launch the dcp-lighthouse observation dashboard and verify it end-to-end — either the mock stream with a scenario (AR/CG/RC) or the recorded Prow test-result stream (LIGHTHOUSE_PROFILE=test-stream, LIGHTHOUSE_SOURCE=prow). Use when asked to run/start the lighthouse server, check the dashboard in a browser, verify replay or snapshot tiles render, confirm Brain decisions or automatic grouped replays fire on a live stream, or check /persistence.
+description: Launch the dcp-lighthouse observation dashboard and verify it end-to-end — either the mock stream with a scenario (AR/CG/RC) or the recorded Prow test-result stream (LIGHTHOUSE_PROFILE=test-stream, LIGHTHOUSE_SOURCE=prow), or live ingestion of your own test runs (LIGHTHOUSE_SOURCE=ingest, POST /ingest/build, the resident server on 3001). Use when asked to run/start the lighthouse server, check the dashboard in a browser, verify replay or snapshot tiles render, confirm Brain decisions or automatic grouped replays fire on a live stream, or check /persistence.
 ---
 
 # dcp-lighthouse — 起動と実地検証
@@ -15,7 +15,7 @@ description: Launch the dcp-lighthouse observation dashboard and verify it end-t
 cd server && npm run dev    # tsc → node dist/index.js。build 込みなので別途 npm run build は不要
 ```
 
-- ポート **3001** 固定。`http://localhost:3001/`
+- ポートは既定 **3001** (`PORT` で変えられる)。`http://localhost:3001/`。3001 が `EADDRINUSE` なら、常駐の ingest サーバ (§6) が使っていないか見る
 - 起動と同時に **baseline 50 events/sec** が流れ始める (シナリオ未実行でもストリームは常時稼働)
 - バックグラウンド実行推奨。フォアグラウンドだと以降の検証コマンドが打てない
 
@@ -154,7 +154,38 @@ curl -s http://localhost:3001/persistence     # 試験ごとの持続の名乗�
   ただしこれは既知の 1 ジョブの固まりの**配線確認**で、見分ける力の証拠ではない (C28 の植え込みが正本)
 - `snapshot.referenceUsable:false` (盲目) が続くなら、まず流した範囲の頭 (参照 30 窓 = 30 時間分が溜まるまで) かを疑う
 
-## 6. 後片付け
+## 6. 自前の試験を受ける (`test-stream` + `ingest`、C30・C37)
+
+自分のプロジェクトの試験結果を `POST /ingest/build` で受ける起動。**常駐させているなら 3001 はそれが使っている**
+(`server/scripts/run-lighthouse-ingest.ps1`、PID は `data/lighthouse-ingest.pid`)。そのときは §1〜5 の起動は `PORT=3002` などで別に立てる
+(`EADDRINUSE` になったらまず常駐を疑う)。常駐の起動・停止の絶対パスは `CLAUDE.local.md`。
+
+```bash
+cd server && npm run build
+LIGHTHOUSE_PROFILE=test-stream LIGHTHOUSE_SOURCE=ingest LIGHTHOUSE_PERSIST_HISTORY=10 \
+  LIGHTHOUSE_INGEST_LOG=../data/ingest/builds.jsonl PORT=3002 node dist/index.js
+```
+
+- 起動ログに `[ingest-log] <path>: restored N builds (M persistence announcements)` が出る。`LIGHTHOUSE_INGEST_LOG` 無しなら「メモリだけ」の 1 行
+- 送る: `LIGHTHOUSE_INGEST_URL=http://localhost:3002 npm test` (server/)。最後に stderr へ `[lighthouse] sent <job> build <id>: N results, F failed` が出る。
+  届かなければ `not sent to ...` の 1 行で、試験の終了コードは変わらない
+- 実験で常駐の `data/ingest/builds.jsonl` を汚さない。試しに流すときは `LIGHTHOUSE_INGEST_LOG` を scratchpad のファイルにするか付けない
+- `/demo/start` は `409` (正常)。`/status` に `ingest` (builds・events・failed・最後のビルド) と `liveReference` (粗窓の参照が使えるか)
+- Ctrl+C などで中断した試験は送らない (`not sent: test run terminated by SIGINT`)。同じ `--job` を並列に走らせると、開始の遅い方が先に届いて
+  早い方が時刻順の検査で `400` になる。並列なら `--job` を分ける
+
+確かめる点:
+
+```bash
+curl -s http://localhost:3002/status          # ingest 欄と liveReference.referenceUsable
+curl -s http://localhost:3002/persistence     # 同じ試験が 2 ビルド続けて落ちると名乗り (history は直前 10 ビルドの失敗数)
+```
+
+- **粗窓のタイルが出ないのはまず盲目**。`/status` の `liveReference.referenceUsable` (snapshot チャネルなら `snapshot.referenceUsable`) を見る。参照は 1 時間窓 × 30 窓で、
+  ビルドがまばら・全部 pass の流れでは参照の分散が 0 になり使えない (C18 の状況)。自前の流れで働くのは主に持続の名乗り
+- 名乗りの `history` 0/0 は履歴不足 (short)。flaky とは読まない
+
+## 7. 後片付け
 
 ```bash
 curl -s http://localhost:3001/demo/stop
