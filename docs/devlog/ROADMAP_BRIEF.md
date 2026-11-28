@@ -7504,3 +7504,23 @@ C37/C38 で自前 `ingest` の常駐運用が始まり、全 pass の流れで�
   3. 全 pass 参照の窓では `minFailures: 2` (既定) 未満の単発失敗で dip タイルを立てない (`gateZ` は `windowScores` に正直に残す)。1 試験の継続失敗はすでに C21/C22 (`PersistenceDetector`) が担っており、役割分担とも一致する (`BB(0.5)` exact + $k \ge 2$ で Prow `10min` 0/35・`60s` 0/114 の誤発火ゼロ、自前 `ingest` 30 ビルドで $k=2$ が `3.36σ`、3 ビルドの起動直後は $k=3$ から `2.55σ`)。
   4. `isUnitReferenceUsable` を curator 内部で共通化し、`curate` ループ (有限の等価正規 $z$ と説明文での明示)・`buildScoringUnits`・`collectUnreachableTails` (上側 `spike` は到達不能、下側 `dip` は $k=n$ で判定)・`windowMde`・`detectSteps` (全 pass 参照では step 検定を抑止し窓の `dip` に委ねる) の 6 箇所を整合させる。
 - **補助案 (C37 自前運用向けの即効策)**: 既に全 pass 参照で動く C34 (`countRelativeFailureBursts`: 参照 8 窓以上で稼働、4 件以上で発火) が `stream-profile.ts` / `index.ts` / `coarse-replay-trigger.ts` には未配線。これを opt-in 接続すれば、固定 10 件未満の 4〜9 件同時失敗でも粗窓発火 → 自動 `#regroup` replay に繋がる (本案と併用すると `#regroup` 側でも全 pass ジョブが `unscoredGroups` に落ちず帰属できる)。
+
+## 2026-11-28 (10) — C39: C34 の相対の同時多発を本番の粗窓と自動 replay につなぐ (`LIGHTHOUSE_RELATIVE_BURST=1`)
+
+(9) の補助案を実装した。規則 (`C34_RELATIVE_BURST`) は動かしていない。
+
+**配線**:
+- `coarse-replay-trigger.ts`: `parseRelativeBurst` (`"1"` だけを受ける。`test-stream` 以外・`"1"` 以外は起動時に拒否)・`describeRelativeBurst` (値と「Treeherder・Prow で決めて確かめた値で、この流れでは未測定。盲目は沈黙ではない」)。`CoarseReplayTrigger.evaluate` が `relativeFailures.bursts` の窓でも `#regroup` を発火する (`relative burst (k failed > 閾値)`)。重複抑止は従来の窓区間ごと、固定 10 件や dip と同じ窓なら 1 件にまとめる。`blind: true` の channel からは発火しない
+- `index.ts`: 本番の `Comparator` に `relativeFailureBurst: true`。起動ログに値と basis。replay の package にも (結合の数えとして) `relativeFailures` が載る
+- `dashboard.ts`: SSE の payload と `/status` に `relativeBurst` (値・basis・`live` = 直近の live package の `blind`・`refWindows`・`refMean`・`threshold`・`bursts`)。盲目に落ちたとき・戻ったときに 1 行ずつ警告。未設定なら payload・`/status` はキーごと無い
+- `dashboard/app.js`・`index.html`: 失敗数パネルの注記に相対の channel の状態 (盲目なら `BLIND … not quiet`)、相対だけが拾った窓を破線のタイルで描く (固定 10 件と同じ窓は固定のタイル 1 枚)。**ブラウザでは見ていない** (このセッションにブラウザの道具が無い。`node --check` の構文検査と SSE・`/status` の中身までは確認)
+
+**分かったこと (試験に固定)**: 全 pass の参照の上で 1 ジョブに 6 件の同時失敗を置くと、opt-in なしでは `#regroup` に届かず (dip も固定 10 件も立たない)、opt-in ありでは 1 回だけ届く。
+ただし届いた replay は **3 ジョブとも `unscoredGroups`** (ジョブ別の参照も全 pass で分散 0) で、帰属しない。C39 は replay まで運ぶだけで、帰属は C18 の帰無が要る。
+
+**本番の配線での Prow 89 日** (`run-prow-c39-report`、2026-08-19〜11-15・7,290,630 事象・使用済みの探索データ): `replayThroughShippedWiring` (`RetentionBuffer` → `WindowHistory` → `Comparator`) と C34 レポートの省メモリの数え (`prow-c34-stream.ts` に切り出した) を窓ごとに突き合わせた。
+相対 13 窓・固定 10 件 10 窓とも、窓も件数も一致 (片側だけ 0・件数違い 0)。package 2,134・相対の盲目 8 も一致。分けると `>=10` 10/10・3〜9 件 3/6・2 件 0/39・1 件 0/379 (C34 の記録どおり)。本番側は 19.9 秒。切り出し後の C34 レポートの出力も記録どおり。
+
+**実サーバ** (別ポート 3011、`prow` 2026-09-24〜26 を 3600 倍): 起動直後は相対の channel が盲目 (参照 0 窓) と警告し、8 窓で戻る。相対だけが拾う窓の 1 つ (2026-09-26 01 時、5 件) が `coarse dip (11.6σ) + relative burst (5 failed > 3.0)` として `#regroup` に届いた (この窓は参照に失敗があり dip も立った)。`/status` の `relativeBurst.live` に同じ窓。常駐の受け手 (3001) では有効にしていない (C39 の決めどおり、自前の流れでは未測定)。
+
+**試験**: 815 件 (+8)、全 green。発火する経路・盲目で発火しない経路 (SSE と `/status` が盲目と言う)・未設定で package と `/status` にキーが無い・不正な値と `mock` での起動拒否 (子プロセスで `index.js` を起こし、listen する前に落ちることまで)。

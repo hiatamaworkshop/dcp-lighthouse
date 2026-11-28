@@ -4,11 +4,16 @@
 
 ## 予定
 
-- [ ] C39
 - [ ] C40
 - [ ] C18
 
 ## 閉じた項目
+
+- [x] C39 参照に対する同時多発 (C34) を本番の粗窓と自動 replay につなぐ (2026-11-28、opt-in `LIGHTHOUSE_RELATIVE_BURST=1` で実装・Prow 89 日を本番の配線に流して C34 の数えと窓・件数まで一致。記録は ROADMAP_BRIEF の 2026-11-28 （10） の節)
+  - `coarse-replay-trigger.ts` (`parseRelativeBurst`・`describeRelativeBurst`・`relativeFailures.bursts` での発火、盲目からは発火しない)・`index.ts` (本番の `Comparator` に `relativeFailureBurst: true`)・`dashboard.ts` (SSE と `/status` の `relativeBurst`: 値・「この流れでは未測定」・直近の live package の盲目と発火)・`dashboard/app.js` (相対だけの窓を破線のタイル)
+  - 全 pass の参照の上の 6 件は opt-in でだけ `#regroup` に届くが、その replay は 3 ジョブとも `unscoredGroups` で帰属しない (帰属は C18)
+  - `run-prow-c39-report.ts` (`prow-c34-stream.ts` に C34 の数えを切り出し): 相対 13 窓・固定 10 件 10 窓・package 2,134・盲目 8 が一致。実サーバ (3011、`prow` 09-24〜26) で 09-26 01 時の 5 件が `#regroup` に届いた
+  - 試験 815 件 (+8)、全 green。dashboard の描画は**ブラウザで見ていない** (構文検査と SSE・`/status` の中身まで)。常駐の受け手 (3001) では未有効 (有効にするかは user 判断)
 
 - [x] C38 受けたビルドの保存 (`LIGHTHOUSE_INGEST_LOG`) を、名乗りを変えずに切り詰める (2026-11-28、user 決定で C37 の積み残しから起票。古いビルドを先頭行のチェックポイントへ畳む方式で実装し、試験と実の `builds.jsonl` の写しで再起動の前後の一致を確認。記録は ROADMAP_BRIEF の 2026-11-28 （8） の節)
   - 単に消すと、続いている連続失敗の途中で切れたとき同じ失敗を二度名乗る (試験で再現: 全部なら `h1` の 1 件、後ろだけなら `h6` の 1 件)。flaky の履歴・通った commit・通算・再送の記憶も欠ける
@@ -172,19 +177,21 @@ C10 の結果: 10 s 腕は全体 1 時間で成り立つが、V-a (60 s 窓・�
 - 案: 上限を窓の幅ごとに窓数で持つ (60 s 窓で 24 時間は 1440 件の要約)。6〜24 時間のどこから成り立つかは未測定で、決めるときに先に測る
 
 ### C39. 参照に対する同時多発 (C34) を本番の粗窓と自動 replay につなぐ
+状態: 完了 (2026-11-28)
+
 設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-28 (2) (C34 の規則と確認)・2026-11-28 (9) (補助案)。2026-11-28 に user 決定。
 C34 の `relativeFailureBurst` は全 pass の参照でも動く (参照の平均 0 なら閾値 3、4 件から発火) が、使っているのはレポートと `prow-replay.ts` だけで、`index.ts`・`coarse-replay-trigger.ts` には無い。
 本番の粗窓が固定 10 件の `failures.bursts` でしか自動 replay を起こさないため、4〜9 件の同時失敗は下向きタイルが立たない限り `#regroup` に届かない。
 閾値は Treeherder と Prow で決めて確かめたもので、自前の `ingest` の流れでは未測定。常駐の受け手で有効にするかは、入ってから user が決める。
 
 #### 完了条件
-- [ ] `LIGHTHOUSE_RELATIVE_BURST=1` (opt-in。`test-stream` 以外・`1` 以外の値は起動時に拒否) で、本番の粗窓の curator に `relativeFailureBurst: true` (`C34_RELATIVE_BURST` の既定値) が渡り、package に `relativeFailures` が載る
-- [ ] 未設定なら package・SSE・`/status`・起動ログがバイト同一 (既存の試験が無修正で通る)
-- [ ] `CoarseReplayTrigger` が `relativeFailures.bursts` の窓でも `#regroup` の replay を発火する (重複抑止は従来と同じ窓区間ごと)。`relativeFailures.blind: true` の窓では発火せず、盲目であることを SSE と `/status` が名乗る
-- [ ] SSE と `/status` が「閾値は Treeherder・Prow で決めて確かめた値で、この流れでは未測定」と名乗る (C36 と同じ形)
-- [ ] dashboard の失敗数のパネルに、相対の同時多発を固定 10 件の `bursts` と区別して描く (ブラウザで見たか、見ていないかを記録に書く)
-- [ ] 試験: 発火する経路・盲目で発火しない経路・未設定でのバイト同一・不正な値での起動拒否
-- [ ] 記録済みの Prow 89 日を本番の配線 (`replayThroughShippedWiring`) に流し、package の `relativeFailures.bursts` の窓と件数が `run-treeherder-c34-report` の Prow 側の数えと一致する
+- [x] `LIGHTHOUSE_RELATIVE_BURST=1` (opt-in。`test-stream` 以外・`1` 以外の値は起動時に拒否) で、本番の粗窓の curator に `relativeFailureBurst: true` (`C34_RELATIVE_BURST` の既定値) が渡り、package に `relativeFailures` が載る
+- [x] 未設定なら package・SSE・`/status`・起動ログがバイト同一 (既存の試験が無修正で通る)
+- [x] `CoarseReplayTrigger` が `relativeFailures.bursts` の窓でも `#regroup` の replay を発火する (重複抑止は従来と同じ窓区間ごと)。`relativeFailures.blind: true` の窓では発火せず、盲目であることを SSE と `/status` が名乗る
+- [x] SSE と `/status` が「閾値は Treeherder・Prow で決めて確かめた値で、この流れでは未測定」と名乗る (C36 と同じ形)
+- [x] dashboard の失敗数のパネルに、相対の同時多発を固定 10 件の `bursts` と区別して描く (ブラウザで見たか、見ていないかを記録に書く) — ブラウザでは見ていない (構文検査と SSE の中身まで)
+- [x] 試験: 発火する経路・盲目で発火しない経路・未設定でのバイト同一・不正な値での起動拒否
+- [x] 記録済みの Prow 89 日を本番の配線 (`replayThroughShippedWiring`) に流し、package の `relativeFailures.bursts` の窓と件数が `run-treeherder-c34-report` の Prow 側の数えと一致する
 
 ### C40. 2 値の厳密な裾を `EXACT_MAX_COUNT` を越えても計算する
 設計: `docs/devlog/ROADMAP_BRIEF.md` 2026-11-28 (9) の 2 番。2026-11-28 に user 決定 (C18 の前提)。`exactZ` は `n > EXACT_MAX_COUNT` (2,000、`snapshot-curator.ts`) で一律 `null` を返し正規近似へ落ちる。

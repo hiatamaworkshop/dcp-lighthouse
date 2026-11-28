@@ -338,9 +338,10 @@ Phase 0 + Phase 1 実装完了。以後の工程は L1–L5 に再編済み — 
 - [x] **自前の試験実行・CI のリアルタイム投入** (2026-11-28、C30) — `LIGHTHOUSE_SOURCE=ingest` (opt-in) で `POST /ingest/build` を有効化 (`ingest-build.ts`)。JSON ビルド形式と JUnit XML (`node --test --test-reporter=junit` 対応) を受け取り、`RetentionBuffer`・`ObservationOverlay`・`PersistenceDetector` (`/persistence`・SSE・任意 `LIGHTHOUSE_PERSIST_HISTORY=N`) へ供給。`mock`・`prow` の既定出力は不変。詳細は ROADMAP_BRIEF.md 2026-11-28 (3)
 - [x] **自前のプロジェクトの試験を常時流す** (2026-11-28、C37) — 送り手 `server/scripts/lighthouse-test.mjs` (`npm test` が通る。`LIGHTHOUSE_INGEST_URL` 未設定なら素通し)、受けたビルドを再起動をまたいで保つ `LIGHTHOUSE_INGEST_LOG` (opt-in、`ingest-log.ts`)、窓を出さない常駐 `server/scripts/run-lighthouse-ingest.ps1`。詳細は ROADMAP_BRIEF.md 2026-11-28 (5)
 - [x] **受けたビルドの保存の切り詰め** (2026-11-28、C38) — `LIGHTHOUSE_INGEST_LOG_KEEP_HOURS=N` (opt-in) で、起動時に N 時間より古いビルドをファイル先頭行のチェックポイント (検出器の状態・名乗り・通算・再送の記憶) に畳む。ただ消すと続いている連続失敗を二度名乗るため。再起動の前後で `/persistence`・`/status` が一致することを試験と実ログの写しで確認。詳細は ROADMAP_BRIEF.md 2026-11-28 (8)
-- [ ] **次**: 未完は条件付きの保留・提案のみ — 全 pass の参照の帰無 (C18)・量チャネル (C7)・窓要約履歴の窓数上限 (C11)。仮想ストリームの常設 (F3) は未着手
+- [x] **相対の同時多発を本番の自動 replay へ** (2026-11-28、C39) — `LIGHTHOUSE_RELATIVE_BURST=1` (opt-in、`test-stream` のみ) で本番の粗窓に C34 の `relativeFailures` を載せ、その窓も `#regroup` で replay する。SSE・`/status` に値・「この流れでは未測定」・盲目かを載せる。Prow 89 日を本番の配線に流して C34 の数えと窓・件数が一致。全 pass の参照では届いた replay がジョブ別に盲目 (帰属は C18)。詳細は ROADMAP_BRIEF.md 2026-11-28 (10)
+- [ ] **次**: 2 値の厳密な裾 (C40) → 全 pass の参照の帰無 (C18)。保留・提案は量チャネル (C7)・窓要約履歴の窓数上限 (C11)。仮想ストリームの常設 (F3) は未着手
 
-現在テスト計 807 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
+現在テスト計 815 件、全 green。作業の単位と判断待ちは [docs/roadmap.md](docs/roadmap.md)。
 
 ## 実データ較正期間の運用
 
@@ -369,6 +370,7 @@ node dist/run-treeherder-import.js --from 2026-11-07 --to 2026-11-22           #
 node dist/run-treeherder-c29-report.js --from 2026-11-09 --to 2026-11-22      # 本物の回帰に対する粗窓・持続・自動 replay の名乗り (C29)
 node dist/run-treeherder-c35-report.js --from 2026-10-24 --to 2026-11-06      # ジョブ種の持続の名乗りを flaky の履歴 (直近 10 回の失敗の割合) で分けた精度と回帰の捕捉 (C35)
 node dist/run-treeherder-c34-report.js --from 2026-10-24 --to 2026-11-06      # 相対的な同時多発検出 (C34_RELATIVE_BURST) の Treeherder + Prow 89 日比較 (C34)
+node --max-old-space-size=4096 dist/run-prow-c39-report.js                     # Prow 89 日を本番の配線に流し、相対の同時多発の窓・件数を C34 の数えと突き合わせる (C39、不一致なら終了コード 1)
 node dist/run-otlp-receiver.js             # OTel Demo の受け口 (:4318、OTLP/HTTP JSON のみ、data/otel/)
 node dist/run-otel-flag-schedule.js        # H4 の障害フラグ切替 (既定: paymentFailure 50%、休止 10%、≒ 24 h)。真値は data/otel/flags.jsonl
 node dist/run-otel-report.js --from <day> --to <day>   # H4。p=1 の配線確認が通らなければ判定を出さない (判定日 10-03 は使用済み)
@@ -432,6 +434,7 @@ curl -s http://localhost:3001/brain
 | `BRAIN_MODE` | `rule` | `rule` \| `claude` |
 | `LIGHTHOUSE_PROFILE` | `mock` | `mock` \| `test-stream`。`test-stream` は CI の試験結果向け (1 時間窓・参照 30 窓・鮮度ゾーン 34 時間・package に失敗数と同時多発)。モックの 50 件/秒を流すと 34 時間分を保持するのでメモリが要る。未知の名前は起動時に落ちる (`stream-profile.ts`) |
 | `LIGHTHOUSE_SOURCE` | `mock` | `mock` \| `prow` \| `ingest`。`prow` は `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可 (`PROW_REPLAY_FROM` / `PROW_REPLAY_TO` 必須、`PROW_REPLAY_SPEED` 既定 `3600`・上限 `7200`・C26、`PROW_DIR` / `PROW_JOBS` 任意、`prow-live.ts`)。`ingest` も `LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可で、`POST /ingest/build` (JSON または `Content-Type: application/xml` で JUnit XML + `?job=...&commit=...`) を有効化し `RetentionBuffer` と `/persistence` へ流す (C30、`ingest-build.ts`)。同じ `job` + `buildId` の再送は `409` |
+| `LIGHTHOUSE_RELATIVE_BURST` | (未設定) | `1` だけ。`LIGHTHOUSE_PROFILE=test-stream` のときのみ指定可 (それ以外・`1` 以外は起動時に落ちる)。本番の粗窓の package に C34 の `relativeFailures` (参照 30 窓のトリム平均 + 3×scale・最小 3 件・参照 8 窓未満は盲目) を載せ、その窓も `#regroup` で自動 replay する。SSE と `/status` の `relativeBurst` に値・「Treeherder・Prow で決めた値で、この流れでは未測定」・直近の live package の盲目と発火を載せる (C39、`coarse-replay-trigger.ts`)。未設定なら出力は従来のまま |
 | `LIGHTHOUSE_PERSIST_HISTORY` | (未設定) | 正の整数 N。`LIGHTHOUSE_SOURCE=prow` または `ingest` のとき指定可 (それ以外・正の整数以外は起動時に落ちる)。持続の名乗りに試験の直近 N ビルドの失敗数 (`history`) を添え、`/persistence` の `flakyHistory`・SSE の `persistenceHistory` に読み方 (quiet = 失敗 ≤ 10%) と「Treeherder で決めた値で、この流れでは未測定」を載せる (C36)。未設定なら出力は従来のまま |
 | `LIGHTHOUSE_INGEST_LOG` | (未設定) | パス。`LIGHTHOUSE_SOURCE=ingest` のときだけ指定可 (それ以外は起動時に落ちる)。受理したビルドだけを 1 行 1 ビルドで追記 (fsync) し、次の起動で同じ経路に順に流し戻す。再起動で参照 30 窓が空にならない。末尾の書きかけの行は切り落として警告、途中の壊れた行は起動を拒否 (C37、`ingest-log.ts`)。書けないビルドは何も反映せず `500`。未設定ならメモリだけ (従来どおり) |
 | `LIGHTHOUSE_INGEST_LOG_KEEP_HOURS` | (未設定) | 正の整数 (時間)。`LIGHTHOUSE_INGEST_LOG` があるときだけ指定可、プロファイルの保持の幅 (`test-stream` で 34 時間) 未満は起動時に落ちる。起動時に、先頭から続く N 時間より古いビルドをファイル先頭行のチェックポイント (検出器の状態・名乗り・通算・再送の記憶) へ畳む (tmp に書いて fsync してから rename、書けなければ警告して元のまま)。チェックポイントを書いた起動と `LIGHTHOUSE_PERSIST_HISTORY` が違えば起動を拒否 (C38、`ingest-log.ts`)。未設定なら全部を残す (C37 のまま) |
